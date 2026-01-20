@@ -1,0 +1,83 @@
+{
+  "verbose": true,
+  "command_prefix": "!",
+  "destination_guild_ids": [
+    "1431314516364230689"
+  ],
+  "source_guild_ids": [],
+  "source_channel_ids_online": [
+    1434967523601940655,
+    1434971502817706035,
+    1435277188839768206,
+    1435277272105091197,
+    1435268379521847369,
+    1435268468457996482,
+    1434974844444741653,
+    1435268203231314011,
+    1438910711978922216
+  ],
+  "source_channel_ids_instore": [
+    1434967990406873169,
+    1435277398886060073,
+    1434974855215714354,
+    1435268708632363200
+  ],
+  "source_channel_ids_clearance": [
+    1435308747416141857,
+    1435308842387767356,
+    1435308770128298044,
+    1435308863795626014
+  ],
+  "source_channel_ids_misc": [
+    744273602924511283
+  ],
+  "monitor_category_ids": [],
+  "monitor_all_destination_channels": false,
+  "monitor_webhook_messages_only": true,
+  "send_min_interval_seconds": 0.75,
+  "enable_default_fallback": false,
+  "enable_raw_link_unwrap": true,
+  "send_raw_links_followup": true,
+  "raw_links_followup_max": 5,
+  "mirrorworld_route_online": {
+    "1438969997178306661": 1438969997178306661,
+    "1438970053352751215": 1438970053352751215,
+    "1435985494356918333": 1435985494356918333
+  },
+  "mirrorworld_route_instore": {
+    "1434974833019457707": 1434974833019457707,
+    "1434974822311661719": 1434974822311661719,
+    "1435984551217205309": 1435984551217205309,
+    "1435986120574894130": 1435986120574894130,
+    "1438996999793021008": 1438996999793021008,
+    "1435990107747516586": 1435990107747516586
+  },
+  "smartfilter_destinations": {
+    "AMAZON": 1435066421133443174,
+    "AMAZON_FALLBACK": 1438433667067150416,
+    "AFFILIATED_LINKS": 1435308472639160522,
+    "UPCOMING": 1434974811695747173,
+    "INSTORE_LEADS": 1438433642408841329,
+    "INSTORE_SEASONAL": 1435984551217205309,
+    "INSTORE_SNEAKERS": 1435986120574894130,
+    "INSTORE_CARDS": 1435990107747516586,
+    "INSTORE_THEATRE": 1438996999793021008,
+    "MAJOR_STORES": 1434974833019457707,
+    "DISCOUNTED_STORES": 1434974822311661719,
+    "MONITORED_KEYWORD": 1434974878833967227,
+    "DEFAULT": 1435066509860012073
+  },
+  "global_trigger_destinations": {
+    "PRICE_ERROR": 1435985494356918333,
+    "PROFITABLE_FLIP": 1435998778871119942,
+    "LUNCHMONEY_FLIP": 1439912388555182151
+  },
+  "recent_ttl_seconds": 10,
+  "global_duplicate_ttl_seconds": 300,
+  "monitor_embed_ttl_seconds": 300,
+  "link_tracking_ttl_seconds": 86400,
+  "fetchall_default_destination_category_id": 1437856372300451851,
+  "fetchall_max_messages_per_channel": 400,
+  "edit_cooldown_seconds": 30,
+  "fallback_channel_id": 1435066509860012073
+}

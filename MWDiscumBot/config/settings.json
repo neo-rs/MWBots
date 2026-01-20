@@ -1,0 +1,23 @@
+{
+    "verbose":  true,
+    "source_guild_ids":  [
+                             "667532381376217089",
+                             "493898302178197505",
+                             "1202423534891311176",
+                             "1081282387507429387",
+                             "521154543195521025",
+                             "663388213964046336"
+                         ],
+    "mirrorworld_server_id":  "1431314516364230689",
+    "duplicate_ttl_seconds":  10,
+    "skip_webhook_messages":  false,
+    "skip_webhook_usernames":  [
+                                  "Rerouter"
+                              ],
+    "rewrite_role_mentions": true,
+    "rewrite_channel_mentions": true,
+    "rewrite_user_mentions": false,
+    "short_embed_char_threshold":  50,
+    "short_embed_retry_delay_seconds":  5,
+    "short_embed_max_wait_seconds":  35
+}

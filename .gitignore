@@ -1,0 +1,23 @@
+# Secrets (never commit)
+**/config/tokens.env
+**/*.env
+!**/*.env.example
+
+# Webhook maps are secrets (never commit)
+**/config/channel_map.json
+
+# Runtime / logs (never commit)
+**/logs/**
+**/*.log
+**/*.jsonl
+**/config/systemlogs.json
+**/*.lock
+**/.d2d.lock
+
+# Python junk
+**/__pycache__/
+**/*.pyc
+
+# Discum channel caches are runtime artifacts (never commit)
+MWDiscumBot/config/source_channels.json
+MWDiscumBot/config/destination_channels.json
