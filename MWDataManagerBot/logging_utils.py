@@ -301,3 +301,32 @@ def log_filter(msg: str, *, event: Optional[str] = None, **fields: Any) -> None:
         entry.update(fields)
     write_bot_log(entry)
 
+
+def log_smartfilter(tag: str, decision: str, details: Optional[Dict[str, Any]] = None) -> None:
+    """
+    Structured terminal + file logging for smartfilter decisions.
+
+    Example console line:
+      [SMARTFILTER:PROFITABLE_FLIP:TRIGGER] {"reason":"roi_pass", ...}
+    """
+    details = dict(details or {})
+    try:
+        payload = json.dumps(details, ensure_ascii=False, default=str)
+    except Exception:
+        payload = "{}"
+
+    _tag_print(f"SMARTFILTER:{tag}:{decision}", _F.YELLOW, payload)
+
+    entry: Dict[str, Any] = {
+        "level": "INFO",
+        "tag": "SMARTFILTER",
+        "smartfilter_tag": str(tag or ""),
+        "decision": str(decision or ""),
+        "details": details,
+    }
+    write_bot_log(entry)
+    try:
+        write_trace_log({**entry, "event": "smartfilter"})
+    except Exception:
+        pass
+

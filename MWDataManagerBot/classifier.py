@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import settings_store as cfg
 from keywords import check_keyword_match
-from logging_utils import log_debug
+from logging_utils import log_debug, log_smartfilter
 from patterns import (
     ALL_STORE_PATTERN,
     AMAZON_ASIN_PATTERN,
@@ -71,8 +71,15 @@ def store_category_from_location(where_location: str) -> Optional[str]:
     return None
 
 
-def is_truly_upcoming(text: str) -> bool:
-    """Ported from datamanagerbot: conservative validation for UPCOMING routing."""
+def is_truly_upcoming_explain(text: str) -> Dict[str, Any]:
+    """
+    Explainable UPCOMING validator (single source of truth).
+    Returns dict with:
+      - reason
+      - hard_exclusion_hit
+      - has_future_indicator
+      - matched_future_indicators
+    """
     text_lower = (text or "").lower()
 
     hard_exclusion_patterns = [
@@ -93,8 +100,16 @@ def is_truly_upcoming(text: str) -> bool:
         r"lowest\s+ever\s+drop",
     ]
     for pat in hard_exclusion_patterns:
-        if re.search(pat, text_lower, re.IGNORECASE):
-            return False
+        try:
+            if re.search(pat, text_lower, re.IGNORECASE):
+                return {
+                    "reason": "hard_exclusion",
+                    "hard_exclusion_hit": pat,
+                    "has_future_indicator": False,
+                    "matched_future_indicators": [],
+                }
+        except Exception:
+            continue
 
     future_indicator_patterns = [
         r"coming\s+soon",
@@ -117,8 +132,36 @@ def is_truly_upcoming(text: str) -> bool:
         r"\braffle\b",
         r"\beql\b",
     ]
-    has_future = any(re.search(p, text_lower, re.IGNORECASE) for p in future_indicator_patterns)
-    return bool(has_future)
+    matched: List[str] = []
+    for pat in future_indicator_patterns:
+        if len(matched) >= 5:
+            break
+        try:
+            if re.search(pat, text_lower, re.IGNORECASE):
+                matched.append(pat)
+        except Exception:
+            continue
+    if not matched:
+        return {
+            "reason": "missing_future_indicator",
+            "hard_exclusion_hit": None,
+            "has_future_indicator": False,
+            "matched_future_indicators": [],
+        }
+    return {
+        "reason": "future_indicator_present",
+        "hard_exclusion_hit": None,
+        "has_future_indicator": True,
+        "matched_future_indicators": matched,
+    }
+
+
+def is_truly_upcoming(text: str) -> bool:
+    """Boolean wrapper for UPCOMING validator."""
+    try:
+        return bool(is_truly_upcoming_explain(text or "").get("has_future_indicator"))
+    except Exception:
+        return False
 
 
 def _store_domain_pattern() -> re.Pattern[str]:
@@ -242,9 +285,19 @@ def select_target_channel_id(
             if cfg.SMARTFILTER_INSTORE_LEADS_CHANNEL_ID:
                 return cfg.SMARTFILTER_INSTORE_LEADS_CHANNEL_ID, "INSTORE_LEADS"
 
-    # 9) UPCOMING (online only)
-    if cfg.SMARTFILTER_UPCOMING_CHANNEL_ID and (source_group == "online") and TIMESTAMP_PATTERN.search(text_to_check or "") and is_truly_upcoming(text_to_check or ""):
-        return cfg.SMARTFILTER_UPCOMING_CHANNEL_ID, "UPCOMING"
+    # 9) UPCOMING (online only; explainable)
+    if cfg.SMARTFILTER_UPCOMING_CHANNEL_ID and (source_group == "online") and TIMESTAMP_PATTERN.search(text_to_check or ""):
+        upcoming_explain = is_truly_upcoming_explain(text_to_check or "")
+        if trace is not None:
+            try:
+                trace.setdefault("classifier", {})["upcoming_explain"] = upcoming_explain
+            except Exception:
+                pass
+        if upcoming_explain.get("has_future_indicator"):
+            log_smartfilter("UPCOMING", "TRIGGER", {**(trace.get("classifier", {}) if trace else {}), **upcoming_explain})
+            return cfg.SMARTFILTER_UPCOMING_CHANNEL_ID, "UPCOMING"
+        if cfg.VERBOSE:
+            log_smartfilter("UPCOMING", "SKIP", {**(trace.get("classifier", {}) if trace else {}), **upcoming_explain})
 
     # 10) AFFILIATED_LINKS / other stores (online only)
     if (source_group == "online") and cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID:
@@ -379,8 +432,18 @@ def detect_all_link_types(
     if instore_selection:
         results.append(instore_selection)
 
-    if cfg.SMARTFILTER_UPCOMING_CHANNEL_ID and (source_group == "online") and TIMESTAMP_PATTERN.search(text_to_check or "") and is_truly_upcoming(text_to_check or ""):
-        results.append((cfg.SMARTFILTER_UPCOMING_CHANNEL_ID, "UPCOMING"))
+    if cfg.SMARTFILTER_UPCOMING_CHANNEL_ID and (source_group == "online") and TIMESTAMP_PATTERN.search(text_to_check or ""):
+        upcoming_explain = is_truly_upcoming_explain(text_to_check or "")
+        if trace is not None:
+            try:
+                trace.setdefault("classifier", {})["upcoming_explain"] = upcoming_explain
+            except Exception:
+                pass
+        if upcoming_explain.get("has_future_indicator"):
+            results.append((cfg.SMARTFILTER_UPCOMING_CHANNEL_ID, "UPCOMING"))
+            log_smartfilter("UPCOMING", "TRIGGER", {**(trace.get("classifier", {}) if trace else {}), **upcoming_explain})
+        elif cfg.VERBOSE:
+            log_smartfilter("UPCOMING", "SKIP", {**(trace.get("classifier", {}) if trace else {}), **upcoming_explain})
 
     # Affiliate links only if not instore-classified and no Amazon hard match
     if not any(tag.startswith("INSTORE") or tag in {"MAJOR_STORES", "DISCOUNTED_STORES"} for _, tag in results):
