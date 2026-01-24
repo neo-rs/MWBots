@@ -855,6 +855,25 @@ def run_bot(*, settings: Dict[str, Any], token: str) -> Optional[int]:
         except Exception:
             pass
 
+        # Slash commands: sync ONLY to destination guild(s) (fast propagation).
+        try:
+            dest_guild_ids = sorted(int(x) for x in (cfg.DESTINATION_GUILD_IDS or set()) if int(x) > 0)
+        except Exception:
+            dest_guild_ids = []
+        if dest_guild_ids:
+            try:
+                synced = 0
+                for gid in dest_guild_ids:
+                    try:
+                        await bot.tree.sync(guild=discord.Object(id=int(gid)))
+                        synced += 1
+                    except Exception:
+                        continue
+                if synced:
+                    log_info(f"Slash commands synced to {synced} destination guild(s).")
+            except Exception:
+                pass
+
     @bot.event
     async def on_message(message) -> None:
         # Ensure prefix commands still work even when forwarder gating is strict.

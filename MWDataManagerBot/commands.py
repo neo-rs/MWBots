@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-from fetchall import iter_fetchall_entries, run_fetchall, upsert_mapping
+from fetchall import iter_fetchall_entries, run_fetchall, run_fetchsync, set_ignored_channel_ids, upsert_mapping
 from logging_utils import log_info, log_warn
 import settings_store as cfg
 
@@ -24,9 +24,31 @@ def register_commands(*, bot, forwarder) -> None:
         except Exception:
             return ""
 
+    def _parse_csv_ints(text: str) -> List[int]:
+        out: List[int] = []
+        for part in (text or "").replace("\n", ",").split(","):
+            p = part.strip()
+            if not p:
+                continue
+            try:
+                v = int(p)
+            except Exception:
+                continue
+            if v > 0:
+                out.append(v)
+        # De-dupe preserving order
+        seen = set()
+        dedup: List[int] = []
+        for v in out:
+            if v in seen:
+                continue
+            seen.add(v)
+            dedup.append(v)
+        return dedup
+
     @bot.command(name="fetchall")
     async def fetchall_cmd(ctx) -> None:
-        """Run fetch-all for all configured guild entries."""
+        """Run fetch-all for all configured guild entries (mirror channel setup)."""
         try:
             entries = iter_fetchall_entries()
             if not entries:
@@ -48,6 +70,62 @@ def register_commands(*, bot, forwarder) -> None:
         except Exception as e:
             log_warn(f"fetchall command failed: {e}")
             await ctx.send(f"Fetchall failed: {type(e).__name__}: {e}")
+
+    @bot.command(name="fetchsync")
+    async def fetchsync_cmd(ctx, source_guild_id: str = "") -> None:
+        """Pull messages via user token and mirror them into Mirror World channels."""
+        try:
+            entries = iter_fetchall_entries()
+            if not entries:
+                await ctx.send("No fetchall mappings found (MWDataManagerBot/config/fetchall_mappings.json).")
+                return
+
+            sgid_filter: int = 0
+            if (source_guild_id or "").strip():
+                try:
+                    sgid_filter = int(source_guild_id)
+                except Exception:
+                    await ctx.send("Usage: !fetchsync [source_guild_id]")
+                    return
+
+            source_token = _pick_fetchall_source_token()
+            if not source_token:
+                await ctx.send("Missing FETCHALL_USER_TOKEN (needed to read source servers).")
+                return
+
+            selected = []
+            for e in entries:
+                try:
+                    if sgid_filter and int(e.get("source_guild_id", 0)) != int(sgid_filter):
+                        continue
+                except Exception:
+                    continue
+                selected.append(e)
+            if not selected:
+                await ctx.send(f"No mapping found for source_guild_id={sgid_filter}.")
+                return
+
+            await ctx.send(f"Starting fetchsync for {len(selected)} mapping(s)...")
+            ok = 0
+            total_sent = 0
+            for entry in selected:
+                result = await run_fetchsync(
+                    bot=bot,
+                    entry=entry,
+                    destination_guild=getattr(ctx, "guild", None),
+                    source_user_token=source_token,
+                    dryrun=False,
+                )
+                if result.get("ok"):
+                    ok += 1
+                try:
+                    total_sent += int(result.get("sent", 0) or 0)
+                except Exception:
+                    pass
+            await ctx.send(f"Fetchsync complete: {ok}/{len(selected)} succeeded. sent={total_sent}")
+        except Exception as e:
+            log_warn(f"fetchsync command failed: {e}")
+            await ctx.send(f"Fetchsync failed: {type(e).__name__}: {e}")
 
     @bot.command(name="fetch")
     async def fetch_cmd(ctx, source_guild_id: str = "") -> None:
@@ -151,3 +229,228 @@ def register_commands(*, bot, forwarder) -> None:
             log_warn(f"status failed: {e}")
             await ctx.send(f"status failed: {type(e).__name__}: {e}")
 
+    # ---------------------------------------------------------------------
+    # Slash commands (registered only to destination guild(s))
+    # ---------------------------------------------------------------------
+    try:
+        import discord
+        from discord import app_commands
+    except Exception:
+        return
+
+    dest_guild_ids = sorted(int(x) for x in (cfg.DESTINATION_GUILD_IDS or set()) if int(x) > 0)
+    if not dest_guild_ids:
+        return
+    guild_objs = [discord.Object(id=int(gid)) for gid in dest_guild_ids]
+
+    fetchmap = app_commands.Group(name="fetchmap", description="Manage fetchall mappings")
+    fetchsync = app_commands.Group(name="fetchsync", description="Pull+mirror messages from source servers")
+
+    @fetchmap.command(name="list", description="List current fetchall mappings")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def fetchmap_list(interaction: discord.Interaction) -> None:
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception:
+            pass
+        entries = iter_fetchall_entries()
+        if not entries:
+            await interaction.followup.send("No fetchall mappings found.", ephemeral=True)
+            return
+        lines: List[str] = []
+        for e in entries:
+            try:
+                sgid = int(e.get("source_guild_id", 0) or 0)
+            except Exception:
+                sgid = 0
+            name = str(e.get("name") or "").strip() or f"guild_{sgid}"
+            dcid = int(e.get("destination_category_id", 0) or 0)
+            cats = e.get("source_category_ids") if isinstance(e.get("source_category_ids"), list) else []
+            ignored = e.get("ignored_channel_ids") if isinstance(e.get("ignored_channel_ids"), list) else []
+            state = e.get("state") if isinstance(e.get("state"), dict) else {}
+            curs = state.get("last_seen_message_id_by_channel") if isinstance(state.get("last_seen_message_id_by_channel"), dict) else {}
+            lines.append(f"- {name} sgid={sgid} dest_cat={dcid} source_cats={len(cats)} ignored={len(ignored)} cursors={len(curs)}")
+        msg = "Fetchall mappings:\n" + "\n".join(lines[:60])
+        if len(lines) > 60:
+            msg += f"\n... and {len(lines)-60} more"
+        await interaction.followup.send(msg, ephemeral=True)
+
+    @fetchmap.command(name="upsert", description="Add/update a fetchall mapping entry")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(
+        source_guild_id="Source guild/server ID to mirror from",
+        destination_category="Destination category in Mirror World",
+        name="Friendly label (optional)",
+        source_category_ids_csv="Comma-separated category IDs in the SOURCE guild (optional)",
+        ignored_channel_ids_csv="Comma-separated channel IDs in the SOURCE guild to ignore (optional)",
+        require_date="Stored flag (legacy; optional)",
+    )
+    async def fetchmap_upsert(
+        interaction: discord.Interaction,
+        source_guild_id: int,
+        destination_category: discord.CategoryChannel,
+        name: str = "",
+        source_category_ids_csv: str = "",
+        ignored_channel_ids_csv: str = "",
+        require_date: bool = True,
+    ) -> None:
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception:
+            pass
+
+        sgid = int(source_guild_id or 0)
+        if sgid <= 0:
+            await interaction.followup.send("source_guild_id must be a positive integer.", ephemeral=True)
+            return
+
+        entry = upsert_mapping(
+            source_guild_id=sgid,
+            name=str(name).strip() or None,
+            destination_category_id=int(destination_category.id),
+            source_category_ids=_parse_csv_ints(source_category_ids_csv),
+            require_date=bool(require_date),
+        )
+        ignored_ids = _parse_csv_ints(ignored_channel_ids_csv)
+        if ignored_ids:
+            set_ignored_channel_ids(source_guild_id=sgid, ignored_channel_ids=ignored_ids)
+
+        await interaction.followup.send(
+            f"Saved mapping: sgid={entry.get('source_guild_id')} dest_category_id={entry.get('destination_category_id')} "
+            f"source_category_ids={len(entry.get('source_category_ids') or [])} ignored={len(ignored_ids) if ignored_ids else len(entry.get('ignored_channel_ids') or [])}",
+            ephemeral=True,
+        )
+
+    @fetchmap.command(name="ignore_add", description="Add an ignored source channel id to a mapping")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def fetchmap_ignore_add(interaction: discord.Interaction, source_guild_id: int, channel_id: int) -> None:
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception:
+            pass
+        entry = upsert_mapping(source_guild_id=int(source_guild_id))
+        existing = entry.get("ignored_channel_ids") if isinstance(entry.get("ignored_channel_ids"), list) else []
+        try:
+            ignored = [int(x) for x in existing if int(x) > 0]
+        except Exception:
+            ignored = []
+        if int(channel_id) > 0 and int(channel_id) not in ignored:
+            ignored.append(int(channel_id))
+        set_ignored_channel_ids(source_guild_id=int(source_guild_id), ignored_channel_ids=ignored)
+        await interaction.followup.send(f"Updated ignored list size={len(ignored)} for sgid={int(source_guild_id)}", ephemeral=True)
+
+    @fetchmap.command(name="ignore_remove", description="Remove an ignored source channel id from a mapping")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def fetchmap_ignore_remove(interaction: discord.Interaction, source_guild_id: int, channel_id: int) -> None:
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception:
+            pass
+        entry = upsert_mapping(source_guild_id=int(source_guild_id))
+        existing = entry.get("ignored_channel_ids") if isinstance(entry.get("ignored_channel_ids"), list) else []
+        try:
+            ignored = [int(x) for x in existing if int(x) > 0]
+        except Exception:
+            ignored = []
+        ignored = [x for x in ignored if int(x) != int(channel_id)]
+        set_ignored_channel_ids(source_guild_id=int(source_guild_id), ignored_channel_ids=ignored)
+        await interaction.followup.send(f"Updated ignored list size={len(ignored)} for sgid={int(source_guild_id)}", ephemeral=True)
+
+    @fetchsync.command(name="dryrun", description="Show what would be fetched/sent without sending")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def fetchsync_dryrun(interaction: discord.Interaction, source_guild_id: int = 0) -> None:
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception:
+            pass
+        entries = iter_fetchall_entries()
+        if not entries:
+            await interaction.followup.send("No fetchall mappings found.", ephemeral=True)
+            return
+        source_token = _pick_fetchall_source_token()
+        if not source_token:
+            await interaction.followup.send("Missing FETCHALL_USER_TOKEN (needed to read source servers).", ephemeral=True)
+            return
+        selected = []
+        for e in entries:
+            try:
+                if int(source_guild_id or 0) > 0 and int(e.get("source_guild_id", 0)) != int(source_guild_id):
+                    continue
+            except Exception:
+                continue
+            selected.append(e)
+        if not selected:
+            await interaction.followup.send(f"No mapping found for source_guild_id={int(source_guild_id)}.", ephemeral=True)
+            return
+        summaries: List[str] = []
+        for entry in selected:
+            result = await run_fetchsync(
+                bot=bot,
+                entry=entry,
+                destination_guild=getattr(interaction, "guild", None),
+                source_user_token=source_token,
+                dryrun=True,
+            )
+            summaries.append(
+                f"- sgid={int(entry.get('source_guild_id',0) or 0)} ok={bool(result.get('ok'))} "
+                f"channels={int(result.get('channels',0) or 0)} would_send={int(result.get('would_send',0) or 0)} reason={result.get('reason') or ''}"
+            )
+        msg = "Fetchsync dryrun:\n" + "\n".join(summaries[:50])
+        if len(summaries) > 50:
+            msg += f"\n... and {len(summaries)-50} more"
+        await interaction.followup.send(msg, ephemeral=True)
+
+    @fetchsync.command(name="run", description="Pull and mirror messages for one mapping (or all)")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def fetchsync_run(interaction: discord.Interaction, source_guild_id: int = 0) -> None:
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception:
+            pass
+        entries = iter_fetchall_entries()
+        if not entries:
+            await interaction.followup.send("No fetchall mappings found.", ephemeral=True)
+            return
+        source_token = _pick_fetchall_source_token()
+        if not source_token:
+            await interaction.followup.send("Missing FETCHALL_USER_TOKEN (needed to read source servers).", ephemeral=True)
+            return
+        selected = []
+        for e in entries:
+            try:
+                if int(source_guild_id or 0) > 0 and int(e.get("source_guild_id", 0)) != int(source_guild_id):
+                    continue
+            except Exception:
+                continue
+            selected.append(e)
+        if not selected:
+            await interaction.followup.send(f"No mapping found for source_guild_id={int(source_guild_id)}.", ephemeral=True)
+            return
+        ok = 0
+        total_sent = 0
+        for entry in selected:
+            result = await run_fetchsync(
+                bot=bot,
+                entry=entry,
+                destination_guild=getattr(interaction, "guild", None),
+                source_user_token=source_token,
+                dryrun=False,
+            )
+            if result.get("ok"):
+                ok += 1
+            try:
+                total_sent += int(result.get("sent", 0) or 0)
+            except Exception:
+                pass
+        await interaction.followup.send(f"Fetchsync complete: {ok}/{len(selected)} ok; sent={total_sent}", ephemeral=True)
+
+    # Add groups to the tree for destination guild(s) only.
+    for g in guild_objs:
+        try:
+            bot.tree.add_command(fetchmap, guild=g)
+        except Exception:
+            pass
+        try:
+            bot.tree.add_command(fetchsync, guild=g)
+        except Exception:
+            pass
