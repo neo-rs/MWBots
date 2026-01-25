@@ -285,10 +285,14 @@ def register_commands(*, bot, forwarder) -> None:
     # Slash commands (registered only to destination guild(s))
     # ---------------------------------------------------------------------
     try:
-        import discord
-        from discord import app_commands
-    except Exception:
+        import discord as _discord
+        from discord import app_commands as _app_commands
+    except Exception as e:
+        # Never break bot startup if slash deps are unavailable.
+        log_warn(f"Slash commands disabled: {type(e).__name__}: {e}")
         return
+    discord = _discord  # type: ignore
+    app_commands = _app_commands  # type: ignore
 
     dest_guild_ids = sorted(int(x) for x in (cfg.DESTINATION_GUILD_IDS or set()) if int(x) > 0)
     if not dest_guild_ids:
@@ -494,7 +498,9 @@ def register_commands(*, bot, forwarder) -> None:
                 total_sent += int(result.get("sent", 0) or 0)
             except Exception:
                 pass
-        await interaction.followup.send(f"Fetchsync complete: {ok}/{len(selected)} ok; sent={total_sent}", ephemeral=True)    # Add groups to the tree for destination guild(s) only.
+        await interaction.followup.send(f"Fetchsync complete: {ok}/{len(selected)} ok; sent={total_sent}", ephemeral=True)
+
+    # Add groups to the tree for destination guild(s) only.
     for g in guild_objs:
         try:
             bot.tree.add_command(fetchmap, guild=g)
