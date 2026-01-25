@@ -229,6 +229,58 @@ def register_commands(*, bot, forwarder) -> None:
             log_warn(f"status failed: {e}")
             await ctx.send(f"status failed: {type(e).__name__}: {e}")
 
+    @bot.command(name="slashstatus")
+    async def slashstatus_cmd(ctx) -> None:
+        """Debug: show slash commands known to this bot for the current guild."""
+        try:
+            import discord
+        except Exception as e:
+            await ctx.send(f"discord import failed: {type(e).__name__}: {e}")
+            return
+        try:
+            gid = int(getattr(getattr(ctx, "guild", None), "id", 0) or 0)
+        except Exception:
+            gid = 0
+        if gid <= 0:
+            await ctx.send("slashstatus: not in a guild context")
+            return
+        try:
+            cmds = bot.tree.get_commands(guild=discord.Object(id=gid))
+        except Exception as e:
+            await ctx.send(f"slashstatus failed: {type(e).__name__}: {e}")
+            return
+        names = []
+        for c in cmds or []:
+            try:
+                names.append(getattr(c, "name", str(c)))
+            except Exception:
+                continue
+        names = sorted(set([str(n) for n in names if n]))
+        await ctx.send(f"slashstatus: guild={gid} tree_commands={len(names)} names={', '.join(names)[:1700]}")
+
+    @bot.command(name="slashsync")
+    async def slashsync_cmd(ctx) -> None:
+        """Debug: force sync of slash commands to destination guild(s)."""
+        try:
+            import discord
+        except Exception as e:
+            await ctx.send(f"discord import failed: {type(e).__name__}: {e}")
+            return
+        dest_guild_ids = sorted(int(x) for x in (cfg.DESTINATION_GUILD_IDS or set()) if int(x) > 0)
+        if not dest_guild_ids:
+            await ctx.send("slashsync: no destination_guild_ids configured")
+            return
+        ok = 0
+        lines = []
+        for gid in dest_guild_ids:
+            try:
+                synced = await bot.tree.sync(guild=discord.Object(id=int(gid)))
+                ok += 1
+                lines.append(f"- guild={int(gid)} ok count={len(synced)}")
+            except Exception as e:
+                lines.append(f"- guild={int(gid)} fail {type(e).__name__}: {e}")
+        await ctx.send("slashsync:\n" + "\n".join(lines[:20]) + f"\nok={ok}/{len(dest_guild_ids)}")
+
     # ---------------------------------------------------------------------
     # Slash commands (registered only to destination guild(s))
     # ---------------------------------------------------------------------
@@ -442,9 +494,7 @@ def register_commands(*, bot, forwarder) -> None:
                 total_sent += int(result.get("sent", 0) or 0)
             except Exception:
                 pass
-        await interaction.followup.send(f"Fetchsync complete: {ok}/{len(selected)} ok; sent={total_sent}", ephemeral=True)
-
-    # Add groups to the tree for destination guild(s) only.
+        await interaction.followup.send(f"Fetchsync complete: {ok}/{len(selected)} ok; sent={total_sent}", ephemeral=True)    # Add groups to the tree for destination guild(s) only.
     for g in guild_objs:
         try:
             bot.tree.add_command(fetchmap, guild=g)

@@ -865,9 +865,17 @@ def run_bot(*, settings: Dict[str, Any], token: str) -> Optional[int]:
                 synced = 0
                 for gid in dest_guild_ids:
                     try:
-                        await bot.tree.sync(guild=discord.Object(id=int(gid)))
+                        cmds = await bot.tree.sync(guild=discord.Object(id=int(gid)))
+                        try:
+                            log_info(f"Slash commands sync ok: guild={int(gid)} count={len(cmds)}")
+                        except Exception:
+                            pass
                         synced += 1
-                    except Exception:
+                    except Exception as e:
+                        try:
+                            log_warn(f"Slash commands sync failed: guild={int(gid)} ({type(e).__name__}: {e})")
+                        except Exception:
+                            pass
                         continue
                 if synced:
                     log_info(f"Slash commands synced to {synced} destination guild(s).")
