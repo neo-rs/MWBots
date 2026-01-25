@@ -6,6 +6,16 @@ from fetchall import iter_fetchall_entries, run_fetchall, run_fetchsync, set_ign
 from logging_utils import log_info, log_warn
 import settings_store as cfg
 
+# NOTE: Slash commands require discord.py app_commands to resolve type hints.
+# app_commands uses typing.get_type_hints() which evaluates annotation strings
+# using module globals. Therefore `discord` MUST exist in module globals.
+try:
+    import discord  # type: ignore
+    from discord import app_commands  # type: ignore
+except Exception:
+    discord = None  # type: ignore
+    app_commands = None  # type: ignore
+
 
 def register_commands(*, bot, forwarder) -> None:
     """
@@ -283,15 +293,9 @@ def register_commands(*, bot, forwarder) -> None:
     # ---------------------------------------------------------------------
     # Slash commands (registered only to destination guild(s))
     # ---------------------------------------------------------------------
-    try:
-        import discord as _discord
-        from discord import app_commands as _app_commands
-    except Exception as e:
-        # Never break bot startup if slash deps are unavailable.
-        log_warn(f"Slash commands disabled: {type(e).__name__}: {e}")
+    if discord is None or app_commands is None:
+        log_warn("Slash commands disabled: discord.py app_commands not available")
         return
-    discord = _discord  # type: ignore
-    app_commands = _app_commands  # type: ignore
 
     dest_guild_ids = sorted(int(x) for x in (cfg.DESTINATION_GUILD_IDS or set()) if int(x) > 0)
     if not dest_guild_ids:
