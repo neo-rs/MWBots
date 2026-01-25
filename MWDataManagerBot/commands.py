@@ -504,9 +504,9 @@ def register_commands(*, bot, forwarder) -> None:
     for g in guild_objs:
         try:
             bot.tree.add_command(fetchmap, guild=g)
-        except Exception:
-            pass
+        except Exception as e:
+            log_warn(f"Failed to add /fetchmap to tree for guild={getattr(g,'id',None)}: {type(e).__name__}: {e}")
         try:
             bot.tree.add_command(fetchsync, guild=g)
-        except Exception:
-            pass
+        except Exception as e:
+            log_warn(f"Failed to add /fetchsync to tree for guild={getattr(g,'id',None)}: {type(e).__name__}: {e}")
