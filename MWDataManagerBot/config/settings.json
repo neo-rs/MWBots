@@ -37,8 +37,6 @@
   "send_min_interval_seconds": 0.75,
   "enable_default_fallback": false,
   "enable_raw_link_unwrap": true,
-  "send_raw_links_followup": true,
-  "raw_links_followup_max": 5,
   "mirrorworld_route_online": {
     "1438969997178306661": 1438969997178306661,
     "1438970053352751215": 1438970053352751215,

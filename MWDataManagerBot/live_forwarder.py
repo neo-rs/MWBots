@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -13,12 +12,12 @@ import settings_store as cfg
 from utils import (
     augment_text_with_affiliate_redirects,
     augment_text_with_dmflip,
-    build_raw_links_followup,
+    augment_text_with_ringinthedeals,
     collect_embed_strings,
     extract_all_raw_links_from_text,
     extract_urls_from_text,
     generate_content_signature,
-    replace_single_url_with_raw,
+    rewrite_affiliate_links_in_message,
 )
 
 
@@ -477,11 +476,12 @@ class MessageForwarder:
                 # Extract ONLY hidden/unwrapped destinations from known affiliate wrappers
                 raw_links = extract_all_raw_links_from_text(text_to_check)
                 text_to_check, dmflip_links = await augment_text_with_dmflip(text_to_check)
+                text_to_check, ring_links = await augment_text_with_ringinthedeals(text_to_check)
                 text_to_check, affiliate_links = await augment_text_with_affiliate_redirects(text_to_check)
                 # Merge and de-dupe while preserving order
                 seen = set()
                 merged: List[str] = []
-                for u in (raw_links or []) + (dmflip_links or []) + (affiliate_links or []):
+                for u in (raw_links or []) + (dmflip_links or []) + (ring_links or []) + (affiliate_links or []):
                     if not u or not isinstance(u, str):
                         continue
                     if u in seen:
@@ -573,9 +573,18 @@ class MessageForwarder:
         # Format output
         formatted_content = content
         replaced = False
-        if cfg.ENABLE_RAW_LINK_UNWRAP and raw_links:
+        if cfg.ENABLE_RAW_LINK_UNWRAP:
             try:
-                formatted_content, replaced = replace_single_url_with_raw(formatted_content, raw_links)
+                formatted_content, inline_raw, did_inline = await rewrite_affiliate_links_in_message(
+                    formatted_content, raw_links
+                )
+                if inline_raw:
+                    seen = set(raw_links or [])
+                    for u in inline_raw:
+                        if u and u not in seen:
+                            seen.add(u)
+                            raw_links.append(u)
+                replaced = bool(did_inline)
             except Exception:
                 replaced = False
 
@@ -705,21 +714,6 @@ class MessageForwarder:
                     log_forward(f"msg={message.id} {channel_id} -> {dest_channel_id} (tag={tag} why={why})")
                 else:
                     log_forward(f"msg={message.id} {channel_id} -> {dest_channel_id} (tag={tag})")
-                # Optional follow-up: send raw destination links (once per destination per message)
-                if cfg.SEND_RAW_LINKS_FOLLOWUP and raw_links and not replaced:
-                    try:
-                        # Dedup follow-ups by the raw link signature (prevents spam across reposts).
-                        raw_sig = hashlib.md5("|".join(raw_links).encode("utf-8", errors="ignore")).hexdigest()
-                        follow_key = (dest_channel_id, f"rawlinks-{raw_sig}")
-                        last_follow = self.sent_to_destinations.get(follow_key, 0.0)
-                        # use a longer TTL for follow-ups so edits/retries don't spam
-                        if not last_follow or (now - last_follow) > float(self.global_content_ttl_seconds or 300):
-                            followup = build_raw_links_followup(raw_links, max_links=int(cfg.RAW_LINKS_FOLLOWUP_MAX or 5))
-                            if followup and followup not in formatted_content:
-                                await self._send_to_destination(dest_channel_id=dest_channel_id, content=followup, embeds=[])
-                                self.sent_to_destinations[follow_key] = now
-                    except Exception:
-                        pass
                 if stop_after_first:
                     break
             except Exception as e:
@@ -815,7 +809,7 @@ def run_bot(*, settings: Dict[str, Any], token: str) -> Optional[int]:
         log_info(
             f"monitored_channels={len(cfg.SMART_SOURCE_CHANNELS)} categories={len(cfg.MONITOR_CATEGORY_IDS)} "
             f"monitor_all={bool(cfg.MONITOR_ALL_DESTINATION_CHANNELS)} webhook_only={bool(cfg.MONITOR_WEBHOOK_MESSAGES_ONLY)} "
-            f"raw_unwrap={bool(cfg.ENABLE_RAW_LINK_UNWRAP)} raw_followup={bool(cfg.SEND_RAW_LINKS_FOLLOWUP)} ttl={cfg.RECENT_TTL_SECONDS}s"
+            f"raw_unwrap={bool(cfg.ENABLE_RAW_LINK_UNWRAP)} ttl={cfg.RECENT_TTL_SECONDS}s"
         )
         if not cfg.SMART_SOURCE_CHANNELS and not cfg.MONITOR_CATEGORY_IDS and not cfg.MONITOR_ALL_DESTINATION_CHANNELS:
             log_warn(

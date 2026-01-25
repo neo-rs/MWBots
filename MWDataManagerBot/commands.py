@@ -191,7 +191,6 @@ def register_commands(*, bot, forwarder) -> None:
             monitor_all = bool(cfg.MONITOR_ALL_DESTINATION_CHANNELS)
             webhook_only = bool(getattr(cfg, "MONITOR_WEBHOOK_MESSAGES_ONLY", False))
             raw_unwrap = bool(getattr(cfg, "ENABLE_RAW_LINK_UNWRAP", False))
-            raw_followup = bool(getattr(cfg, "SEND_RAW_LINKS_FOLLOWUP", False))
             fetchall_has_token = bool(_pick_fetchall_source_token())
             dests = [
                 int(cfg.FALLBACK_CHANNEL_ID or 0),
@@ -219,7 +218,7 @@ def register_commands(*, bot, forwarder) -> None:
                 f"- destination_guild_ids={sorted(list(cfg.DESTINATION_GUILD_IDS))}\n"
                 f"- monitored_channels={monitored} monitor_category_ids={sorted(list(cfg.MONITOR_CATEGORY_IDS))} "
                 f"monitor_all={monitor_all} webhook_only={webhook_only}\n"
-                f"- raw_unwrap={raw_unwrap} raw_followup={raw_followup}\n"
+                f"- raw_unwrap={raw_unwrap}\n"
                 f"- fetchall_user_token_loaded={fetchall_has_token}\n"
                 f"- smartfilter_destinations_set={sum(1 for x in dests if x>0)}/{len(dests)}\n"
                 f"- global_trigger_destinations_set={sum(1 for x in globals_ if x>0)}/{len(globals_)}\n"

@@ -30,8 +30,6 @@ ENABLE_DEFAULT_FALLBACK: bool = False
 
 # Raw-link behavior (ported from legacy)
 ENABLE_RAW_LINK_UNWRAP: bool = True
-SEND_RAW_LINKS_FOLLOWUP: bool = True
-RAW_LINKS_FOLLOWUP_MAX: int = 5
 
 # Local destinations
 SMARTFILTER_AMAZON_CHANNEL_ID: int = 0
@@ -131,7 +129,7 @@ def init(settings: Dict[str, Any]) -> None:
     global SEND_MIN_INTERVAL_SECONDS
     global MIRRORWORLD_ROUTE_ONLINE, MIRRORWORLD_ROUTE_INSTORE
     global ENABLE_DEFAULT_FALLBACK
-    global ENABLE_RAW_LINK_UNWRAP, SEND_RAW_LINKS_FOLLOWUP, RAW_LINKS_FOLLOWUP_MAX
+    global ENABLE_RAW_LINK_UNWRAP
     global SMARTFILTER_AMAZON_CHANNEL_ID, SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID, SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID
     global SMARTFILTER_UPCOMING_CHANNEL_ID, SMARTFILTER_INSTORE_LEADS_CHANNEL_ID, SMARTFILTER_MAJOR_STORES_CHANNEL_ID
     global SMARTFILTER_DISCOUNTED_STORES_CHANNEL_ID, SMARTFILTER_INSTORE_SEASONAL_CHANNEL_ID, SMARTFILTER_INSTORE_SNEAKERS_CHANNEL_ID
@@ -203,8 +201,6 @@ def init(settings: Dict[str, Any]) -> None:
     MIRRORWORLD_ROUTE_INSTORE = _parse_route_map(settings.get("mirrorworld_route_instore"))
 
     ENABLE_RAW_LINK_UNWRAP = bool(settings.get("enable_raw_link_unwrap", True))
-    SEND_RAW_LINKS_FOLLOWUP = bool(settings.get("send_raw_links_followup", True))
-    RAW_LINKS_FOLLOWUP_MAX = _get_int(settings, "raw_links_followup_max", 5)
 
     dests = settings.get("smartfilter_destinations") if isinstance(settings.get("smartfilter_destinations"), dict) else {}
     SMARTFILTER_AMAZON_CHANNEL_ID = _get_int(dests, "AMAZON", 0)

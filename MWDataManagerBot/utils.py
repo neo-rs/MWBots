@@ -200,7 +200,7 @@ COMMON_REDIRECT_KEYS = ("url", "link", "redirect", "target", "u", "r", "to", "de
 
 AFFILIATE_LINK_DOMAINS_REDIRECT = {"howl.link", "mavely.app.link", "go.magik.ly", "magik.ly"}
 AFFILIATE_LINK_DOMAINS_QUERY = {"galaxydeals.net"}
-AFFILIATE_LINK_DOMAINS_HTML = {"dmflip.com"}
+AFFILIATE_LINK_DOMAINS_HTML = {"dmflip.com", "ringinthedeals.com"}
 AFFILIATE_LINK_DOMAINS = AFFILIATE_LINK_DOMAINS_REDIRECT | AFFILIATE_LINK_DOMAINS_QUERY | AFFILIATE_LINK_DOMAINS_HTML
 
 _AMAZON_HOST_RE = re.compile(r"(?:^|\.)amazon\.[a-z.]{2,}$", re.IGNORECASE)
@@ -271,6 +271,29 @@ def canonicalize_amazon_url(url: str) -> str:
         return normalize_url(url)
     except Exception:
         return normalize_url(url)
+
+
+def canonicalize_amazon_url_keep_tag(url: str) -> str:
+    """
+    Canonical Amazon URL but preserve ?tag= when present.
+    - Normalizes to https://{host}/dp/{ASIN}
+    - If tag exists, returns https://{host}/dp/{ASIN}?tag=XXXX
+    """
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query or "")
+        tag = ""
+        if "tag" in qs and qs["tag"]:
+            tag = (qs["tag"][0] or "").strip()
+
+        base = canonicalize_amazon_url(url)
+        if not base:
+            return ""
+        return f"{base}?tag={tag}" if tag else base
+    except Exception:
+        return canonicalize_amazon_url(url)
 
 
 def unwrap_single_url(value: str, *, depth: int = 0, prefer_domains: Optional[Set[str]] = None) -> Optional[str]:
@@ -493,6 +516,71 @@ async def extract_amazon_link_from_dmflip(dmflip_url: str) -> Optional[str]:
     return None
 
 
+async def extract_amazon_link_from_ringinthedeals(url: str) -> Optional[str]:
+    """
+    Resolve ringinthedeals.com deal pages and extract the first Amazon URL found in HTML.
+    Supports inputs that are missing scheme (ringinthedeals.com/deal/xxx).
+    """
+    if not url or not isinstance(url, str):
+        return None
+
+    u = url.strip()
+    if u.startswith("ringinthedeals.com/") or u.startswith("www.ringinthedeals.com/"):
+        u = "https://" + u
+    if not u.startswith(("http://", "https://")):
+        u = "https://" + u
+
+    try:
+        import aiohttp  # type: ignore
+    except Exception:
+        return None
+
+    html = ""
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            async with session.get(u, allow_redirects=True) as response:
+                if int(getattr(response, "status", 0) or 0) >= 400:
+                    return None
+                html = await response.text(errors="ignore")
+    except Exception:
+        return None
+
+    if not html:
+        return None
+
+    amazon_url_pattern = re.compile(r'https?://[^/\s]*amazon\.[a-z.]{2,}/[^\s<>"\']+', re.IGNORECASE)
+    amzn_pattern = re.compile(r'https?://(?:www\.)?(?:amzn\.to|a\.co)/[A-Za-z0-9]+', re.IGNORECASE)
+
+    candidates: List[str] = []
+    try:
+        candidates.extend(amazon_url_pattern.findall(html)[:80])
+        candidates.extend(PERCENT_ENCODED_URL_REGEX.findall(html)[:80])
+        candidates.extend(amzn_pattern.findall(html)[:20])
+    except Exception:
+        candidates = []
+
+    for raw in candidates:
+        unwrapped = unwrap_single_url(raw, prefer_domains={"amazon.", "amzn.to", "a.co"}) or raw
+        host = (urlparse(unwrapped).netloc or "").lower()
+        if _AMAZON_HOST_RE.search(host):
+            return canonicalize_amazon_url_keep_tag(unwrapped)
+        if _AMZN_SHORT_RE.match(unwrapped):
+            # Expand amzn.to/a.co to final destination
+            final = await extract_link_from_redirect_affiliate(unwrapped)
+            if final:
+                fhost = (urlparse(final).netloc or "").lower()
+                if _AMAZON_HOST_RE.search(fhost):
+                    return canonicalize_amazon_url_keep_tag(final)
+            # fall back to the short link if we couldn't expand
+            return normalize_url(unwrapped)
+    return None
+
+
 async def augment_text_with_dmflip(text: str) -> Tuple[str, List[str]]:
     """Expand dmflip.com URLs into extracted Amazon URLs."""
     if not text:
@@ -502,6 +590,28 @@ async def augment_text_with_dmflip(text: str) -> Tuple[str, List[str]]:
     if not matches:
         return text, []
     tasks = [extract_amazon_link_from_dmflip(u) for u in matches[:5]]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    extracted: List[str] = []
+    for r in results:
+        if isinstance(r, str) and r:
+            extracted.append(r)
+    if extracted:
+        text = (text + " " + " ".join(extracted)).strip()
+    return text, extracted
+
+
+async def augment_text_with_ringinthedeals(text: str) -> Tuple[str, List[str]]:
+    """Expand ringinthedeals.com deal URLs into extracted Amazon URLs."""
+    if not text:
+        return text, []
+    ring_pattern = re.compile(
+        r"(?:https?://(?:www\.)?)?ringinthedeals\.com/deal/[^\s<>'\"\)\]]+",
+        re.IGNORECASE,
+    )
+    matches = ring_pattern.findall(text)
+    if not matches:
+        return text, []
+    tasks = [extract_amazon_link_from_ringinthedeals(u) for u in matches[:5]]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     extracted: List[str] = []
     for r in results:
@@ -543,63 +653,135 @@ def _pick_best_raw_url(raw_urls: List[str]) -> Optional[str]:
         if not _is_affiliate_domain(u):
             # Prefer canonical amazon for amazon hosts
             host = (urlparse(u).netloc or "").lower()
-            if _AMAZON_HOST_RE.search(host) or _AMZN_SHORT_RE.match(u):
-                return canonicalize_amazon_url(u)
+            if _AMAZON_HOST_RE.search(host):
+                return canonicalize_amazon_url_keep_tag(u)
+            if _AMZN_SHORT_RE.match(u):
+                return normalize_url(u)
             return u
     return candidates[0]
 
 
-def replace_single_url_with_raw(content: str, raw_urls: List[str]) -> Tuple[str, bool]:
+def _split_trailing_url_punct(token: str) -> Tuple[str, str]:
     """
-    If message has exactly one URL, replace it with the best raw URL wrapped in <...>
-    so Discord doesn't generate a second embed.
+    Split "url-like token" from trailing punctuation that often follows links in chat.
+    Example: "https://x.y/z)." -> ("https://x.y/z", ").")
+    """
+    s = (token or "").strip()
+    if not s:
+        return "", ""
+    tail = ""
+    while s and s[-1] in ".,);]}>":
+        tail = s[-1] + tail
+        s = s[:-1]
+    return s, tail
+
+
+async def rewrite_affiliate_links_in_message(content: str, raw_urls: Optional[List[str]] = None) -> Tuple[str, List[str], bool]:
+    """
+    Rewrite wrapper links in-place so the forwarded message contains the destination link(s),
+    and remove any existing "Raw links:" blocks that older logic may have appended.
+
+    Returns:
+      (new_content, extracted_urls, did_replace_any)
     """
     if not isinstance(content, str) or not content.strip():
-        return content, False
-    target = _pick_best_raw_url(raw_urls)
-    if not target:
-        return content, False
-    urls = RAW_URL_REGEX.findall(content)
-    if len(urls) != 1:
-        return content, False
-    src = urls[0]
-    # Only rewrite when the visible URL is an affiliate wrapper (otherwise we'd be changing normal links).
-    try:
-        if not _is_affiliate_domain(src):
-            return content, False
-    except Exception:
-        return content, False
-    if not src or target == src or target in content:
-        return content, False
-    replaced = content.replace(src, f"<{target}>")
-    return replaced, replaced != content
+        return content, [], False
 
+    did_replace = False
+    extracted: List[str] = []
 
-def build_raw_links_followup(raw_urls: List[str], *, max_links: int = 5) -> str:
-    urls: List[str] = []
-    for u in raw_urls or []:
-        if not isinstance(u, str):
+    # Remove any existing "Raw links:" block from older logic.
+    cleaned = re.sub(
+        r"\n+Raw links:\s*\n(?:<?https?://\S+>?\s*)+",
+        "",
+        content,
+        flags=re.IGNORECASE,
+    )
+    if cleaned != content:
+        did_replace = True
+        content = cleaned
+
+    dmflip_re = re.compile(r'https?://(?:www\.)?dmflip\.com/[^\s<>"\']+', re.IGNORECASE)
+    ring_re = re.compile(
+        r"(?:https?://(?:www\.)?)?ringinthedeals\.com/deal/[^\s<>'\"\)\]]+",
+        re.IGNORECASE,
+    )
+
+    # dmflip -> amazon
+    dmflip_matches = dmflip_re.findall(content)
+    if dmflip_matches:
+        uniques: List[str] = []
+        seen: Set[str] = set()
+        for token in dmflip_matches:
+            clean, _tail = _split_trailing_url_punct(token)
+            if clean and clean not in seen:
+                seen.add(clean)
+                uniques.append(clean)
+        tasks = [extract_amazon_link_from_dmflip(u) for u in uniques[:5]]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        resolved: Dict[str, str] = {}
+        for src, res in zip(uniques[:5], results):
+            if isinstance(res, str) and res:
+                resolved[src] = canonicalize_amazon_url_keep_tag(res)
+        for token in dmflip_matches:
+            clean, tail = _split_trailing_url_punct(token)
+            raw = resolved.get(clean or "")
+            if raw:
+                extracted.append(raw)
+                rep = f"<{raw}>{tail}"
+                if token in content and rep not in content:
+                    content = content.replace(token, rep)
+                    did_replace = True
+
+    # ringinthedeals -> amazon
+    ring_matches = ring_re.findall(content)
+    if ring_matches:
+        uniques = []
+        seen = set()
+        for token in ring_matches:
+            clean, _tail = _split_trailing_url_punct(token)
+            if clean and clean not in seen:
+                seen.add(clean)
+                uniques.append(clean)
+        tasks = [extract_amazon_link_from_ringinthedeals(u) for u in uniques[:5]]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        resolved = {}
+        for src, res in zip(uniques[:5], results):
+            if isinstance(res, str) and res:
+                resolved[src] = canonicalize_amazon_url_keep_tag(res)
+        for token in ring_matches:
+            clean, tail = _split_trailing_url_punct(token)
+            raw = resolved.get(clean or "")
+            if raw:
+                extracted.append(raw)
+                rep = f"<{raw}>{tail}"
+                if token in content and rep not in content:
+                    content = content.replace(token, rep)
+                    did_replace = True
+
+    # Legacy behavior: if message has exactly one *affiliate wrapper* URL, rewrite it inline.
+    if not did_replace and raw_urls:
+        target = _pick_best_raw_url(list(raw_urls or []))
+        if target:
+            urls = RAW_URL_REGEX.findall(content)
+            if len(urls) == 1:
+                src_token = urls[0]
+                src, tail = _split_trailing_url_punct(src_token)
+                try:
+                    if src and _is_affiliate_domain(src) and target != src and target not in content:
+                        content = content.replace(src_token, f"<{target}>{tail}")
+                        did_replace = True
+                except Exception:
+                    pass
+
+    # Dedupe extracted while preserving order
+    seen_out: Set[str] = set()
+    deduped: List[str] = []
+    for u in extracted:
+        if not u or u in seen_out:
             continue
-        u = u.strip()
-        if not u.startswith("http"):
-            continue
-        if _is_affiliate_domain(u):
-            # Never show affiliate wrapper links in follow-up
-            continue
-        if _is_discord_media_url(u):
-            continue
-        try:
-            host = (urlparse(u).netloc or "").lower()
-            if host.startswith("www."):
-                host = host[4:]
-            if _AMAZON_HOST_RE.search(host):
-                u = canonicalize_amazon_url(u)
-        except Exception:
-            pass
-        urls.append(f"<{u}>")
-        if len(urls) >= int(max_links or 5):
-            break
-    if not urls:
-        return ""
-    return "Raw links:\n" + "\n".join(urls)
+        seen_out.add(u)
+        deduped.append(u)
+
+    return content, deduped, did_replace
 
