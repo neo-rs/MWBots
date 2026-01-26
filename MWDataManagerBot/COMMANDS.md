@@ -114,7 +114,7 @@ Fetchsync filtering + live mode:
 Config knobs (`config/settings.json`):
 - `fetchsync_initial_backfill_limit` (default 20, max 50): how many recent messages to seed the cursor when a source channel has no cursor yet.
 - `fetchsync_min_content_chars` (default 25): minimum non-mention text length to mirror (messages with embeds/attachments/URLs are still mirrored).
-- `fetchsync_auto_poll_seconds` (default 60; set 0 to disable): background polling interval for live updates.
+- `fetchsync_auto_poll_seconds` (default 0; set to e.g. 60 to enable): background polling interval for live updates.
 
 #### `/fetchmap upsert`
 - **Description**: Add/update a mapping entry.

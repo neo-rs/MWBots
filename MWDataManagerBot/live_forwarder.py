@@ -1142,6 +1142,11 @@ def run_bot(*, settings: Dict[str, Any], token: str) -> Optional[int]:
                         log_info(f"Fetchsync auto-poller enabled: every {int(poll_s)}s")
                     except Exception as e:
                         log_warn(f"Fetchsync auto-poller failed to start ({type(e).__name__}: {e})")
+        else:
+            try:
+                log_info("Fetchsync auto-poller disabled: fetchsync_auto_poll_seconds=0")
+            except Exception:
+                pass
 
     @bot.event
     async def on_message(message) -> None:

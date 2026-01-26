@@ -812,6 +812,10 @@ async def run_fetchall(
     if source_guild_id <= 0:
         return {"ok": False, "reason": "missing_source_guild_id"}
 
+    # User token (optional). Used for source guild discovery when bot is not in guild,
+    # and for best-effort guild metadata (name/icon) when available.
+    token = str(source_user_token or "").strip()
+
     dest_category_id = int(entry.get("destination_category_id", 0) or 0) or int(cfg.FETCHALL_DEFAULT_DEST_CATEGORY_ID or 0)
     if dest_category_id <= 0:
         return {"ok": False, "reason": "missing_destination_category_id"}
@@ -834,19 +838,23 @@ async def run_fetchall(
     source_guild_name = str(entry.get("name") or "").strip() or f"guild_{source_guild_id}"
     source_guild_icon_url = ""
     try:
-        _st, ginfo = await _fetch_guild_info_via_user_token(source_guild_id=source_guild_id, user_token=token)
-        if isinstance(ginfo, dict):
-            nm = str(ginfo.get("name") or "").strip()
-            if nm:
-                source_guild_name = nm
-            icon_hash = str(ginfo.get("icon") or "").strip()
-            if icon_hash:
-                source_guild_icon_url = _guild_icon_url(guild_id=int(source_guild_id), icon_hash=icon_hash)
+        if token:
+            _st, ginfo = await _fetch_guild_info_via_user_token(source_guild_id=source_guild_id, user_token=token)
+            if isinstance(ginfo, dict):
+                nm = str(ginfo.get("name") or "").strip()
+                if nm:
+                    source_guild_name = nm
+                icon_hash = str(ginfo.get("icon") or "").strip()
+                if icon_hash:
+                    source_guild_icon_url = _guild_icon_url(guild_id=int(source_guild_id), icon_hash=icon_hash)
     except Exception:
         source_guild_icon_url = ""
-    await _ensure_separator_anywhere(
-        destination_guild, base_category=dest_category, source_guild_id=source_guild_id, source_guild_name=source_guild_name
-    )
+    try:
+        await _ensure_separator_anywhere(
+            destination_guild, base_category=dest_category, source_guild_id=source_guild_id, source_guild_name=source_guild_name
+        )
+    except Exception as e:
+        log_warn(f"[FETCHALL] failed to ensure separator (source_guild_id={source_guild_id}): {type(e).__name__}: {e}")
 
     source_category_ids = entry.get("source_category_ids") if isinstance(entry.get("source_category_ids"), list) else []
     # Safety: require explicit source_category_ids so we don't accidentally mirror entire servers.
@@ -892,7 +900,6 @@ async def run_fetchall(
     else:
         # Fallback: use Discum/user token to list source channels via REST.
         mode = "user_token"
-        token = str(source_user_token or "").strip()
         if not token:
             return {"ok": False, "reason": f"bot_not_in_source_guild:{source_guild_id} and no source_user_token provided"}
         status, api_channels = await _fetch_guild_channels_via_user_token(source_guild_id=source_guild_id, user_token=token)
@@ -946,6 +953,26 @@ async def run_fetchall(
             continue
         if src_id in existing_by_source:
             kept += 1
+            if progress_cb is not None:
+                try:
+                    await progress_cb(
+                        {
+                            "stage": "existing",
+                            "mode": str(mode),
+                            "source_guild_id": int(source_guild_id),
+                            "source_guild_name": str(source_guild_name),
+                            "destination_category_id": int(dest_category_id),
+                            "total_sources": int(total_sources),
+                            "attempted": int(attempted),
+                            "created": int(created),
+                            "existing": int(kept),
+                            "errors": int(errors),
+                            "current_channel_id": int(src_id or 0),
+                            "current_channel_name": str(src_name or ""),
+                        }
+                    )
+                except Exception:
+                    pass
             continue
         desired_name = _slugify_channel_name(str(src_name), fallback_prefix="mirror")
         topic = _build_mirror_topic(source_guild_id, src_id)

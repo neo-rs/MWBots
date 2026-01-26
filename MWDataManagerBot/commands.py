@@ -120,6 +120,11 @@ def register_commands(*, bot, forwarder) -> None:
             progress_msg = await ctx.send(f"Fetchall starting... mappings={total_maps}")
             ok = 0
             source_token = _pick_fetchall_source_token() or None
+            if not source_token:
+                await ctx.send(
+                    "Fetchall note: FETCHALL_USER_TOKEN is missing. "
+                    "Fetchall will only work for source guilds the bot is in; other mappings will fail."
+                )
             map_idx = 0
             last_edit_ts = 0.0
             for entry in entries:
@@ -170,7 +175,10 @@ def register_commands(*, bot, forwarder) -> None:
                 else:
                     reason = str(result.get("reason") or "").strip()
                     hs = result.get("http_status")
-                    await ctx.send(f"fetchall failed: sgid={sgid} reason={reason} http={hs}")
+                    extra = ""
+                    if reason == "missing_source_category_ids":
+                        extra = " (set categories via /fetchmap browse)"
+                    await ctx.send(f"fetchall failed: {name} sgid={sgid} reason={reason}{extra} http={hs}")
             try:
                 await progress_msg.edit(content=f"Fetchall complete: {ok}/{total_maps} succeeded.")
             except Exception:
@@ -985,6 +993,10 @@ def register_commands(*, bot, forwarder) -> None:
             webhook_only = bool(getattr(cfg, "MONITOR_WEBHOOK_MESSAGES_ONLY", False))
             raw_unwrap = bool(getattr(cfg, "ENABLE_RAW_LINK_UNWRAP", False))
             fetchall_has_token = bool(_pick_fetchall_source_token())
+            try:
+                poll_s = int(getattr(cfg, "FETCHSYNC_AUTO_POLL_SECONDS", 0) or 0)
+            except Exception:
+                poll_s = 0
             dests = [
                 int(cfg.FALLBACK_CHANNEL_ID or 0),
                 int(cfg.SMARTFILTER_AMAZON_CHANNEL_ID or 0),
@@ -1013,6 +1025,7 @@ def register_commands(*, bot, forwarder) -> None:
                 f"monitor_all={monitor_all} webhook_only={webhook_only}\n"
                 f"- raw_unwrap={raw_unwrap}\n"
                 f"- fetchall_user_token_loaded={fetchall_has_token}\n"
+                f"- fetchsync_auto_poll_seconds={poll_s}\n"
                 f"- smartfilter_destinations_set={sum(1 for x in dests if x>0)}/{len(dests)}\n"
                 f"- global_trigger_destinations_set={sum(1 for x in globals_ if x>0)}/{len(globals_)}\n"
                 f"- fallback_channel_id={int(cfg.FALLBACK_CHANNEL_ID or 0)}"
