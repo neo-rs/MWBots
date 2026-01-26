@@ -349,6 +349,20 @@ def register_commands(*, bot, forwarder) -> None:
             await ctx.send("fetchclear: must be run inside a guild/server.")
             return
 
+        try:
+            log_info(
+                f"[fetchclear] invoked confirm={do_confirm} delete_all={delete_all} args={tokens}",
+                event="fetchclear_invoked",
+                confirm=bool(do_confirm),
+                delete_all=bool(delete_all),
+                args=list(tokens),
+                guild_id=int(getattr(ctx.guild, "id", 0) or 0),
+                channel_id=int(getattr(getattr(ctx, "channel", None), "id", 0) or 0),
+                author_id=int(getattr(getattr(ctx, "author", None), "id", 0) or 0),
+            )
+        except Exception:
+            pass
+
         async def _prompt_pick_categories() -> List[int]:
             """
             Prompt the command invoker to pick one/many destination categories.
@@ -669,6 +683,8 @@ def register_commands(*, bot, forwarder) -> None:
         if bad:
             await ctx.send(f"fetchclear: ignoring invalid category id(s): {', '.join(str(x) for x in bad[:10])}")
 
+        ids_csv = ",".join(str(int(getattr(c, "id", 0) or 0)) for c in cats if int(getattr(c, "id", 0) or 0) > 0)
+
         def _pick_targets(cat: "discord.CategoryChannel") -> List[Any]:
             targets: List[Any] = []
             for ch in list(getattr(cat, "channels", []) or []):
@@ -691,44 +707,107 @@ def register_commands(*, bot, forwarder) -> None:
 
         total = int(sum(len(t) for _c, t in targets_by_cat))
         if total <= 0:
-            ids_csv = ",".join(str(int(getattr(c, "id", 0) or 0)) for c in cats if int(getattr(c, "id", 0) or 0) > 0)
             await ctx.send(f"fetchclear: nothing to delete in categories [{ids_csv}] (delete_all={delete_all}).")
             return
 
         # Dryrun listing
         if not do_confirm:
-            ids_csv = ",".join(str(int(getattr(c, "id", 0) or 0)) for c in cats if int(getattr(c, "id", 0) or 0) > 0)
-            lines: List[str] = [
-                "Fetchclear (DRYRUN)",
-                f"{_render_progress_bar(0, max(1, int(total)))}",
-                f"would_delete_total={total} categories={len(cats)} delete_all={delete_all}",
-                "NOTE: DRYRUN ONLY — nothing was deleted.",
-                "",
-                "Per-category:",
-            ]
-            for c, t in targets_by_cat:
+            try:
+                log_info(
+                    f"[fetchclear] dryrun categories={len(cats)} would_delete_total={total} delete_all={delete_all} ids={ids_csv}",
+                    event="fetchclear_dryrun",
+                    categories=int(len(cats)),
+                    would_delete_total=int(total),
+                    delete_all=bool(delete_all),
+                    category_ids_csv=str(ids_csv),
+                )
+            except Exception:
+                pass
+
+            # Summary embed
+            try:
+                summary = discord.Embed(title="Fetchclear (DRYRUN)", color=0xFEE75C)
+                summary.description = "\n".join(
+                    [
+                        _render_progress_bar(0, max(1, int(total))),
+                        f"would_delete_total={total} categories={len(cats)} delete_all={delete_all}",
+                        "NOTE: DRYRUN ONLY — nothing was deleted.",
+                    ]
+                )[:4096]
+                summary.add_field(
+                    name="To delete for real",
+                    value=(f"!fetchclear {ids_csv} " + ("all " if delete_all else "") + "confirm")[:1024],
+                    inline=False,
+                )
+                await ctx.send(embed=summary)
+            except Exception:
+                await ctx.send(
+                    (
+                        "Fetchclear (DRYRUN)\n"
+                        f"would_delete_total={total} categories={len(cats)} delete_all={delete_all}\n"
+                        "NOTE: DRYRUN ONLY — nothing was deleted.\n\n"
+                        "To delete for real, run:\n"
+                        f"!fetchclear {ids_csv} " + ("all " if delete_all else "") + "confirm"
+                    )[:1950]
+                )
+                return
+
+            # One embed per category (keeps output readable)
+            max_cat_embeds = 12
+            for c, t in targets_by_cat[:max_cat_embeds]:
                 try:
                     cid = int(getattr(c, "id", 0) or 0)
                 except Exception:
                     cid = 0
                 nm = str(getattr(c, "name", "") or "").strip() or f"category_{cid}"
-                lines.append(f"- {nm} ({cid}): would_delete={len(t)}")
-                for ch in t[:5]:
+                sample_lines: List[str] = []
+                for ch in t[:10]:
                     try:
-                        lines.append(f"  - #{getattr(ch,'name','')} ({getattr(ch,'id',0)})")
+                        sample_lines.append(f"#{getattr(ch,'name','')} ({getattr(ch,'id',0)})")
                     except Exception:
                         continue
-                if len(t) > 5:
-                    lines.append("  - ... (truncated)")
-            lines += [
-                "",
-                "To delete for real, run:",
-                f"!fetchclear {ids_csv} " + ("all " if delete_all else "") + "confirm",
-            ]
-            await ctx.send("\n".join(lines)[:1950])
+                if len(t) > 10:
+                    sample_lines.append("... (truncated)")
+                try:
+                    e2 = discord.Embed(title=nm[:256], color=0x5865F2)
+                    e2.description = f"category_id={cid}\nwould_delete={len(t)}"
+                    if sample_lines:
+                        e2.add_field(name="Sample channels", value="\n".join(sample_lines)[:1024], inline=False)
+                    await ctx.send(embed=e2)
+                except Exception:
+                    break
             return
 
         # Execute deletes with progress
+        # Permission sanity check (avoids silent “nothing happened” confusion).
+        try:
+            me = getattr(ctx.guild, "me", None) or getattr(ctx.guild, "guild_me", None)
+            perms = getattr(me, "guild_permissions", None)
+            if perms is not None and not bool(getattr(perms, "manage_channels", False)):
+                await ctx.send("Fetchclear: missing permission `Manage Channels` (cannot delete channels).")
+                try:
+                    log_warn(
+                        "[fetchclear] abort: missing manage_channels permission",
+                        event="fetchclear_missing_permission",
+                        guild_id=int(getattr(ctx.guild, "id", 0) or 0),
+                    )
+                except Exception:
+                    pass
+                return
+        except Exception:
+            pass
+
+        try:
+            log_info(
+                f"[fetchclear] delete start categories={len(cats)} total={total} delete_all={delete_all} ids={ids_csv}",
+                event="fetchclear_delete_start",
+                categories=int(len(cats)),
+                total=int(total),
+                delete_all=bool(delete_all),
+                category_ids_csv=str(ids_csv),
+            )
+        except Exception:
+            pass
         progress = await ctx.send(
             "\n".join(
                 [
@@ -782,6 +861,20 @@ def register_commands(*, bot, forwarder) -> None:
                 f"deleted={deleted}/{total} errors={errors} categories={len(cats)} delete_all={delete_all}"
             )[:1950]
         )
+
+        try:
+            log_info(
+                f"[fetchclear] delete done deleted={deleted}/{total} errors={errors} categories={len(cats)} delete_all={delete_all}",
+                event="fetchclear_delete_done",
+                deleted=int(deleted),
+                total=int(total),
+                errors=int(errors),
+                categories=int(len(cats)),
+                delete_all=bool(delete_all),
+                category_ids_csv=str(ids_csv),
+            )
+        except Exception:
+            pass
 
     @bot.command(name="fetchauth")
     async def fetchauth_cmd(ctx, source_guild_id: str = "") -> None:
