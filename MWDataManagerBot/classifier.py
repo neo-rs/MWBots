@@ -183,6 +183,9 @@ def select_target_channel_id(
     source_group = determine_source_group(source_channel_id)
     is_instore_source = source_group in {"instore", "clearance"}
     instore_required = has_instore_required_fields(text_to_check)
+    # Accept in-store formatted leads even if they arrive from an "online" channel.
+    instore_formatted_override = bool(instore_required and not is_instore_source)
+    is_instore_source = bool(is_instore_source or instore_formatted_override)
     normalized_lower = (text_to_check or "").lower()
 
     instore_context = False
@@ -210,6 +213,7 @@ def select_target_channel_id(
                     "source_group": source_group,
                     "is_instore_source": bool(is_instore_source),
                     "instore_required_fields": bool(instore_required),
+                    "instore_formatted_override": bool(instore_formatted_override),
                     "instore_context": bool(instore_context),
                     "where_location": where_location,
                     "store_category": store_category,
@@ -240,7 +244,7 @@ def select_target_channel_id(
     if keyword_hit and cfg.SMARTFILTER_MONITORED_KEYWORD_CHANNEL_ID:
         return cfg.SMARTFILTER_MONITORED_KEYWORD_CHANNEL_ID, "MONITORED_KEYWORD"
 
-    # 3-6) INSTORE categories (ONLY for instore/clearance source channels)
+    # 3-6) INSTORE categories (for instore/clearance channels OR in-store formatted leads)
     if is_instore_source:
         seasonal_hit = bool(SEASONAL_PATTERN.search(text_blob))
         sneakers_hit = bool(SNEAKERS_PATTERN.search(text_blob))
@@ -355,6 +359,8 @@ def detect_all_link_types(
     source_group = determine_source_group(source_channel_id)
     is_instore_source = source_group in {"instore", "clearance"}
     instore_required = has_instore_required_fields(text_to_check)
+    instore_formatted_override = bool(instore_required and not is_instore_source)
+    is_instore_source = bool(is_instore_source or instore_formatted_override)
     normalized_lower = (text_to_check or "").lower()
 
     instore_context = False
@@ -382,6 +388,7 @@ def detect_all_link_types(
                     "source_group": source_group,
                     "is_instore_source": bool(is_instore_source),
                     "instore_required_fields": bool(instore_required),
+                    "instore_formatted_override": bool(instore_formatted_override),
                     "instore_context": bool(instore_context),
                     "where_location": where_location,
                     "store_category": store_category,

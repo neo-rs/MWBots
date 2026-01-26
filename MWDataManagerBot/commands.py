@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from fetchall import iter_fetchall_entries, run_fetchall, run_fetchsync, set_ignored_channel_ids, upsert_mapping
+from keywords import add_keyword, invalidate_keywords_cache, load_keywords, remove_keyword
 from logging_utils import log_info, log_warn
 import settings_store as cfg
 
@@ -33,6 +34,22 @@ def register_commands(*, bot, forwarder) -> None:
             return str(tokens.get("FETCHALL_USER_TOKEN") or "").strip()
         except Exception:
             return ""
+
+    def _reload_keywords_into_forwarder() -> int:
+        """Reload keyword list and update the forwarder in-memory copy."""
+        try:
+            invalidate_keywords_cache()
+        except Exception:
+            pass
+        try:
+            kws = load_keywords(force=True)
+        except Exception:
+            kws = []
+        try:
+            setattr(forwarder, "keywords_list", list(kws))
+        except Exception:
+            pass
+        return int(len(kws))
 
     def _parse_csv_ints(text: str) -> List[int]:
         out: List[int] = []
@@ -238,6 +255,36 @@ def register_commands(*, bot, forwarder) -> None:
             log_warn(f"status failed: {e}")
             await ctx.send(f"status failed: {type(e).__name__}: {e}")
 
+    @bot.command(name="keywords")
+    async def keywords_cmd(ctx, action: str = "list", *, value: str = "") -> None:
+        """Manage monitored keywords. Usage: !keywords list | add <kw> | remove <kw> | reload"""
+        try:
+            act = str(action or "").strip().lower()
+        except Exception:
+            act = "list"
+        if act in {"reload", "refresh"}:
+            n = _reload_keywords_into_forwarder()
+            await ctx.send(f"Keywords reloaded. count={n}")
+            return
+        if act in {"add", "create", "new"}:
+            ok, reason = add_keyword(value)
+            n = _reload_keywords_into_forwarder()
+            await ctx.send(f"Keyword add: ok={ok} reason={reason} count={n}")
+            return
+        if act in {"remove", "rm", "del", "delete"}:
+            ok, reason = remove_keyword(value)
+            n = _reload_keywords_into_forwarder()
+            await ctx.send(f"Keyword remove: ok={ok} reason={reason} count={n}")
+            return
+        # list (default)
+        kws = load_keywords(force=True)
+        if not kws:
+            await ctx.send("Monitored keywords: (none)")
+            return
+        preview = ", ".join(kws[:40])
+        extra = "" if len(kws) <= 40 else f" ... (+{len(kws)-40} more)"
+        await ctx.send(f"Monitored keywords ({len(kws)}): {preview}{extra}")
+
     @bot.command(name="slashstatus")
     async def slashstatus_cmd(ctx) -> None:
         """Debug: show slash commands known to this bot for the current guild."""
@@ -304,6 +351,7 @@ def register_commands(*, bot, forwarder) -> None:
 
     fetchmap = app_commands.Group(name="fetchmap", description="Manage fetchall mappings")
     fetchsync = app_commands.Group(name="fetchsync", description="Pull+mirror messages from source servers")
+    kw = app_commands.Group(name="keywords", description="Manage monitored keywords")
 
     @fetchmap.command(name="list", description="List current fetchall mappings")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -503,6 +551,53 @@ def register_commands(*, bot, forwarder) -> None:
                 pass
         await interaction.followup.send(f"Fetchsync complete: {ok}/{len(selected)} ok; sent={total_sent}", ephemeral=True)
 
+    @kw.command(name="list", description="List monitored keywords")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def kw_list(interaction: discord.Interaction) -> None:
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception:
+            pass
+        kws = load_keywords(force=True)
+        if not kws:
+            await interaction.followup.send("Monitored keywords: (none)", ephemeral=True)
+            return
+        preview = "\n".join(f"- {k}" for k in kws[:60])
+        extra = "" if len(kws) <= 60 else f"\n... (+{len(kws)-60} more)"
+        await interaction.followup.send(f"Monitored keywords ({len(kws)}):\n{preview}{extra}", ephemeral=True)
+
+    @kw.command(name="add", description="Add a monitored keyword")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def kw_add(interaction: discord.Interaction, keyword: str) -> None:
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception:
+            pass
+        ok, reason = add_keyword(keyword)
+        n = _reload_keywords_into_forwarder()
+        await interaction.followup.send(f"Keyword add: ok={ok} reason={reason} count={n}", ephemeral=True)
+
+    @kw.command(name="remove", description="Remove a monitored keyword")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def kw_remove(interaction: discord.Interaction, keyword: str) -> None:
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception:
+            pass
+        ok, reason = remove_keyword(keyword)
+        n = _reload_keywords_into_forwarder()
+        await interaction.followup.send(f"Keyword remove: ok={ok} reason={reason} count={n}", ephemeral=True)
+
+    @kw.command(name="reload", description="Reload monitored keywords from disk")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def kw_reload(interaction: discord.Interaction) -> None:
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception:
+            pass
+        n = _reload_keywords_into_forwarder()
+        await interaction.followup.send(f"Keywords reloaded. count={n}", ephemeral=True)
+
     # Add groups to the tree for destination guild(s) only.
     for g in guild_objs:
         try:
@@ -513,3 +608,7 @@ def register_commands(*, bot, forwarder) -> None:
             bot.tree.add_command(fetchsync, guild=g)
         except Exception as e:
             log_warn(f"Failed to add /fetchsync to tree for guild={getattr(g,'id',None)}: {type(e).__name__}: {e}")
+        try:
+            bot.tree.add_command(kw, guild=g)
+        except Exception as e:
+            log_warn(f"Failed to add /keywords to tree for guild={getattr(g,'id',None)}: {type(e).__name__}: {e}")

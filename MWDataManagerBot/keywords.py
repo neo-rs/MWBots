@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -12,12 +14,19 @@ _KEYWORDS_PATH = _CONFIG_DIR / "keywords.json"
 _CACHE: List[str] = []
 _CACHE_TS: float = 0.0
 _CACHE_TTL_SECONDS: float = 60.0
+_FILE_LOCK = threading.RLock()
 
 
-def load_keywords() -> List[str]:
+def invalidate_keywords_cache() -> None:
+    global _CACHE, _CACHE_TS
+    _CACHE = []
+    _CACHE_TS = 0.0
+
+
+def load_keywords(*, force: bool = False) -> List[str]:
     global _CACHE, _CACHE_TS
     now = time.time()
-    if _CACHE and (now - _CACHE_TS) < _CACHE_TTL_SECONDS:
+    if (not force) and _CACHE and (now - _CACHE_TS) < _CACHE_TTL_SECONDS:
         return list(_CACHE)
     kws: List[str] = []
     try:
@@ -33,6 +42,61 @@ def load_keywords() -> List[str]:
     _CACHE = kws
     _CACHE_TS = now
     return list(_CACHE)
+
+
+def save_keywords(keywords_list: List[str]) -> bool:
+    """Persist keywords to config/keywords.json. Returns True if saved."""
+    try:
+        with _FILE_LOCK:
+            _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            cleaned = [str(x).strip() for x in (keywords_list or []) if str(x).strip()]
+            # De-dupe case-insensitively while preserving first occurrence
+            seen = set()
+            out: List[str] = []
+            for kw in cleaned:
+                k = kw.lower()
+                if k in seen:
+                    continue
+                seen.add(k)
+                out.append(kw)
+            tmp = Path(str(_KEYWORDS_PATH) + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(out, f, indent=2, ensure_ascii=False)
+            try:
+                os.replace(str(tmp), str(_KEYWORDS_PATH))
+            except Exception:
+                with open(_KEYWORDS_PATH, "w", encoding="utf-8") as f:
+                    json.dump(out, f, indent=2, ensure_ascii=False)
+        invalidate_keywords_cache()
+        return True
+    except Exception:
+        return False
+
+
+def add_keyword(keyword: str) -> Tuple[bool, str]:
+    kw = str(keyword or "").strip()
+    if not kw:
+        return False, "empty_keyword"
+    current = load_keywords(force=True)
+    if any(k.lower() == kw.lower() for k in current):
+        return False, "already_exists"
+    current.append(kw)
+    if not save_keywords(current):
+        return False, "save_failed"
+    return True, "added"
+
+
+def remove_keyword(keyword: str) -> Tuple[bool, str]:
+    kw = str(keyword or "").strip()
+    if not kw:
+        return False, "empty_keyword"
+    current = load_keywords(force=True)
+    kept = [k for k in current if k.lower() != kw.lower()]
+    if len(kept) == len(current):
+        return False, "not_found"
+    if not save_keywords(kept):
+        return False, "save_failed"
+    return True, "removed"
 
 
 def check_keyword_match(

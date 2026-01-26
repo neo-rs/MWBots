@@ -255,7 +255,17 @@ class MessageForwarder:
             "author": author_dict,
         }
 
-    async def _send_to_destination(self, *, dest_channel_id: int, content: str, embeds: List[Dict[str, Any]]) -> None:
+    async def _send_to_destination(
+        self,
+        *,
+        dest_channel_id: int,
+        content: str,
+        embeds: List[Dict[str, Any]],
+        allowed_mentions=None,
+        reference=None,
+        view=None,
+        return_first_message: bool = False,
+    ):
         import discord
 
         channel = self.bot.get_channel(int(dest_channel_id))
@@ -293,6 +303,7 @@ class MessageForwarder:
             except Exception:
                 continue
 
+        first_msg = None
         chunks = _chunk_text(content, 2000)
         for i, chunk in enumerate(chunks):
             # Simple per-destination throttle to reduce 429 spam (discord.py will still handle true rate limits).
@@ -312,13 +323,24 @@ class MessageForwarder:
                     if wait > 0:
                         await asyncio.sleep(wait)
             if i == 0 and embed_objs:
-                await channel.send(content=chunk, embeds=embed_objs[:10])
+                first_msg = await channel.send(
+                    content=chunk,
+                    embeds=embed_objs[:10],
+                    allowed_mentions=allowed_mentions,
+                    reference=reference,
+                    view=view,
+                )
             else:
-                await channel.send(content=chunk)
+                # Only attach reference/view on the first chunk.
+                msg = await channel.send(content=chunk, allowed_mentions=allowed_mentions)
+                if first_msg is None:
+                    first_msg = msg
             try:
                 self._last_send_ts[int(dest_channel_id)] = asyncio.get_event_loop().time()
             except Exception:
                 pass
+        if return_first_message:
+            return first_msg
 
     async def validate_route_maps(self) -> None:
         """
@@ -384,6 +406,273 @@ class MessageForwarder:
 
         if bad == 0:
             log_info(f"[ROUTE_MAP] validated {len(targets)} destination(s)")
+
+    def _apply_route_map(self, *, source_group: str, dest_channel_id: int) -> int:
+        """Apply MirrorWorld route-maps to a destination channel id."""
+        dest_after = int(dest_channel_id or 0)
+        if dest_after <= 0:
+            return 0
+        try:
+            if source_group == "online":
+                dest_after = int(getattr(cfg, "MIRRORWORLD_ROUTE_ONLINE", {}).get(dest_after, dest_after))
+            elif source_group == "instore":
+                dest_after = int(getattr(cfg, "MIRRORWORLD_ROUTE_INSTORE", {}).get(dest_after, dest_after))
+        except Exception:
+            pass
+        return int(dest_after or 0)
+
+    def _manual_classification_options(self) -> List[Tuple[str, int, str]]:
+        """
+        Build a list of assignable buckets for the unclassified picker.
+        Returns (tag, channel_id, label) for destinations that are configured (>0).
+        """
+        out: List[Tuple[str, int, str]] = []
+
+        def _add(tag: str, channel_id: int, label: str) -> None:
+            try:
+                cid = int(channel_id or 0)
+            except Exception:
+                cid = 0
+            if cid <= 0:
+                return
+            out.append((str(tag or ""), cid, str(label or tag or "")))
+
+        # In-store buckets
+        _add("INSTORE_SEASONAL", cfg.SMARTFILTER_INSTORE_SEASONAL_CHANNEL_ID, "In-store • Seasonal")
+        _add("INSTORE_SNEAKERS", cfg.SMARTFILTER_INSTORE_SNEAKERS_CHANNEL_ID, "In-store • Sneakers")
+        _add("INSTORE_CARDS", cfg.SMARTFILTER_INSTORE_CARDS_CHANNEL_ID, "In-store • Cards")
+        _add("INSTORE_THEATRE", cfg.SMARTFILTER_INSTORE_THEATRE_CHANNEL_ID, "In-store • Theatre")
+        _add("MAJOR_STORES", cfg.SMARTFILTER_MAJOR_STORES_CHANNEL_ID, "In-store • Major stores")
+        _add("DISCOUNTED_STORES", cfg.SMARTFILTER_DISCOUNTED_STORES_CHANNEL_ID, "In-store • Discounted stores")
+        _add("INSTORE_LEADS", cfg.SMARTFILTER_INSTORE_LEADS_CHANNEL_ID, "In-store • General")
+
+        # Online buckets
+        _add("UPCOMING", cfg.SMARTFILTER_UPCOMING_CHANNEL_ID, "Online • Upcoming")
+        _add("AFFILIATED_LINKS", cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID, "Online • Affiliate links")
+        _add("MONITORED_KEYWORD", cfg.SMARTFILTER_MONITORED_KEYWORD_CHANNEL_ID, "Monitored keyword")
+        _add("AMAZON", cfg.SMARTFILTER_AMAZON_CHANNEL_ID, "Amazon")
+        _add("AMAZON_FALLBACK", cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID, "Amazon (fallback)")
+
+        # Global-trigger buckets
+        _add("PRICE_ERROR", cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID, "Global • Price error/glitched")
+        _add("PROFITABLE_FLIP", cfg.SMARTFILTER_FLIPS_PROFITABLE_CHANNEL_ID, "Global • Profitable flip")
+        _add("LUNCHMONEY_FLIP", cfg.SMARTFILTER_FLIPS_LUNCHMONEY_CHANNEL_ID, "Global • Lunchmoney flip")
+        _add("AMAZON_PROFITABLE_LEAD", cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID, "Global • Amazon profitable lead")
+
+        # Discord select supports max 25 options.
+        return out[:25]
+
+    async def _send_unclassified_with_picker(
+        self,
+        *,
+        source_group: str,
+        formatted_content: str,
+        embeds_out: List[Dict[str, Any]],
+        source_message_id: int,
+        source_channel_id: int,
+        source_jump_url: str,
+        trace: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """
+        Forward the message into UNCLASSIFIED and post an interactive picker underneath it.
+        """
+        try:
+            import discord
+        except Exception:
+            return False
+
+        dest_unclassified = int(getattr(cfg, "SMARTFILTER_UNCLASSIFIED_CHANNEL_ID", 0) or 0)
+        if dest_unclassified <= 0:
+            return False
+
+        allowed_mentions = discord.AllowedMentions.none()
+        sent_msg = await self._send_to_destination(
+            dest_channel_id=dest_unclassified,
+            content=formatted_content,
+            embeds=embeds_out,
+            allowed_mentions=allowed_mentions,
+            return_first_message=True,
+        )
+        if sent_msg is None:
+            return False
+
+        options = self._manual_classification_options()
+        if not options:
+            return True
+
+        tag_to_channel: Dict[str, int] = {t: int(cid) for (t, cid, _lbl) in options}
+
+        class _ReasonModal(discord.ui.Modal):
+            def __init__(self, *, parent_view, selected_tag: str):
+                super().__init__(title="Why this classification?")
+                self._parent_view = parent_view
+                self._selected_tag = str(selected_tag or "")
+                self.reason = discord.ui.TextInput(
+                    label="Deciding factor / note",
+                    placeholder="E.g. \"Valentine's Day\" seasonal keyword in title; \"Disneyland\" in Where:",
+                    required=True,
+                    max_length=300,
+                    style=discord.TextStyle.paragraph,
+                )
+                self.add_item(self.reason)
+
+            async def on_submit(self, interaction: discord.Interaction) -> None:
+                await self._parent_view._complete(interaction, self._selected_tag, str(self.reason.value or "").strip())
+
+        class _AssignView(discord.ui.View):
+            def __init__(self):
+                super().__init__(timeout=60 * 60 * 24)
+                self.assigned: bool = False
+                self.assigned_by: str = ""
+                self.assigned_tag: str = ""
+                self.assigned_reason: str = ""
+
+                opts = []
+                for t, cid, lbl in options:
+                    opts.append(
+                        discord.SelectOption(
+                            label=str(lbl)[:100],
+                            value=str(t),
+                            description=f"dest={int(cid)}",
+                        )
+                    )
+                self.select = discord.ui.Select(
+                    placeholder="Assign classification...",
+                    min_values=1,
+                    max_values=1,
+                    options=opts[:25],
+                )
+                self.select.callback = self._on_select  # type: ignore
+                self.add_item(self.select)
+
+            async def _on_select(self, interaction: discord.Interaction) -> None:
+                try:
+                    perms = getattr(getattr(interaction, "user", None), "guild_permissions", None)
+                    can = bool(getattr(perms, "manage_guild", False) or getattr(perms, "manage_messages", False))
+                except Exception:
+                    can = False
+                if not can:
+                    await interaction.response.send_message("Missing permission (manage guild/messages).", ephemeral=True)
+                    return
+                if self.assigned:
+                    await interaction.response.send_message("Already assigned.", ephemeral=True)
+                    return
+                try:
+                    selected = (self.select.values or [""])[0]
+                except Exception:
+                    selected = ""
+                if not selected:
+                    await interaction.response.send_message("No selection.", ephemeral=True)
+                    return
+                await interaction.response.send_modal(_ReasonModal(parent_view=self, selected_tag=selected))
+
+            async def _complete(self, interaction: discord.Interaction, selected_tag: str, reason: str) -> None:
+                if self.assigned:
+                    try:
+                        await interaction.response.send_message("Already assigned.", ephemeral=True)
+                    except Exception:
+                        pass
+                    return
+                tag = str(selected_tag or "").strip()
+                dest_before = int(tag_to_channel.get(tag, 0) or 0)
+                dest_after = self_forwarder._apply_route_map(source_group=source_group, dest_channel_id=dest_before)
+                if dest_after <= 0:
+                    await interaction.response.send_message("Destination not configured.", ephemeral=True)
+                    return
+                try:
+                    await interaction.response.defer(ephemeral=True, thinking=True)
+                except Exception:
+                    pass
+                try:
+                    await self_forwarder._send_to_destination(
+                        dest_channel_id=dest_after,
+                        content=formatted_content,
+                        embeds=embeds_out,
+                        allowed_mentions=allowed_mentions,
+                    )
+                except Exception as e:
+                    await interaction.followup.send(f"Send failed: {type(e).__name__}: {e}", ephemeral=True)
+                    return
+
+                self.assigned = True
+                try:
+                    u = getattr(interaction, "user", None)
+                    self.assigned_by = getattr(u, "display_name", None) or getattr(u, "name", None) or "unknown"
+                except Exception:
+                    self.assigned_by = "unknown"
+                self.assigned_tag = tag
+                self.assigned_reason = reason
+                try:
+                    self.select.disabled = True
+                except Exception:
+                    pass
+
+                try:
+                    emb = discord.Embed(title="Manual classification", color=0x2ECC71)
+                    emb.add_field(name="Assigned", value=f"**{tag}** → `{dest_after}`", inline=False)
+                    emb.add_field(name="By", value=str(self.assigned_by or "unknown"), inline=True)
+                    emb.add_field(name="Reason", value=str(reason or "—")[:1000], inline=False)
+                    if source_jump_url:
+                        emb.add_field(name="Source link", value=str(source_jump_url), inline=False)
+                    await interaction.message.edit(embed=emb, view=self)
+                except Exception:
+                    pass
+
+                # Trace log entry
+                try:
+                    if trace is not None:
+                        trace.setdefault("manual_classification", []).append(
+                            {
+                                "source_message_id": int(source_message_id or 0),
+                                "source_channel_id": int(source_channel_id or 0),
+                                "assigned_tag": tag,
+                                "dest_before": dest_before,
+                                "dest_after": dest_after,
+                                "reason": reason,
+                                "by": self.assigned_by,
+                            }
+                        )
+                        write_trace_log(trace)
+                except Exception:
+                    pass
+
+                await interaction.followup.send(f"Assigned to **{tag}**.", ephemeral=True)
+
+        self_forwarder = self
+        view = _AssignView()
+        hints = {}
+        try:
+            hints = (trace or {}).get("classifier", {}) if isinstance((trace or {}).get("classifier", {}), dict) else {}
+        except Exception:
+            hints = {}
+        try:
+            emb = discord.Embed(title="No classification matched", color=0xE67E22)
+            emb.description = "Pick the correct bucket and add a short note. The bot will repost into that channel."
+            emb.add_field(name="Source", value=f"channel=`{source_channel_id}` msg=`{source_message_id}`", inline=False)
+            if source_jump_url:
+                emb.add_field(name="Source link", value=str(source_jump_url), inline=False)
+            # Small hint dump
+            where_loc = str(hints.get("where_location") or "").strip()
+            instore_req = bool(hints.get("instore_required_fields"))
+            if where_loc or instore_req:
+                emb.add_field(
+                    name="Hints",
+                    value=f"instore_required={instore_req}\nwhere={where_loc or '—'}",
+                    inline=False,
+                )
+            await self._send_to_destination(
+                dest_channel_id=dest_unclassified,
+                content="\u200b",
+                embeds=[emb.to_dict()],
+                allowed_mentions=allowed_mentions,
+                reference=sent_msg,
+                view=view,
+            )
+        except Exception:
+            # If the picker fails, still keep the unclassified forwarded message.
+            return True
+
+        return True
 
     async def handle_message(self, message) -> None:
         # Gate
@@ -552,25 +841,7 @@ class MessageForwarder:
                 deduped.append((cid, tag))
             dispatch_link_types, stop_after_first = order_link_types(deduped)
 
-        if not dispatch_link_types:
-            fallback = select_target_channel_id(
-                text_to_check, attachments, self.keywords_list, source_channel_id=channel_id, trace=trace
-            )
-            if fallback:
-                dispatch_link_types = [fallback]
-
-        if not dispatch_link_types:
-            trace["decision"] = {"action": "skip", "reason": "no_destination"}
-            try:
-                trace.setdefault("classifier", {})["dispatch_link_types"] = []
-                write_trace_log(trace)
-            except Exception:
-                pass
-            if cfg.VERBOSE:
-                log_warn(f"No destination after classification (msg={message.id}) for source channel {channel_id}")
-            return
-
-        # Format output
+        # Format output (also used for UNCLASSIFIED fallback)
         formatted_content = content
         replaced = False
         if cfg.ENABLE_RAW_LINK_UNWRAP:
@@ -610,16 +881,6 @@ class MessageForwarder:
         except Exception:
             pass
 
-        try:
-            trace.setdefault("classifier", {})["dispatch_link_types"] = dispatch_link_types
-            trace["stop_after_first"] = bool(stop_after_first)
-            trace["raw_links_count"] = len(raw_links or [])
-            trace["raw_link_replaced_in_content"] = bool(replaced)
-        except Exception:
-            pass
-
-        forwarded = 0
-        dest_traces: List[Dict[str, Any]] = []
         # Route maps apply to *destinations* (legacy MirrorWorld routing maps).
         source_group = "unknown"
         try:
@@ -634,6 +895,51 @@ class MessageForwarder:
         except Exception:
             source_group = "unknown"
 
+        if not dispatch_link_types:
+            fallback = select_target_channel_id(
+                text_to_check, attachments, self.keywords_list, source_channel_id=channel_id, trace=trace
+            )
+            if fallback:
+                dispatch_link_types = [fallback]
+
+        try:
+            trace.setdefault("classifier", {})["dispatch_link_types"] = dispatch_link_types
+            trace["stop_after_first"] = bool(stop_after_first)
+            trace["raw_links_count"] = len(raw_links or [])
+            trace["raw_link_replaced_in_content"] = bool(replaced)
+        except Exception:
+            pass
+
+        if not dispatch_link_types:
+            trace["decision"] = {"action": "unclassified", "reason": "no_destination"}
+            try:
+                write_trace_log(trace)
+            except Exception:
+                pass
+            # UNCLASSIFIED fallback channel (interactive assignment)
+            try:
+                sent = await self._send_unclassified_with_picker(
+                    source_group=source_group,
+                    formatted_content=formatted_content,
+                    embeds_out=embeds_out,
+                    source_message_id=int(getattr(message, "id", 0) or 0),
+                    source_channel_id=int(channel_id or 0),
+                    source_jump_url=str(getattr(message, "jump_url", "") or ""),
+                    trace=trace,
+                )
+            except Exception as e:
+                sent = False
+                if cfg.VERBOSE:
+                    log_warn(f"UNCLASSIFIED fallback failed (msg={message.id}): {type(e).__name__}: {e}")
+            if sent:
+                return
+            if cfg.VERBOSE:
+                log_warn(f"No destination after classification (msg={message.id}) for source channel {channel_id}")
+            return
+
+        forwarded = 0
+        dest_traces: List[Dict[str, Any]] = []
+
         for dest_channel_id, tag in dispatch_link_types:
             dest_before = int(dest_channel_id or 0)
             dest_after = dest_before
@@ -644,13 +950,7 @@ class MessageForwarder:
                 continue
 
             # Apply MIRRORWORLD routing maps (from legacy settings.env) so we don't forward into intermediate channels.
-            try:
-                if source_group == "online":
-                    dest_after = int(getattr(cfg, "MIRRORWORLD_ROUTE_ONLINE", {}).get(dest_after, dest_after))
-                elif source_group == "instore":
-                    dest_after = int(getattr(cfg, "MIRRORWORLD_ROUTE_INSTORE", {}).get(dest_after, dest_after))
-            except Exception:
-                pass
+            dest_after = self._apply_route_map(source_group=source_group, dest_channel_id=dest_after)
             dest_trace["dest_after"] = dest_after
             dest_channel_id = dest_after
 
@@ -833,9 +1133,11 @@ def run_bot(*, settings: Dict[str, Any], token: str) -> Optional[int]:
             int(cfg.SMARTFILTER_INSTORE_THEATRE_CHANNEL_ID or 0),
             int(cfg.SMARTFILTER_MONITORED_KEYWORD_CHANNEL_ID or 0),
             int(cfg.SMARTFILTER_DEFAULT_CHANNEL_ID or 0),
+            int(getattr(cfg, "SMARTFILTER_UNCLASSIFIED_CHANNEL_ID", 0) or 0),
             int(cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID or 0),
             int(cfg.SMARTFILTER_FLIPS_PROFITABLE_CHANNEL_ID or 0),
             int(cfg.SMARTFILTER_FLIPS_LUNCHMONEY_CHANNEL_ID or 0),
+            int(getattr(cfg, "SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID", 0) or 0),
         ]
         if not any(x > 0 for x in dest_ids):
             log_warn(
@@ -848,6 +1150,21 @@ def run_bot(*, settings: Dict[str, Any], token: str) -> Optional[int]:
             await forwarder.validate_route_maps()
         except Exception:
             pass
+
+        # Ensure we keep slash commands guild-scoped only:
+        # clear any previously-registered GLOBAL app commands for this application.
+        try:
+            bot.tree.clear_commands(guild=None)
+            cleared = await bot.tree.sync()
+            try:
+                log_info(f"Global slash commands cleared (count={len(cleared)})")
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                log_warn(f"Global slash clear failed ({type(e).__name__}: {e})")
+            except Exception:
+                pass
 
         # Slash commands: sync ONLY to destination guild(s) (fast propagation).
         try:

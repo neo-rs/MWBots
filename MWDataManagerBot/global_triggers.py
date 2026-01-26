@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import settings_store as cfg
 from logging_utils import log_debug, log_smartfilter
-from patterns import PRICE_ERROR_PATTERN, PROFITABLE_FLIP_PATTERN
+from patterns import AMAZON_LINK_PATTERN, PRICE_ERROR_PATTERN, PROFITABLE_FLIP_PATTERN
 from utils import collect_embed_strings, has_product_and_marketplace_links, normalize_message
 
 
@@ -218,11 +218,28 @@ def detect_global_triggers(
 
     # PROFITABLE_FLIP / LUNCHMONEY_FLIP (online only; explainable)
     if (cfg.SMARTFILTER_FLIPS_PROFITABLE_CHANNEL_ID or cfg.SMARTFILTER_FLIPS_LUNCHMONEY_CHANNEL_ID) and source_is_online:
+        # Amazon gating: never send Amazon content to flips profitable/lunchmoney.
+        amazon_match_source = _match_compiled(AMAZON_LINK_PATTERN, text=text_to_check, embed=embed_text)
+        amazon_hit = bool(amazon_match_source)
+        amazon_match = None
+        try:
+            if amazon_match_source == "text":
+                m = AMAZON_LINK_PATTERN.search(text_to_check or "")
+                amazon_match = m.group(0) if m else None
+            elif amazon_match_source == "embed":
+                m = AMAZON_LINK_PATTERN.search(embed_text or "")
+                amazon_match = m.group(0) if m else None
+        except Exception:
+            amazon_match = None
+
         # Strict intent matches (block mismatched-source flips)
         strict_instore_only_match_source = _match_compiled(STRICT_INSTORE_ONLY_PATTERN, text=text_to_check, embed=embed_text)
         strict_online_only_match_source = _match_compiled(STRICT_ONLINE_ONLY_PATTERN, text=text_to_check, embed=embed_text)
         sf_ctx.update(
             {
+                "amazon_hit": bool(amazon_hit),
+                "amazon_match_source": amazon_match_source,
+                "amazon_match": amazon_match,
                 "strict_instore_only": bool(strict_instore_only_match_source),
                 "strict_instore_only_match_source": strict_instore_only_match_source,
                 "strict_online_only": bool(strict_online_only_match_source),
@@ -264,8 +281,40 @@ def detect_global_triggers(
             }
         )
 
+        # If Amazon content is present, do not evaluate or route to flip channels.
+        # Instead, optionally route to a dedicated Amazon leads channel if configured.
+        if amazon_hit:
+            if (
+                int(getattr(cfg, "SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID", 0) or 0) > 0
+                and bool(has_marketplace_link)
+                and bool(has_product_link)
+                and not bool(dyor_block)
+            ):
+                results.append((int(cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID), "AMAZON_PROFITABLE_LEAD"))
+                log_smartfilter(
+                    "AMAZON_PROFITABLE_LEAD",
+                    "TRIGGER",
+                    {**sf_ctx, "reason": "amazon_content_blocked_from_flips"},
+                )
+            else:
+                # Log as a skip so you can see why flips didn't fire.
+                log_smartfilter(
+                    "PROFITABLE_FLIP",
+                    "SKIP",
+                    {**sf_ctx, "reason": "amazon_content_excluded"},
+                )
+                log_smartfilter(
+                    "LUNCHMONEY_FLIP",
+                    "SKIP",
+                    {**sf_ctx, "reason": "amazon_content_excluded"},
+                )
+            # Always skip flip evaluation for Amazon content.
+            pass
+
         # Hard gates / blocks (log the first concrete block if message is "flip-shaped" enough)
         flip_shape = bool(marketplace_hit or resell_indicator or has_prices or PROFITABLE_FLIP_PATTERN.search(normalized_text))
+        if amazon_hit:
+            flip_shape = False
 
         if flip_shape and dyor_block:
             log_smartfilter("PROFITABLE_FLIP", "BLOCK", {**sf_ctx, "reason": "dyor_block"})
