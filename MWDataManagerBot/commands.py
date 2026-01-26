@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional
 
 from fetchall import (
@@ -279,7 +280,7 @@ def register_commands(*, bot, forwarder) -> None:
             await ctx.send(f"Fetchsync failed: {type(e).__name__}: {e}")
 
     @bot.command(name="fetchclear")
-    async def fetchclear_cmd(ctx, category_id: str = "", flag1: str = "", flag2: str = "") -> None:
+    async def fetchclear_cmd(ctx, *args: str) -> None:
         """
         Delete Mirror World mirror/separator channels in a destination category.
 
@@ -287,40 +288,59 @@ def register_commands(*, bot, forwarder) -> None:
         - Dryrun by default (lists what would be deleted).
         - Run with `confirm` to actually delete.
         - Add `all` to delete non-mirror channels too.
+        - If no category is provided, shows a dropdown so you can select one or more categories.
 
         Examples:
           !fetchclear
+          !fetchclear confirm
           !fetchclear 1437856372300451851
           !fetchclear 1437856372300451851 confirm
           !fetchclear 1437856372300451851 all confirm
+          !fetchclear 111111111111111111,222222222222222222 confirm
         """
+        if discord is None:
+            await ctx.send("fetchclear failed: discord.py import error (discord is unavailable in this runtime).")
+            return
+
         try:
             import asyncio
             import time as _time
-            import discord  # type: ignore
         except Exception as e:
-            await ctx.send(f"fetchclear failed: discord import error: {type(e).__name__}: {e}")
+            await ctx.send(f"fetchclear failed: runtime import error: {type(e).__name__}: {e}")
             return
 
-        # Default to configured dest category if present; otherwise use the user-requested Daily Upcoming category.
-        default_cat = int(getattr(cfg, "FETCHALL_DEFAULT_DEST_CATEGORY_ID", 0) or 0)
-        if default_cat <= 0:
-            default_cat = 1437856372300451851
-
-        args = [str(category_id or "").strip(), str(flag1 or "").strip(), str(flag2 or "").strip()]
-        args = [a for a in args if a]
-        cat_id = 0
+        tokens = [str(a or "").strip() for a in (args or [])]
+        tokens = [t for t in tokens if t]
         flags = set()
-        for a in args:
-            if a.isdigit() and cat_id <= 0:
-                try:
-                    cat_id = int(a)
-                except Exception:
-                    cat_id = 0
+        category_ids: List[int] = []
+
+        def _extract_ids(token: str) -> List[int]:
+            # Accept raw ids, CSV, and mentions like <#123>.
+            t = str(token or "").strip()
+            if not t:
+                return []
+            cleaned = re.sub(r"[^0-9,]", "", t)
+            return _parse_csv_ints(cleaned) if cleaned else []
+
+        for t in tokens:
+            tl = t.lower().strip()
+            if tl in {"confirm", "all"}:
+                flags.add(tl)
                 continue
-            flags.add(a.lower())
-        if cat_id <= 0:
-            cat_id = int(default_cat)
+            ids = _extract_ids(t)
+            if ids:
+                category_ids.extend(ids)
+                continue
+            flags.add(tl)
+        # de-dupe preserving order
+        seen_c = set()
+        dedup_cats: List[int] = []
+        for cid in category_ids:
+            if cid in seen_c:
+                continue
+            seen_c.add(cid)
+            dedup_cats.append(cid)
+        category_ids = dedup_cats
 
         do_confirm = "confirm" in flags
         delete_all = "all" in flags
@@ -329,83 +349,294 @@ def register_commands(*, bot, forwarder) -> None:
             await ctx.send("fetchclear: must be run inside a guild/server.")
             return
 
-        cat = ctx.guild.get_channel(int(cat_id))
-        if not isinstance(cat, discord.CategoryChannel):
-            await ctx.send(f"fetchclear: category not found or not a category: {cat_id}")
+        async def _prompt_pick_categories() -> List[int]:
+            """
+            Prompt the command invoker to pick one/many destination categories.
+            Prefer configured mapping destination categories if available.
+            """
+            # Prefer: default dest category, then mapping dest categories, then current channel category.
+            preferred_ids: List[int] = []
+            try:
+                default_cat = int(getattr(cfg, "FETCHALL_DEFAULT_DEST_CATEGORY_ID", 0) or 0)
+            except Exception:
+                default_cat = 0
+            if default_cat > 0:
+                preferred_ids.append(default_cat)
+
+            try:
+                cfg_data = load_fetchall_mappings()
+            except Exception:
+                cfg_data = {}
+            for e in (cfg_data.get("guilds", []) or []):
+                if not isinstance(e, dict):
+                    continue
+                try:
+                    dcid = int(e.get("destination_category_id", 0) or 0)
+                except Exception:
+                    dcid = 0
+                if dcid > 0:
+                    preferred_ids.append(dcid)
+
+            try:
+                chan_cat_id = int(getattr(getattr(ctx, "channel", None), "category_id", 0) or 0)
+            except Exception:
+                chan_cat_id = 0
+            if chan_cat_id > 0:
+                preferred_ids.append(chan_cat_id)
+
+            # De-dupe while preserving order
+            seen_p = set()
+            dedup_pref: List[int] = []
+            for x in preferred_ids:
+                if x <= 0:
+                    continue
+                if x in seen_p:
+                    continue
+                seen_p.add(x)
+                dedup_pref.append(x)
+            preferred_ids = dedup_pref
+
+            # Build candidate category list (in guild order).
+            preferred_set = set(preferred_ids)
+            guild_cats = list(getattr(ctx.guild, "categories", []) or [])
+            candidates: List["discord.CategoryChannel"] = []
+            for c in guild_cats:
+                try:
+                    if int(getattr(c, "id", 0) or 0) in preferred_set:
+                        candidates.append(c)
+                except Exception:
+                    continue
+            if not candidates:
+                candidates = [c for c in guild_cats if isinstance(c, discord.CategoryChannel)]
+
+            # Discord select menus cap at 25 options.
+            candidates = candidates[:25]
+            if not candidates:
+                return []
+
+            opts: List["discord.SelectOption"] = []
+            for c in candidates:
+                try:
+                    cid = int(getattr(c, "id", 0) or 0)
+                except Exception:
+                    continue
+                if cid <= 0:
+                    continue
+                name = str(getattr(c, "name", "") or "").strip() or f"category_{cid}"
+                try:
+                    n_channels = int(len(getattr(c, "channels", []) or []))
+                except Exception:
+                    n_channels = 0
+                desc = f"{n_channels} channel(s)"
+                opts.append(discord.SelectOption(label=name[:100], value=str(cid), description=desc[:100]))
+            opts = opts[:25]
+            if not opts:
+                return []
+
+            author_id = int(getattr(getattr(ctx, "author", None), "id", 0) or 0)
+
+            class _PickCatsView(discord.ui.View):
+                def __init__(self):
+                    super().__init__(timeout=60)
+                    self.selected_ids: List[int] = []
+                    self._sel = discord.ui.Select(
+                        placeholder="Select category/categories to clear (multi-select)",
+                        min_values=1,
+                        max_values=min(25, len(opts)),
+                        options=opts,
+                    )
+                    self._sel.callback = self._on_select  # type: ignore
+                    self.add_item(self._sel)
+
+                async def interaction_check(self, interaction: "discord.Interaction") -> bool:  # type: ignore[override]
+                    try:
+                        uid = int(getattr(getattr(interaction, "user", None), "id", 0) or 0)
+                    except Exception:
+                        uid = 0
+                    if author_id > 0 and uid != author_id:
+                        try:
+                            await interaction.response.send_message("This dropdown is only for the command invoker.", ephemeral=True)
+                        except Exception:
+                            pass
+                        return False
+                    return True
+
+                async def _on_select(self, interaction: "discord.Interaction") -> None:
+                    vals = list(getattr(self._sel, "values", []) or [])
+                    chosen: List[int] = []
+                    for v in vals:
+                        try:
+                            cid = int(str(v))
+                        except Exception:
+                            continue
+                        if cid > 0:
+                            chosen.append(cid)
+                    # de-dupe preserving order
+                    seen = set()
+                    self.selected_ids = [x for x in chosen if x > 0 and (x not in seen and not seen.add(x))]
+                    try:
+                        await interaction.response.defer()
+                    except Exception:
+                        pass
+                    self.stop()
+
+            view = _PickCatsView()
+            prompt = (
+                "fetchclear: pick destination categories.\n"
+                f"- delete_all={delete_all}\n"
+                f"- confirm={do_confirm}\n"
+                "Tip: choose multiple categories from the dropdown."
+            )
+            try:
+                msg = await ctx.send(prompt, view=view)
+            except Exception:
+                return []
+            await view.wait()
+            try:
+                for item in getattr(view, "children", []) or []:
+                    try:
+                        item.disabled = True
+                    except Exception:
+                        pass
+                await msg.edit(view=view)
+            except Exception:
+                pass
+            return list(getattr(view, "selected_ids", []) or [])
+
+        # If no category ids were provided, use dropdown selection.
+        if not category_ids:
+            picked = await _prompt_pick_categories()
+            if not picked:
+                await ctx.send("fetchclear: no categories selected (or timed out).")
+                return
+            category_ids = picked
+
+        # Resolve categories
+        cats: List["discord.CategoryChannel"] = []
+        bad: List[int] = []
+        for cid in category_ids:
+            ch = ctx.guild.get_channel(int(cid))
+            if isinstance(ch, discord.CategoryChannel):
+                cats.append(ch)
+            else:
+                bad.append(int(cid))
+        # de-dupe preserving order
+        seen_cat = set()
+        dedup_cats_obj: List["discord.CategoryChannel"] = []
+        for c in cats:
+            try:
+                cid = int(getattr(c, "id", 0) or 0)
+            except Exception:
+                cid = 0
+            if cid <= 0:
+                continue
+            if cid in seen_cat:
+                continue
+            seen_cat.add(cid)
+            dedup_cats_obj.append(c)
+        cats = dedup_cats_obj
+        if not cats:
+            await ctx.send(f"fetchclear: category not found or not a category: {', '.join(str(x) for x in bad[:10])}")
             return
 
-        # Select channels to delete
-        targets = []
-        for ch in list(getattr(cat, "channels", []) or []):
-            try:
-                if not hasattr(ch, "delete"):
-                    continue
-            except Exception:
-                continue
-            topic = str(getattr(ch, "topic", "") or "")
-            name = str(getattr(ch, "name", "") or "")
-            is_mirror = bool(topic.startswith("MIRROR:"))
-            is_separator = bool(topic.startswith("separator for") or name.startswith("📅---"))
-            if delete_all:
-                targets.append(ch)
-            else:
-                if is_mirror or is_separator:
-                    targets.append(ch)
+        if bad:
+            await ctx.send(f"fetchclear: ignoring invalid category id(s): {', '.join(str(x) for x in bad[:10])}")
 
-        total = int(len(targets))
-        if total == 0:
-            await ctx.send(f"fetchclear: nothing to delete in category {cat_id} (delete_all={delete_all}).")
+        def _pick_targets(cat: "discord.CategoryChannel") -> List[Any]:
+            targets: List[Any] = []
+            for ch in list(getattr(cat, "channels", []) or []):
+                try:
+                    if not hasattr(ch, "delete"):
+                        continue
+                except Exception:
+                    continue
+                topic = str(getattr(ch, "topic", "") or "")
+                name = str(getattr(ch, "name", "") or "")
+                is_mirror = bool(topic.startswith("MIRROR:"))
+                is_separator = bool(topic.startswith("separator for") or name.startswith("📅---"))
+                if delete_all or is_mirror or is_separator:
+                    targets.append(ch)
+            return targets
+
+        targets_by_cat: List[tuple["discord.CategoryChannel", List[Any]]] = []
+        for c in cats:
+            targets_by_cat.append((c, _pick_targets(c)))
+
+        total = int(sum(len(t) for _c, t in targets_by_cat))
+        if total <= 0:
+            ids_csv = ",".join(str(int(getattr(c, "id", 0) or 0)) for c in cats if int(getattr(c, "id", 0) or 0) > 0)
+            await ctx.send(f"fetchclear: nothing to delete in categories [{ids_csv}] (delete_all={delete_all}).")
             return
 
         # Dryrun listing
         if not do_confirm:
-            preview = []
-            for ch in targets[:20]:
+            ids_csv = ",".join(str(int(getattr(c, "id", 0) or 0)) for c in cats if int(getattr(c, "id", 0) or 0) > 0)
+            lines: List[str] = [
+                "fetchclear DRYRUN",
+                f"- delete_all: {delete_all}",
+                f"- categories: {len(cats)}",
+                f"- would_delete_total: {total}",
+                "",
+                "Per-category:",
+            ]
+            for c, t in targets_by_cat:
                 try:
-                    preview.append(f"- #{getattr(ch,'name','')} ({getattr(ch,'id',0)})")
+                    cid = int(getattr(c, "id", 0) or 0)
                 except Exception:
-                    continue
-            msg = (
-                f"fetchclear DRYRUN\n"
-                f"- category: {cat_id}\n"
-                f"- delete_all: {delete_all}\n"
-                f"- would_delete: {total}\n\n"
-                + "\n".join(preview)
-                + ("\n... (truncated)" if total > 20 else "")
-                + "\n\nRun: !fetchclear "
-                + (str(cat_id) + " " if cat_id else "")
-                + ("all " if delete_all else "")
-                + "confirm"
-            )
-            await ctx.send(msg[:1950])
+                    cid = 0
+                nm = str(getattr(c, "name", "") or "").strip() or f"category_{cid}"
+                lines.append(f"- {nm} ({cid}): would_delete={len(t)}")
+                for ch in t[:5]:
+                    try:
+                        lines.append(f"  - #{getattr(ch,'name','')} ({getattr(ch,'id',0)})")
+                    except Exception:
+                        continue
+                if len(t) > 5:
+                    lines.append("  - ... (truncated)")
+            lines += [
+                "",
+                "Run:",
+                f"!fetchclear {ids_csv} " + ("all " if delete_all else "") + "confirm",
+            ]
+            await ctx.send("\n".join(lines)[:1950])
             return
 
         # Execute deletes with progress
-        progress = await ctx.send(f"fetchclear: deleting {total} channel(s) in category {cat_id}...")
+        progress = await ctx.send(f"fetchclear: deleting {total} channel(s) across {len(cats)} category(ies)...")
         deleted = 0
         errors = 0
         last_edit = 0.0
-        for i, ch in enumerate(targets, start=1):
-            try:
-                await ch.delete(reason="MWDataManagerBot fetchclear")
-                deleted += 1
-            except Exception as e:
-                errors += 1
-                log_warn(f"fetchclear delete failed (channel_id={getattr(ch,'id',None)}): {type(e).__name__}: {e}")
-            # throttle edits
-            try:
-                now = float(_time.time())
-            except Exception:
-                now = 0.0
-            if now and (now - last_edit) >= 1.0:
-                last_edit = now
-                bar = _render_progress_bar(i, total)
+        done_total = 0
+        for cat_idx, (cat, targets) in enumerate(targets_by_cat, start=1):
+            cat_id = int(getattr(cat, "id", 0) or 0)
+            cat_name = str(getattr(cat, "name", "") or "").strip() or f"category_{cat_id}"
+            for ch in targets:
+                done_total += 1
                 try:
-                    await progress.edit(content=f"fetchclear: {bar} deleted={deleted} errors={errors}")
+                    await ch.delete(reason="MWDataManagerBot fetchclear")
+                    deleted += 1
+                except Exception as e:
+                    errors += 1
+                    log_warn(f"fetchclear delete failed (channel_id={getattr(ch,'id',None)}): {type(e).__name__}: {e}")
+                # throttle edits
+                try:
+                    now = float(_time.time())
                 except Exception:
-                    pass
-            # Small delay to be gentle
-            await asyncio.sleep(0.35)
+                    now = 0.0
+                if now and (now - last_edit) >= 1.0:
+                    last_edit = now
+                    bar = _render_progress_bar(done_total, total)
+                    try:
+                        await progress.edit(
+                            content=(
+                                f"fetchclear: {bar} deleted={deleted} errors={errors}\n"
+                                f"category {cat_idx}/{len(cats)}: {cat_name} ({cat_id})"
+                            )[:1950]
+                        )
+                    except Exception:
+                        pass
+                # Small delay to be gentle
+                await asyncio.sleep(0.35)
 
         await progress.edit(content=f"fetchclear complete: deleted={deleted}/{total} errors={errors}")
 
