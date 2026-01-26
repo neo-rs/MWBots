@@ -542,6 +542,12 @@ async def _discord_api_get_json(
                             retry_after = float(data.get("retry_after") or 1.0)
                         except Exception:
                             retry_after = 1.0
+                        # Best-effort: surface rate limiting in logs (first hit per call).
+                        if attempt == 1:
+                            try:
+                                log_warn(f"[FETCHALL] rate_limited url={str(url)[:80]} retry_after={retry_after}")
+                            except Exception:
+                                pass
                         await asyncio.sleep(max(0.5, min(10.0, retry_after)))
                         continue
                     if status and 200 <= status < 300:
@@ -904,18 +910,9 @@ async def run_fetchall(
         )
     except Exception:
         pass
-    try:
-        if token:
-            _st, ginfo = await _fetch_guild_info_via_user_token(source_guild_id=source_guild_id, user_token=token)
-            if isinstance(ginfo, dict):
-                nm = str(ginfo.get("name") or "").strip()
-                if nm:
-                    source_guild_name = nm
-                icon_hash = str(ginfo.get("icon") or "").strip()
-                if icon_hash:
-                    source_guild_icon_url = _guild_icon_url(guild_id=int(source_guild_id), icon_hash=icon_hash)
-    except Exception:
-        source_guild_icon_url = ""
+    # Note: We intentionally do NOT fetch guild metadata (name/icon) via REST here.
+    # It is non-essential and can stall the command if Discord REST is slow/rate-limited.
+    # Mappings already carry a friendly name, which is sufficient for fetchall channel setup.
     try:
         await _ensure_separator_anywhere(
             destination_guild, base_category=dest_category, source_guild_id=source_guild_id, source_guild_name=source_guild_name
@@ -998,6 +995,23 @@ async def run_fetchall(
                     pass
             log_warn(f"[FETCHALL] bot_not_in_source_guild:{source_guild_id} and no source_user_token provided")
             return {"ok": False, "reason": f"bot_not_in_source_guild:{source_guild_id} and no source_user_token provided"}
+        if progress_cb is not None:
+            try:
+                await progress_cb(
+                    {
+                        "stage": "list_channels",
+                        "mode": "user_token",
+                        "source_guild_id": int(source_guild_id),
+                        "source_guild_name": str(source_guild_name),
+                        "destination_category_id": int(dest_category_id),
+                        "attempted": 0,
+                        "created": 0,
+                        "existing": 0,
+                        "errors": 0,
+                    }
+                )
+            except Exception:
+                pass
         status, api_channels = await _fetch_guild_channels_via_user_token(source_guild_id=source_guild_id, user_token=token)
         if not api_channels:
             if progress_cb is not None:
