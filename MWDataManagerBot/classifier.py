@@ -4,7 +4,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import settings_store as cfg
-from keywords import check_keyword_match
+from keywords import check_keyword_match, load_keyword_channel_overrides, scan_keywords
 from logging_utils import log_debug, log_smartfilter
 from patterns import (
     ALL_STORE_PATTERN,
@@ -242,6 +242,42 @@ def select_target_channel_id(
         except Exception:
             pass
     if keyword_hit and cfg.SMARTFILTER_MONITORED_KEYWORD_CHANNEL_ID:
+        # Optional per-keyword extra channel routing (configured via /keywordchannel).
+        matched_kws: List[str] = []
+        try:
+            if trace is not None:
+                mk = (trace.get("classifier", {}) or {}).get("matches", {}).get("monitored_keywords")
+                if isinstance(mk, list):
+                    matched_kws = [str(x) for x in mk if str(x).strip()]
+        except Exception:
+            matched_kws = []
+        if not matched_kws:
+            try:
+                matched_kws = scan_keywords(text_blob, keywords_list)
+            except Exception:
+                matched_kws = []
+        try:
+            overrides = load_keyword_channel_overrides()
+        except Exception:
+            overrides = {}
+        chosen = 0
+        chosen_kw = ""
+        for kw in matched_kws:
+            cid = int(overrides.get(str(kw).strip().lower(), 0) or 0)
+            if cid > 0 and cid != int(cfg.SMARTFILTER_MONITORED_KEYWORD_CHANNEL_ID or 0):
+                chosen = cid
+                chosen_kw = str(kw)
+                break
+        if chosen > 0:
+            if trace is not None:
+                try:
+                    trace.setdefault("classifier", {}).setdefault("matches", {})["monitored_keyword_override"] = {
+                        "keyword": chosen_kw,
+                        "channel_id": chosen,
+                    }
+                except Exception:
+                    pass
+            return chosen, "MONITORED_KEYWORD"
         return cfg.SMARTFILTER_MONITORED_KEYWORD_CHANNEL_ID, "MONITORED_KEYWORD"
 
     # 3-6) INSTORE categories (for instore/clearance channels OR in-store formatted leads)
@@ -417,7 +453,39 @@ def detect_all_link_types(
         except Exception:
             pass
     if keyword_hit and cfg.SMARTFILTER_MONITORED_KEYWORD_CHANNEL_ID:
-        results.append((cfg.SMARTFILTER_MONITORED_KEYWORD_CHANNEL_ID, "MONITORED_KEYWORD"))
+        base_cid = int(cfg.SMARTFILTER_MONITORED_KEYWORD_CHANNEL_ID or 0)
+        if base_cid > 0:
+            results.append((base_cid, "MONITORED_KEYWORD"))
+
+        # Extra per-keyword channels (in addition to the default monitored keyword channel).
+        matched_kws: List[str] = []
+        try:
+            if trace is not None:
+                mk = (trace.get("classifier", {}) or {}).get("matches", {}).get("monitored_keywords")
+                if isinstance(mk, list):
+                    matched_kws = [str(x) for x in mk if str(x).strip()]
+        except Exception:
+            matched_kws = []
+        if not matched_kws:
+            try:
+                matched_kws = scan_keywords(text_blob, keywords_list)
+            except Exception:
+                matched_kws = []
+        try:
+            overrides = load_keyword_channel_overrides()
+        except Exception:
+            overrides = {}
+        routed = []
+        for kw in matched_kws[:25]:
+            cid = int(overrides.get(str(kw).strip().lower(), 0) or 0)
+            if cid > 0 and cid != base_cid:
+                results.append((cid, "MONITORED_KEYWORD"))
+                routed.append({"keyword": str(kw), "channel_id": int(cid)})
+        if trace is not None and routed:
+            try:
+                trace.setdefault("classifier", {}).setdefault("matches", {})["monitored_keyword_routed_channels"] = routed[:10]
+            except Exception:
+                pass
 
     instore_selection: Optional[Tuple[int, str]] = None
     if is_instore_source and instore_required and instore_context:

@@ -11,7 +11,16 @@ from fetchall import (
     set_ignored_channel_ids,
     upsert_mapping,
 )
-from keywords import add_keyword, invalidate_keywords_cache, load_keywords, remove_keyword, scan_keywords
+from keywords import (
+    add_keyword,
+    invalidate_keywords_cache,
+    load_keyword_channel_overrides,
+    load_keywords,
+    remove_keyword,
+    remove_keyword_channel_override,
+    scan_keywords,
+    set_keyword_channel_override,
+)
 from logging_utils import log_info, log_warn
 import settings_store as cfg
 
@@ -420,6 +429,25 @@ def register_commands(*, bot, forwarder) -> None:
     fetchmap = app_commands.Group(name="fetchmap", description="Manage fetchall mappings")
     fetchsync = app_commands.Group(name="fetchsync", description="Pull+mirror messages from source servers")
     kw = app_commands.Group(name="keywords", description="Manage monitored keywords")
+    kwchan = app_commands.Group(name="keywordchannel", description="Route monitored keyword matches to extra channels")
+
+    async def _kw_autocomplete(interaction: discord.Interaction, current: str):
+        try:
+            cur = str(current or "").strip().lower()
+        except Exception:
+            cur = ""
+        kws = load_keywords(force=True)
+        out = []
+        for k in kws:
+            try:
+                if cur and cur not in str(k).lower():
+                    continue
+                out.append(app_commands.Choice(name=str(k)[:100], value=str(k)))
+                if len(out) >= 25:
+                    break
+            except Exception:
+                continue
+        return out
 
     @fetchmap.command(name="list", description="List current fetchall mappings")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -1002,6 +1030,60 @@ def register_commands(*, bot, forwarder) -> None:
         except Exception as e:
             await interaction.followup.send(f"Send failed: {type(e).__name__}: {e}", ephemeral=True)
 
+    @kwchan.command(name="set", description="Send a monitored keyword's matches to an extra channel")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.autocomplete(keyword=_kw_autocomplete)
+    async def keywordchannel_set(interaction: discord.Interaction, keyword: str, channel: discord.TextChannel) -> None:
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception:
+            pass
+        kw_s = str(keyword or "").strip()
+        if not kw_s:
+            await interaction.followup.send("Empty keyword.", ephemeral=True)
+            return
+        ok, reason = set_keyword_channel_override(kw_s, int(channel.id))
+        await interaction.followup.send(
+            f"keywordchannel set: ok={ok} reason={reason} keyword={kw_s} channel=<#{int(channel.id)}>",
+            ephemeral=True,
+        )
+
+    @kwchan.command(name="clear", description="Remove an extra channel override for a keyword")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.autocomplete(keyword=_kw_autocomplete)
+    async def keywordchannel_clear(interaction: discord.Interaction, keyword: str) -> None:
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception:
+            pass
+        kw_s = str(keyword or "").strip()
+        ok, reason = remove_keyword_channel_override(kw_s)
+        await interaction.followup.send(f"keywordchannel clear: ok={ok} reason={reason} keyword={kw_s}", ephemeral=True)
+
+    @kwchan.command(name="list", description="List keyword->extra channel overrides")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def keywordchannel_list(interaction: discord.Interaction) -> None:
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception:
+            pass
+        mp = load_keyword_channel_overrides(force=True)
+        if not mp:
+            await interaction.followup.send("keywordchannel overrides: (none)", ephemeral=True)
+            return
+        lines = []
+        for k in sorted(mp.keys())[:100]:
+            try:
+                cid = int(mp.get(k, 0) or 0)
+            except Exception:
+                cid = 0
+            if cid > 0:
+                lines.append(f"- **{k}** -> <#{cid}> (`{cid}`)")
+        msg = "keywordchannel overrides:\n" + "\n".join(lines[:60])
+        if len(lines) > 60:
+            msg += f"\n... (+{len(lines)-60} more)"
+        await interaction.followup.send(msg, ephemeral=True)
+
     # Add groups to the tree for destination guild(s) only.
     for g in guild_objs:
         try:
@@ -1016,3 +1098,7 @@ def register_commands(*, bot, forwarder) -> None:
             bot.tree.add_command(kw, guild=g)
         except Exception as e:
             log_warn(f"Failed to add /keywords to tree for guild={getattr(g,'id',None)}: {type(e).__name__}: {e}")
+        try:
+            bot.tree.add_command(kwchan, guild=g)
+        except Exception as e:
+            log_warn(f"Failed to add /keywordchannel to tree for guild={getattr(g,'id',None)}: {type(e).__name__}: {e}")
