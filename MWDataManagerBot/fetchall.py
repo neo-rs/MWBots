@@ -234,26 +234,20 @@ async def _ensure_separator(dest_category, *, source_guild_id: int, source_guild
         return None
 
 
-async def _fetch_guild_channels_via_user_token(*, source_guild_id: int, user_token: str) -> Optional[List[Dict[str, Any]]]:
-    """Fetch source guild channel list using a Discum/user token (fallback for fetchall)."""
+async def _fetch_guild_channels_via_user_token(
+    *, source_guild_id: int, user_token: str
+) -> Tuple[int, Optional[List[Dict[str, Any]]]]:
+    """
+    Fetch source guild channel list using a Discum/user token.
+    Returns (http_status, channels_or_none).
+    """
     if source_guild_id <= 0 or not user_token:
-        return None
-    try:
-        import aiohttp  # type: ignore
-    except Exception:
-        return None
-    try:
-        headers = {"Authorization": str(user_token).strip()}
-        timeout = aiohttp.ClientTimeout(total=15)
-        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-            url = f"https://discord.com/api/v9/guilds/{int(source_guild_id)}/channels"
-            async with session.get(url) as resp:
-                if int(getattr(resp, "status", 0) or 0) != 200:
-                    return None
-                data = await resp.json()
-                return data if isinstance(data, list) else None
-    except Exception:
-        return None
+        return 0, None
+    url = f"{_DISCORD_API_BASE}/guilds/{int(source_guild_id)}/channels"
+    status, data = await _discord_api_get_json(url=url, user_token=str(user_token).strip(), params=None)
+    if status == 200 and isinstance(data, list):
+        return status, [c for c in data if isinstance(c, dict)]
+    return status, None
 
 
 async def _discord_api_get_json(
@@ -356,10 +350,13 @@ def _select_source_text_channels_from_api(
 ) -> List[Tuple[int, str]]:
     """
     Return list of (channel_id, channel_name) for text channels.
-    Discord channel type 0 = GUILD_TEXT.
+    Discord channel types:
+      - 0 = GUILD_TEXT
+      - 5 = GUILD_ANNOUNCEMENT (messageable)
     """
     out: List[Tuple[int, str]] = []
     allow_categories: Set[int] = {int(x) for x in (source_category_ids or []) if int(x) > 0}
+    allowed_types: Set[int] = {0, 5}
     for ch in channels or []:
         if not isinstance(ch, dict):
             continue
@@ -373,7 +370,7 @@ def _select_source_text_channels_from_api(
             ch_type = int(ch.get("type") or -1)
         except Exception:
             ch_type = -1
-        if ch_type != 0:
+        if ch_type not in allowed_types:
             continue
         parent_id = None
         try:
@@ -388,6 +385,29 @@ def _select_source_text_channels_from_api(
         name = str(ch.get("name") or f"channel_{ch_id}")
         out.append((ch_id, name))
     return out
+
+
+def _summarize_api_channels(channels: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Best-effort summary for debugging (no secrets)."""
+    type_counts: Dict[int, int] = {}
+    categories: List[Tuple[int, str]] = []
+    for ch in channels or []:
+        if not isinstance(ch, dict):
+            continue
+        try:
+            t = int(ch.get("type") or -1)
+        except Exception:
+            t = -1
+        type_counts[t] = int(type_counts.get(t, 0) or 0) + 1
+        if t == 4:
+            try:
+                cid = int(ch.get("id") or 0)
+            except Exception:
+                cid = 0
+            if cid > 0:
+                categories.append((cid, str(ch.get("name") or "")))
+    categories = categories[:12]
+    return {"total": len(channels or []), "type_counts": type_counts, "categories_preview": categories}
 
 
 def _format_embeds_for_forwarding(embeds: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -559,9 +579,13 @@ async def run_fetchall(
         token = str(source_user_token or "").strip()
         if not token:
             return {"ok": False, "reason": f"bot_not_in_source_guild:{source_guild_id} and no source_user_token provided"}
-        api_channels = await _fetch_guild_channels_via_user_token(source_guild_id=source_guild_id, user_token=token)
+        status, api_channels = await _fetch_guild_channels_via_user_token(source_guild_id=source_guild_id, user_token=token)
         if not api_channels:
-            return {"ok": False, "reason": f"failed_to_list_source_channels_via_token:{source_guild_id}"}
+            return {
+                "ok": False,
+                "reason": f"failed_to_list_source_channels_via_token:{source_guild_id}",
+                "http_status": int(status or 0),
+            }
         selected = _select_source_text_channels_from_api(
             api_channels,
             source_category_ids=[int(x) for x in (source_category_ids or []) if int(x) > 0],
@@ -609,6 +633,41 @@ async def run_fetchall(
     log_fetchall(
         f"source={source_guild_id} dest_category={dest_category_id} mode={mode} attempted={attempted} created={created} existing={kept}"
     )
+    if attempted == 0:
+        # Treat as failure so commands/users see a concrete reason.
+        extra: Dict[str, Any] = {
+            "ok": False,
+            "reason": "no_source_channels_selected",
+            "source_guild_id": source_guild_id,
+            "destination_category_id": dest_category_id,
+            "attempted": attempted,
+            "created": created,
+            "existing": kept,
+        }
+        if mode == "user_token":
+            try:
+                extra["source_category_ids"] = [int(x) for x in (source_category_ids or []) if int(x) > 0]
+                extra["ignored_count"] = int(len(ignored_ids or set()))
+            except Exception:
+                pass
+        try:
+            if mode == "user_token":
+                # Best-effort debug summary. If api_channels was not in scope (early fail), this won't run.
+                # We re-fetch quickly for logging.
+                status2, api_channels2 = await _fetch_guild_channels_via_user_token(
+                    source_guild_id=source_guild_id, user_token=str(source_user_token or "").strip()
+                )
+                extra["http_status"] = int(status2 or 0)
+                if api_channels2:
+                    extra.update(_summarize_api_channels(api_channels2))
+        except Exception:
+            pass
+        try:
+            log_warn(f"[FETCHALL] no_source_channels_selected details={extra}")
+        except Exception:
+            pass
+        return extra
+
     return {
         "ok": True,
         "source_guild_id": source_guild_id,
@@ -681,16 +740,31 @@ async def run_fetchsync(
         ignored_ids = set()
 
     # Always enumerate channels via user token (source access is assumed to be via user token).
-    api_channels = await _fetch_guild_channels_via_user_token(source_guild_id=source_guild_id, user_token=token)
+    status, api_channels = await _fetch_guild_channels_via_user_token(source_guild_id=source_guild_id, user_token=token)
     if not api_channels:
-        return {"ok": False, "reason": f"failed_to_list_source_channels_via_token:{source_guild_id}"}
+        return {
+            "ok": False,
+            "reason": f"failed_to_list_source_channels_via_token:{source_guild_id}",
+            "http_status": int(status or 0),
+        }
     src_channels_to_mirror = _select_source_text_channels_from_api(
         api_channels,
         source_category_ids=[int(x) for x in (source_category_ids or []) if int(x) > 0],
         ignored_channel_ids=ignored_ids,
     )
     if not src_channels_to_mirror:
-        return {"ok": False, "reason": "no_source_channels_selected"}
+        extra = {
+            "ok": False,
+            "reason": "no_source_channels_selected",
+            "http_status": int(status or 0),
+        }
+        try:
+            extra.update(_summarize_api_channels(api_channels))
+            extra["source_category_ids"] = [int(x) for x in (source_category_ids or []) if int(x) > 0]
+            extra["ignored_count"] = int(len(ignored_ids or set()))
+        except Exception:
+            pass
+        return extra
 
     # Build existing mirror index by topic
     existing_by_source: dict[int, discord.TextChannel] = {}

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from fetchall import iter_fetchall_entries, run_fetchall, run_fetchsync, set_ignored_channel_ids, upsert_mapping
+from fetchall import load_fetchall_mappings, iter_fetchall_entries, run_fetchall, run_fetchsync, set_ignored_channel_ids, upsert_mapping
 from keywords import add_keyword, invalidate_keywords_cache, load_keywords, remove_keyword, scan_keywords
 from logging_utils import log_info, log_warn
 import settings_store as cfg
@@ -93,6 +93,14 @@ def register_commands(*, bot, forwarder) -> None:
                 )
                 if result.get("ok"):
                     ok += 1
+                else:
+                    try:
+                        sgid = int(entry.get("source_guild_id", 0) or 0)
+                    except Exception:
+                        sgid = 0
+                    reason = str(result.get("reason") or "").strip()
+                    hs = result.get("http_status")
+                    await ctx.send(f"fetchall failed: sgid={sgid} reason={reason} http={hs}")
             await ctx.send(f"Fetchall complete: {ok}/{len(entries)} succeeded.")
         except Exception as e:
             log_warn(f"fetchall command failed: {e}")
@@ -149,10 +157,62 @@ def register_commands(*, bot, forwarder) -> None:
                     total_sent += int(result.get("sent", 0) or 0)
                 except Exception:
                     pass
+                if not result.get("ok"):
+                    try:
+                        sgid = int(entry.get("source_guild_id", 0) or 0)
+                    except Exception:
+                        sgid = 0
+                    reason = str(result.get("reason") or "").strip()
+                    hs = result.get("http_status")
+                    await ctx.send(f"fetchsync failed: sgid={sgid} reason={reason} http={hs}")
             await ctx.send(f"Fetchsync complete: {ok}/{len(selected)} succeeded. sent={total_sent}")
         except Exception as e:
             log_warn(f"fetchsync command failed: {e}")
             await ctx.send(f"Fetchsync failed: {type(e).__name__}: {e}")
+
+    @bot.command(name="fetchauth")
+    async def fetchauth_cmd(ctx, source_guild_id: str = "") -> None:
+        """
+        Debug fetchall token + mapping selection without leaking tokens.
+        Usage: !fetchauth <source_guild_id>
+        """
+        sgid = 0
+        try:
+            sgid = int(str(source_guild_id or "").strip())
+        except Exception:
+            sgid = 0
+        if sgid <= 0:
+            await ctx.send("Usage: !fetchauth <source_guild_id>")
+            return
+        token = _pick_fetchall_source_token()
+        if not token:
+            await ctx.send("Missing FETCHALL_USER_TOKEN (needed to read source servers).")
+            return
+
+        # Load mapping entry if present (so category filters are applied)
+        cfg_data = load_fetchall_mappings()
+        entry = None
+        for e in (cfg_data.get("guilds", []) or []):
+            if isinstance(e, dict) and int(e.get("source_guild_id", 0) or 0) == sgid:
+                entry = e
+                break
+        if entry is None:
+            entry = {"source_guild_id": sgid, "destination_category_id": int(getattr(cfg, "FETCHALL_DEFAULT_DEST_CATEGORY_ID", 0) or 0)}
+
+        result = await run_fetchsync(
+            bot=bot,
+            entry=entry,
+            destination_guild=getattr(ctx, "guild", None),
+            source_user_token=token,
+            dryrun=True,
+        )
+        ok = bool(result.get("ok"))
+        reason = str(result.get("reason") or "").strip()
+        hs = result.get("http_status")
+        total = result.get("total")
+        types = result.get("type_counts")
+        cats = result.get("categories_preview")
+        await ctx.send(f"fetchauth: sgid={sgid} ok={ok} reason={reason} http={hs} total={total} types={types} cats={cats}")
 
     @bot.command(name="fetch")
     async def fetch_cmd(ctx, source_guild_id: str = "") -> None:
