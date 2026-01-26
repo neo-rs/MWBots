@@ -85,6 +85,72 @@ def collect_embed_strings(embeds: Optional[List[Dict[str, Any]]]) -> List[str]:
     return collected
 
 
+def chunk_text(text: str, limit: int = 2000) -> List[str]:
+    """Split text into Discord-safe message chunks."""
+    if not text:
+        return [""]
+    try:
+        lim = int(limit or 0)
+    except Exception:
+        lim = 2000
+    if lim <= 0:
+        lim = 2000
+    if len(text) <= lim:
+        return [text]
+    chunks: List[str] = []
+    remaining = text
+    while remaining:
+        chunks.append(remaining[:lim])
+        remaining = remaining[lim:]
+    return chunks
+
+
+def format_embeds_for_forwarding(embeds: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Trim/clean embeds to a safe dict shape before forwarding.
+
+    This is canonical so fetchall + live forwarding render embeds consistently.
+    """
+    out: List[Dict[str, Any]] = []
+    for e in embeds or []:
+        if not isinstance(e, dict):
+            continue
+        embed: Dict[str, Any] = {}
+        if e.get("title"):
+            embed["title"] = e.get("title")
+        if e.get("url"):
+            embed["url"] = e.get("url")
+        desc = e.get("description") or ""
+        fields = e.get("fields") if isinstance(e.get("fields"), list) else []
+        if desc or fields:
+            embed["description"] = desc or "\u200b"
+            embed_fields = []
+            for field in fields:
+                if not isinstance(field, dict):
+                    continue
+                name = field.get("name") or "\u200b"
+                value = field.get("value")
+                if not value:
+                    continue
+                cleaned = {"name": name, "value": value}
+                if field.get("inline") is not None:
+                    cleaned["inline"] = field.get("inline")
+                embed_fields.append(cleaned)
+            if embed_fields:
+                embed["fields"] = embed_fields
+        if "image" in e and isinstance(e.get("image"), dict) and e["image"].get("url"):
+            embed["image"] = {"url": e["image"]["url"]}
+        if "thumbnail" in e and isinstance(e.get("thumbnail"), dict) and e["thumbnail"].get("url"):
+            embed["thumbnail"] = {"url": e["thumbnail"]["url"]}
+        if "author" in e and isinstance(e.get("author"), dict) and e["author"].get("name"):
+            embed["author"] = {"name": e["author"].get("name"), "url": e["author"].get("url")}
+        if "footer" in e and isinstance(e.get("footer"), dict) and e["footer"].get("text"):
+            embed["footer"] = {"text": e["footer"].get("text")}
+        if embed:
+            out.append(embed)
+    return out[:10]
+
+
 def generate_content_signature(
     content: str,
     embeds: Optional[List[Dict[str, Any]]],

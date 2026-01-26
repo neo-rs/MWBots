@@ -68,6 +68,21 @@ def register_commands(*, bot, forwarder) -> None:
             pass
         return int(len(kws))
 
+    def _render_progress_bar(done: int, total: int, *, width: int = 28) -> str:
+        try:
+            d = int(done or 0)
+            t = int(total or 0)
+        except Exception:
+            d, t = 0, 0
+        if t <= 0:
+            return "[----------------------------] 0% (0/0)"
+        d = max(0, min(t, d))
+        filled = int(round((d / t) * width)) if t else 0
+        filled = max(0, min(width, filled))
+        bar = "[" + ("=" * filled) + ("-" * (width - filled)) + "]"
+        pct = int(round((d / t) * 100)) if t else 0
+        return f"{bar} {pct}% ({d}/{t})"
+
     def _parse_csv_ints(text: str) -> List[int]:
         out: List[int] = []
         for part in (text or "").replace("\n", ",").split(","):
@@ -94,31 +109,71 @@ def register_commands(*, bot, forwarder) -> None:
     async def fetchall_cmd(ctx) -> None:
         """Run fetch-all for all configured guild entries (mirror channel setup)."""
         try:
+            import time as _time
+
             entries = iter_fetchall_entries()
             if not entries:
                 await ctx.send("No fetchall mappings found (MWDataManagerBot/config/fetchall_mappings.json).")
                 return
-            await ctx.send(f"Starting fetchall for {len(entries)} mapping(s)...")
+            total_maps = int(len(entries))
+            progress_msg = await ctx.send(f"Fetchall starting... mappings={total_maps}")
             ok = 0
             source_token = _pick_fetchall_source_token() or None
+            map_idx = 0
+            last_edit_ts = 0.0
             for entry in entries:
+                map_idx += 1
+                try:
+                    sgid = int(entry.get("source_guild_id", 0) or 0)
+                except Exception:
+                    sgid = 0
+                name = str(entry.get("name") or "").strip() or f"guild_{sgid}"
+
+                async def _progress_cb(payload: Dict[str, Any]) -> None:
+                    nonlocal last_edit_ts
+                    try:
+                        now = float(_time.time())
+                    except Exception:
+                        now = 0.0
+                    # throttle edits to avoid rate limits
+                    if last_edit_ts and now and (now - last_edit_ts) < 1.0:
+                        return
+                    last_edit_ts = now
+                    stage = str(payload.get("stage") or "")
+                    total_sources = int(payload.get("total_sources", 0) or 0)
+                    attempted = int(payload.get("attempted", 0) or 0)
+                    created = int(payload.get("created", 0) or 0)
+                    existing = int(payload.get("existing", 0) or 0)
+                    errs = int(payload.get("errors", 0) or 0)
+                    bar = _render_progress_bar(attempted, total_sources)
+                    current = str(payload.get("current_channel_name") or "").strip()
+                    header = f"Fetchall: {name} ({map_idx}/{total_maps})"
+                    lines = [header, bar, f"created={created} existing={existing} errors={errs} stage={stage}"]
+                    if current:
+                        lines.append(f"channel: {current}")
+                    text = "\n".join(lines).strip()
+                    try:
+                        await progress_msg.edit(content=text[:1950])
+                    except Exception:
+                        return
+
                 result = await run_fetchall(
                     bot=bot,
                     entry=entry,
                     destination_guild=getattr(ctx, "guild", None),
                     source_user_token=source_token,
+                    progress_cb=_progress_cb,
                 )
                 if result.get("ok"):
                     ok += 1
                 else:
-                    try:
-                        sgid = int(entry.get("source_guild_id", 0) or 0)
-                    except Exception:
-                        sgid = 0
                     reason = str(result.get("reason") or "").strip()
                     hs = result.get("http_status")
                     await ctx.send(f"fetchall failed: sgid={sgid} reason={reason} http={hs}")
-            await ctx.send(f"Fetchall complete: {ok}/{len(entries)} succeeded.")
+            try:
+                await progress_msg.edit(content=f"Fetchall complete: {ok}/{total_maps} succeeded.")
+            except Exception:
+                await ctx.send(f"Fetchall complete: {ok}/{total_maps} succeeded.")
         except Exception as e:
             log_warn(f"fetchall command failed: {e}")
             await ctx.send(f"Fetchall failed: {type(e).__name__}: {e}")
@@ -127,6 +182,8 @@ def register_commands(*, bot, forwarder) -> None:
     async def fetchsync_cmd(ctx, source_guild_id: str = "") -> None:
         """Pull messages via user token and mirror them into Mirror World channels."""
         try:
+            import time as _time
+
             entries = iter_fetchall_entries()
             if not entries:
                 await ctx.send("No fetchall mappings found (MWDataManagerBot/config/fetchall_mappings.json).")
@@ -157,16 +214,51 @@ def register_commands(*, bot, forwarder) -> None:
                 await ctx.send(f"No mapping found for source_guild_id={sgid_filter}.")
                 return
 
-            await ctx.send(f"Starting fetchsync for {len(selected)} mapping(s)...")
+            total_maps = int(len(selected))
+            progress_msg = await ctx.send(f"Fetchsync starting... mappings={total_maps}")
             ok = 0
             total_sent = 0
+            map_idx = 0
+            last_edit_ts = 0.0
             for entry in selected:
+                map_idx += 1
+                try:
+                    sgid = int(entry.get("source_guild_id", 0) or 0)
+                except Exception:
+                    sgid = 0
+                name = str(entry.get("name") or "").strip() or f"guild_{sgid}"
+
+                async def _progress_cb(payload: Dict[str, Any]) -> None:
+                    nonlocal last_edit_ts
+                    try:
+                        now = float(_time.time())
+                    except Exception:
+                        now = 0.0
+                    if last_edit_ts and now and (now - last_edit_ts) < 1.0:
+                        return
+                    last_edit_ts = now
+                    stage = str(payload.get("stage") or "")
+                    total_ch = int(payload.get("channels_total", 0) or 0)
+                    done_ch = int(payload.get("channels_processed", 0) or 0)
+                    sent = int(payload.get("sent", 0) or 0)
+                    would_send = int(payload.get("would_send", 0) or 0)
+                    errs = int(payload.get("errors", 0) or 0)
+                    bar = _render_progress_bar(done_ch, total_ch)
+                    header = f"Fetchsync: {name} ({map_idx}/{total_maps})"
+                    lines = [header, bar, f"sent={sent} would_send={would_send} errors={errs} stage={stage}"]
+                    text = "\n".join(lines).strip()
+                    try:
+                        await progress_msg.edit(content=text[:1950])
+                    except Exception:
+                        return
+
                 result = await run_fetchsync(
                     bot=bot,
                     entry=entry,
                     destination_guild=getattr(ctx, "guild", None),
                     source_user_token=source_token,
                     dryrun=False,
+                    progress_cb=_progress_cb,
                 )
                 if result.get("ok"):
                     ok += 1
@@ -175,14 +267,13 @@ def register_commands(*, bot, forwarder) -> None:
                 except Exception:
                     pass
                 if not result.get("ok"):
-                    try:
-                        sgid = int(entry.get("source_guild_id", 0) or 0)
-                    except Exception:
-                        sgid = 0
                     reason = str(result.get("reason") or "").strip()
                     hs = result.get("http_status")
                     await ctx.send(f"fetchsync failed: sgid={sgid} reason={reason} http={hs}")
-            await ctx.send(f"Fetchsync complete: {ok}/{len(selected)} succeeded. sent={total_sent}")
+            try:
+                await progress_msg.edit(content=f"Fetchsync complete: {ok}/{total_maps} succeeded. sent={total_sent}")
+            except Exception:
+                await ctx.send(f"Fetchsync complete: {ok}/{total_maps} succeeded. sent={total_sent}")
         except Exception as e:
             log_warn(f"fetchsync command failed: {e}")
             await ctx.send(f"Fetchsync failed: {type(e).__name__}: {e}")
@@ -449,6 +540,46 @@ def register_commands(*, bot, forwarder) -> None:
                 continue
         return out
 
+    async def _fetchmap_guild_autocomplete(interaction: discord.Interaction, current: str):
+        """Autocomplete source_guild_id from fetchall_mappings.json (no manual typing)."""
+        try:
+            cur = str(current or "").strip().lower()
+        except Exception:
+            cur = ""
+        entries = iter_fetchall_entries()
+        out = []
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            try:
+                sgid = int(e.get("source_guild_id", 0) or 0)
+            except Exception:
+                sgid = 0
+            if sgid <= 0:
+                continue
+            name = str(e.get("name") or "").strip() or f"guild_{sgid}"
+            label = f"{name} ({sgid})"
+            try:
+                if cur and cur not in label.lower():
+                    continue
+            except Exception:
+                pass
+            try:
+                out.append(app_commands.Choice(name=label[:100], value=int(sgid)))
+            except Exception:
+                continue
+            if len(out) >= 25:
+                break
+        return out
+
+    def _ui_embed(title: str, description: str = "", *, color: int = 0x5865F2) -> "discord.Embed":
+        emb = discord.Embed(title=str(title or "MWDataManagerBot"), description=(str(description) or None), color=int(color))
+        try:
+            emb.set_footer(text="MWDataManagerBot")
+        except Exception:
+            pass
+        return emb
+
     @fetchmap.command(name="list", description="List current fetchall mappings")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def fetchmap_list(interaction: discord.Interaction) -> None:
@@ -458,7 +589,7 @@ def register_commands(*, bot, forwarder) -> None:
             pass
         entries = iter_fetchall_entries()
         if not entries:
-            await interaction.followup.send("No fetchall mappings found.", ephemeral=True)
+            await interaction.followup.send(embed=_ui_embed("Fetchmap list", "No fetchall mappings found.", color=0xED4245), ephemeral=True)
             return
 
         # One-guild-per-page view (keeps it readable).
@@ -528,7 +659,8 @@ def register_commands(*, bot, forwarder) -> None:
 
     @fetchmap.command(name="browse", description="Browse a source guild's categories/channels and toggle fetch/ignore")
     @app_commands.checks.has_permissions(manage_guild=True)
-    async def fetchmap_browse(interaction: discord.Interaction, source_guild_id: int) -> None:
+    @app_commands.autocomplete(source_guild_id=_fetchmap_guild_autocomplete)
+    async def fetchmap_browse(interaction: discord.Interaction, source_guild_id: int = 0) -> None:
         """
         Interactive UI:
         - Prev/Next category
@@ -540,12 +672,60 @@ def register_commands(*, bot, forwarder) -> None:
         except Exception:
             pass
         sgid = int(source_guild_id or 0)
-        if sgid <= 0:
-            await interaction.followup.send("source_guild_id must be a positive integer.", ephemeral=True)
-            return
         source_token = _pick_fetchall_source_token()
         if not source_token:
-            await interaction.followup.send("Missing FETCHALL_USER_TOKEN (needed to read source servers).", ephemeral=True)
+            await interaction.followup.send(
+                embed=_ui_embed("Fetchmap browse", "Missing FETCHALL_USER_TOKEN (needed to read source servers).", color=0xED4245),
+                ephemeral=True,
+            )
+            return
+
+        # If no sgid provided, show a dropdown selection of mappings (RSAdminBot-style).
+        if sgid <= 0:
+            entries = iter_fetchall_entries()
+            opts: List[discord.SelectOption] = []
+            for e in entries:
+                if not isinstance(e, dict):
+                    continue
+                try:
+                    g = int(e.get("source_guild_id", 0) or 0)
+                except Exception:
+                    g = 0
+                if g <= 0:
+                    continue
+                nm = str(e.get("name") or "").strip() or f"guild_{g}"
+                opts.append(discord.SelectOption(label=nm[:100], value=str(g), description=str(g)))
+                if len(opts) >= 25:
+                    break
+            if not opts:
+                await interaction.followup.send(embed=_ui_embed("Fetchmap browse", "No fetchall mappings found.", color=0xED4245), ephemeral=True)
+                return
+
+            class _PickView(discord.ui.View):
+                def __init__(self):
+                    super().__init__(timeout=60 * 10)
+                    sel = discord.ui.Select(placeholder="Select source server...", min_values=1, max_values=1, options=opts)
+                    sel.callback = self._on_select  # type: ignore
+                    self.add_item(sel)
+                    self._sel = sel
+
+                async def _on_select(self, i: discord.Interaction) -> None:
+                    try:
+                        v = str((self._sel.values or [""])[0])
+                        chosen = int(v)
+                    except Exception:
+                        chosen = 0
+                    if chosen <= 0:
+                        await i.response.send_message(embed=_ui_embed("Fetchmap browse", "Invalid selection.", color=0xED4245), ephemeral=True)
+                        return
+                    # Re-run browse with chosen id (edit in place).
+                    try:
+                        await i.response.defer(ephemeral=True, thinking=True)
+                    except Exception:
+                        pass
+                    await fetchmap_browse(i, source_guild_id=int(chosen))
+
+            await interaction.followup.send(embed=_ui_embed("Fetchmap browse", "Pick a source guild to browse:"), view=_PickView(), ephemeral=True)
             return
 
         # Load mapping entry (if present)
@@ -604,7 +784,7 @@ def register_commands(*, bot, forwarder) -> None:
                 continue
             cat_list.append(c)
         if not cat_list:
-            await interaction.followup.send("No categories found in source guild.", ephemeral=True)
+            await interaction.followup.send(embed=_ui_embed("Fetchmap browse", "No categories found in source guild.", color=0xED4245), ephemeral=True)
             return
 
         ignored_set = set(ignored)
@@ -736,7 +916,7 @@ def register_commands(*, bot, forwarder) -> None:
             async def toggle_cat(self, i: discord.Interaction, _b: discord.ui.Button) -> None:
                 cid = self._current_cat_id()
                 if cid <= 0:
-                    await i.response.send_message("Invalid category.", ephemeral=True)
+                    await i.response.send_message(embed=_ui_embed("Fetchmap browse", "Invalid category.", color=0xED4245), ephemeral=True)
                     return
                 if cid in selected_set:
                     selected_set.remove(cid)
@@ -786,7 +966,10 @@ def register_commands(*, bot, forwarder) -> None:
 
         sgid = int(source_guild_id or 0)
         if sgid <= 0:
-            await interaction.followup.send("source_guild_id must be a positive integer.", ephemeral=True)
+            await interaction.followup.send(
+                embed=_ui_embed("Fetchmap upsert", "source_guild_id must be a positive integer.", color=0xED4245),
+                ephemeral=True,
+            )
             return
 
         entry = upsert_mapping(
@@ -800,11 +983,14 @@ def register_commands(*, bot, forwarder) -> None:
         if ignored_ids:
             set_ignored_channel_ids(source_guild_id=sgid, ignored_channel_ids=ignored_ids)
 
-        await interaction.followup.send(
-            f"Saved mapping: sgid={entry.get('source_guild_id')} dest_category_id={entry.get('destination_category_id')} "
-            f"source_category_ids={len(entry.get('source_category_ids') or [])} ignored={len(ignored_ids) if ignored_ids else len(entry.get('ignored_channel_ids') or [])}",
-            ephemeral=True,
+        msg = (
+            f"Saved mapping.\n"
+            f"- source_guild_id: `{entry.get('source_guild_id')}`\n"
+            f"- destination_category_id: `{entry.get('destination_category_id')}`\n"
+            f"- source_category_ids: `{len(entry.get('source_category_ids') or [])}`\n"
+            f"- ignored_channel_ids: `{len(ignored_ids) if ignored_ids else len(entry.get('ignored_channel_ids') or [])}`"
         )
+        await interaction.followup.send(embed=_ui_embed("Fetchmap upsert", msg), ephemeral=True)
 
     @fetchmap.command(name="ignore_add", description="Add an ignored source channel id to a mapping")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -822,7 +1008,13 @@ def register_commands(*, bot, forwarder) -> None:
         if int(channel_id) > 0 and int(channel_id) not in ignored:
             ignored.append(int(channel_id))
         set_ignored_channel_ids(source_guild_id=int(source_guild_id), ignored_channel_ids=ignored)
-        await interaction.followup.send(f"Updated ignored list size={len(ignored)} for sgid={int(source_guild_id)}", ephemeral=True)
+        await interaction.followup.send(
+            embed=_ui_embed(
+                "Fetchmap ignore add",
+                f"Updated ignored list.\n- sgid: `{int(source_guild_id)}`\n- size: `{len(ignored)}`",
+            ),
+            ephemeral=True,
+        )
 
     @fetchmap.command(name="ignore_remove", description="Remove an ignored source channel id from a mapping")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -839,7 +1031,13 @@ def register_commands(*, bot, forwarder) -> None:
             ignored = []
         ignored = [x for x in ignored if int(x) != int(channel_id)]
         set_ignored_channel_ids(source_guild_id=int(source_guild_id), ignored_channel_ids=ignored)
-        await interaction.followup.send(f"Updated ignored list size={len(ignored)} for sgid={int(source_guild_id)}", ephemeral=True)
+        await interaction.followup.send(
+            embed=_ui_embed(
+                "Fetchmap ignore remove",
+                f"Updated ignored list.\n- sgid: `{int(source_guild_id)}`\n- size: `{len(ignored)}`",
+            ),
+            ephemeral=True,
+        )
 
     @fetchsync.command(name="dryrun", description="Show what would be fetched/sent without sending")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -848,13 +1046,25 @@ def register_commands(*, bot, forwarder) -> None:
             await interaction.response.defer(ephemeral=True, thinking=True)
         except Exception:
             pass
+        import time as _time
+
         entries = iter_fetchall_entries()
         if not entries:
-            await interaction.followup.send("No fetchall mappings found.", ephemeral=True)
+            await interaction.followup.send(
+                embed=_ui_embed("Fetchsync dryrun", "No fetchall mappings found.", color=0xED4245),
+                ephemeral=True,
+            )
             return
         source_token = _pick_fetchall_source_token()
         if not source_token:
-            await interaction.followup.send("Missing FETCHALL_USER_TOKEN (needed to read source servers).", ephemeral=True)
+            await interaction.followup.send(
+                embed=_ui_embed(
+                    "Fetchsync dryrun",
+                    "Missing FETCHALL_USER_TOKEN (needed to read source servers).",
+                    color=0xED4245,
+                ),
+                ephemeral=True,
+            )
             return
         selected = []
         for e in entries:
@@ -865,25 +1075,83 @@ def register_commands(*, bot, forwarder) -> None:
                 continue
             selected.append(e)
         if not selected:
-            await interaction.followup.send(f"No mapping found for source_guild_id={int(source_guild_id)}.", ephemeral=True)
+            await interaction.followup.send(
+                embed=_ui_embed(
+                    "Fetchsync dryrun",
+                    f"No mapping found for source_guild_id `{int(source_guild_id)}`.",
+                    color=0xED4245,
+                ),
+                ephemeral=True,
+            )
             return
+        total_maps = int(len(selected))
+        msg_obj = None
+        try:
+            msg_obj = await interaction.followup.send(
+                embed=_ui_embed("Fetchsync dryrun", f"Starting...\n- mappings: `{total_maps}`"),
+                ephemeral=True,
+                wait=True,
+            )
+        except Exception:
+            msg_obj = None
         summaries: List[str] = []
+        map_idx = 0
+        last_edit_ts = 0.0
         for entry in selected:
+            map_idx += 1
+            try:
+                sgid = int(entry.get("source_guild_id", 0) or 0)
+            except Exception:
+                sgid = 0
+            name = str(entry.get("name") or "").strip() or f"guild_{sgid}"
+
+            async def _progress_cb(payload: Dict[str, Any]) -> None:
+                nonlocal last_edit_ts
+                if msg_obj is None:
+                    return
+                try:
+                    now = float(_time.time())
+                except Exception:
+                    now = 0.0
+                if last_edit_ts and now and (now - last_edit_ts) < 1.0:
+                    return
+                last_edit_ts = now
+                stage = str(payload.get("stage") or "")
+                total_ch = int(payload.get("channels_total", 0) or 0)
+                done_ch = int(payload.get("channels_processed", 0) or 0)
+                would_send = int(payload.get("would_send", 0) or 0)
+                errs = int(payload.get("errors", 0) or 0)
+                bar = _render_progress_bar(done_ch, total_ch)
+                header = f"Fetchsync dryrun: {name} ({map_idx}/{total_maps})"
+                text = "\n".join([bar, f"would_send={would_send} errors={errs} stage={stage}"]).strip()
+                try:
+                    emb = _ui_embed(header, text)
+                    await msg_obj.edit(embed=emb, content=None)
+                except Exception:
+                    return
+
             result = await run_fetchsync(
                 bot=bot,
                 entry=entry,
                 destination_guild=getattr(interaction, "guild", None),
                 source_user_token=source_token,
                 dryrun=True,
+                progress_cb=_progress_cb,
             )
             summaries.append(
                 f"- sgid={int(entry.get('source_guild_id',0) or 0)} ok={bool(result.get('ok'))} "
                 f"channels={int(result.get('channels',0) or 0)} would_send={int(result.get('would_send',0) or 0)} reason={result.get('reason') or ''}"
             )
-        msg = "Fetchsync dryrun:\n" + "\n".join(summaries[:50])
+        final = "Results:\n" + "\n".join(summaries[:50])
         if len(summaries) > 50:
-            msg += f"\n... and {len(summaries)-50} more"
-        await interaction.followup.send(msg, ephemeral=True)
+            final += f"\n... and {len(summaries)-50} more"
+        if msg_obj is not None:
+            try:
+                await msg_obj.edit(embed=_ui_embed("Fetchsync dryrun", final[:3500]), content=None)
+                return
+            except Exception:
+                pass
+        await interaction.followup.send(embed=_ui_embed("Fetchsync dryrun", final[:3500]), ephemeral=True)
 
     @fetchsync.command(name="run", description="Pull and mirror messages for one mapping (or all)")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -892,13 +1160,25 @@ def register_commands(*, bot, forwarder) -> None:
             await interaction.response.defer(ephemeral=True, thinking=True)
         except Exception:
             pass
+        import time as _time
+
         entries = iter_fetchall_entries()
         if not entries:
-            await interaction.followup.send("No fetchall mappings found.", ephemeral=True)
+            await interaction.followup.send(
+                embed=_ui_embed("Fetchsync run", "No fetchall mappings found.", color=0xED4245),
+                ephemeral=True,
+            )
             return
         source_token = _pick_fetchall_source_token()
         if not source_token:
-            await interaction.followup.send("Missing FETCHALL_USER_TOKEN (needed to read source servers).", ephemeral=True)
+            await interaction.followup.send(
+                embed=_ui_embed(
+                    "Fetchsync run",
+                    "Missing FETCHALL_USER_TOKEN (needed to read source servers).",
+                    color=0xED4245,
+                ),
+                ephemeral=True,
+            )
             return
         selected = []
         for e in entries:
@@ -909,17 +1189,68 @@ def register_commands(*, bot, forwarder) -> None:
                 continue
             selected.append(e)
         if not selected:
-            await interaction.followup.send(f"No mapping found for source_guild_id={int(source_guild_id)}.", ephemeral=True)
+            await interaction.followup.send(
+                embed=_ui_embed(
+                    "Fetchsync run",
+                    f"No mapping found for source_guild_id `{int(source_guild_id)}`.",
+                    color=0xED4245,
+                ),
+                ephemeral=True,
+            )
             return
+        total_maps = int(len(selected))
+        msg_obj = None
+        try:
+            msg_obj = await interaction.followup.send(
+                embed=_ui_embed("Fetchsync run", f"Starting...\n- mappings: `{total_maps}`"),
+                ephemeral=True,
+                wait=True,
+            )
+        except Exception:
+            msg_obj = None
         ok = 0
         total_sent = 0
+        map_idx = 0
+        last_edit_ts = 0.0
         for entry in selected:
+            map_idx += 1
+            try:
+                sgid = int(entry.get("source_guild_id", 0) or 0)
+            except Exception:
+                sgid = 0
+            name = str(entry.get("name") or "").strip() or f"guild_{sgid}"
+
+            async def _progress_cb(payload: Dict[str, Any]) -> None:
+                nonlocal last_edit_ts
+                if msg_obj is None:
+                    return
+                try:
+                    now = float(_time.time())
+                except Exception:
+                    now = 0.0
+                if last_edit_ts and now and (now - last_edit_ts) < 1.0:
+                    return
+                last_edit_ts = now
+                stage = str(payload.get("stage") or "")
+                total_ch = int(payload.get("channels_total", 0) or 0)
+                done_ch = int(payload.get("channels_processed", 0) or 0)
+                sent = int(payload.get("sent", 0) or 0)
+                errs = int(payload.get("errors", 0) or 0)
+                bar = _render_progress_bar(done_ch, total_ch)
+                header = f"Fetchsync: {name} ({map_idx}/{total_maps})"
+                text = "\n".join([bar, f"sent={sent} errors={errs} stage={stage}"]).strip()
+                try:
+                    await msg_obj.edit(embed=_ui_embed(header, text), content=None)
+                except Exception:
+                    return
+
             result = await run_fetchsync(
                 bot=bot,
                 entry=entry,
                 destination_guild=getattr(interaction, "guild", None),
                 source_user_token=source_token,
                 dryrun=False,
+                progress_cb=_progress_cb,
             )
             if result.get("ok"):
                 ok += 1
@@ -927,7 +1258,14 @@ def register_commands(*, bot, forwarder) -> None:
                 total_sent += int(result.get("sent", 0) or 0)
             except Exception:
                 pass
-        await interaction.followup.send(f"Fetchsync complete: {ok}/{len(selected)} ok; sent={total_sent}", ephemeral=True)
+        final = f"Fetchsync complete: {ok}/{total_maps} ok; sent={total_sent}"
+        if msg_obj is not None:
+            try:
+                await msg_obj.edit(embed=_ui_embed("Fetchsync run", final), content=None)
+                return
+            except Exception:
+                pass
+        await interaction.followup.send(embed=_ui_embed("Fetchsync run", final), ephemeral=True)
 
     @kw.command(name="list", description="List monitored keywords")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -938,11 +1276,14 @@ def register_commands(*, bot, forwarder) -> None:
             pass
         kws = load_keywords(force=True)
         if not kws:
-            await interaction.followup.send("Monitored keywords: (none)", ephemeral=True)
+            await interaction.followup.send(embed=_ui_embed("Keywords list", "Monitored keywords: (none)"), ephemeral=True)
             return
         preview = "\n".join(f"- {k}" for k in kws[:60])
         extra = "" if len(kws) <= 60 else f"\n... (+{len(kws)-60} more)"
-        await interaction.followup.send(f"Monitored keywords ({len(kws)}):\n{preview}{extra}", ephemeral=True)
+        await interaction.followup.send(
+            embed=_ui_embed("Keywords list", f"count={len(kws)}\n\n{preview}{extra}"[:3500]),
+            ephemeral=True,
+        )
 
     @kw.command(name="add", description="Add a monitored keyword")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -953,7 +1294,10 @@ def register_commands(*, bot, forwarder) -> None:
             pass
         ok, reason = add_keyword(keyword)
         n = _reload_keywords_into_forwarder()
-        await interaction.followup.send(f"Keyword add: ok={ok} reason={reason} count={n}", ephemeral=True)
+        await interaction.followup.send(
+            embed=_ui_embed("Keywords add", f"ok={ok} reason={reason}\ncount={n}\nkeyword={str(keyword or '').strip()}"),
+            ephemeral=True,
+        )
 
     @kw.command(name="remove", description="Remove a monitored keyword")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -964,7 +1308,13 @@ def register_commands(*, bot, forwarder) -> None:
             pass
         ok, reason = remove_keyword(keyword)
         n = _reload_keywords_into_forwarder()
-        await interaction.followup.send(f"Keyword remove: ok={ok} reason={reason} count={n}", ephemeral=True)
+        await interaction.followup.send(
+            embed=_ui_embed(
+                "Keywords remove",
+                f"ok={ok} reason={reason}\ncount={n}\nkeyword={str(keyword or '').strip()}",
+            ),
+            ephemeral=True,
+        )
 
     @kw.command(name="reload", description="Reload monitored keywords from disk")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -974,7 +1324,7 @@ def register_commands(*, bot, forwarder) -> None:
         except Exception:
             pass
         n = _reload_keywords_into_forwarder()
-        await interaction.followup.send(f"Keywords reloaded. count={n}", ephemeral=True)
+        await interaction.followup.send(embed=_ui_embed("Keywords reload", f"count={n}"), ephemeral=True)
 
     @kw.command(name="test", description="Test text against monitored keywords (optional: post output)")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -986,14 +1336,14 @@ def register_commands(*, bot, forwarder) -> None:
             pass
         sample = str(text or "").strip()
         if not sample:
-            await interaction.followup.send("Empty text.", ephemeral=True)
+            await interaction.followup.send(embed=_ui_embed("Keywords test", "Empty text.", color=0xED4245), ephemeral=True)
             return
         kws = load_keywords(force=True)
         matched = scan_keywords(sample, kws)
         preview = ", ".join(matched[:15])
         extra = "" if len(matched) <= 15 else f" ... (+{len(matched)-15} more)"
         await interaction.followup.send(
-            f"Keyword test: matched={len(matched)} {preview}{extra}".strip(),
+            embed=_ui_embed("Keywords test", f"matched={len(matched)}\n{preview}{extra}".strip()[:3500]),
             ephemeral=True,
         )
 
@@ -1001,7 +1351,10 @@ def register_commands(*, bot, forwarder) -> None:
             return
         dest = int(getattr(cfg, "SMARTFILTER_MONITORED_KEYWORD_CHANNEL_ID", 0) or 0)
         if dest <= 0:
-            await interaction.followup.send("MONITORED_KEYWORD channel is not configured.", ephemeral=True)
+            await interaction.followup.send(
+                embed=_ui_embed("Keywords test", "MONITORED_KEYWORD channel is not configured.", color=0xED4245),
+                ephemeral=True,
+            )
             return
         try:
             who = getattr(getattr(interaction, "user", None), "display_name", None) or getattr(
@@ -1028,7 +1381,10 @@ def register_commands(*, bot, forwarder) -> None:
         try:
             await forwarder._send_to_destination(dest_channel_id=dest, content=out, embeds=[], allowed_mentions=allowed)
         except Exception as e:
-            await interaction.followup.send(f"Send failed: {type(e).__name__}: {e}", ephemeral=True)
+            await interaction.followup.send(
+                embed=_ui_embed("Keywords test", f"Send failed: {type(e).__name__}: {e}", color=0xED4245),
+                ephemeral=True,
+            )
 
     @kwchan.command(name="set", description="Send a monitored keyword's matches to an extra channel")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -1040,11 +1396,14 @@ def register_commands(*, bot, forwarder) -> None:
             pass
         kw_s = str(keyword or "").strip()
         if not kw_s:
-            await interaction.followup.send("Empty keyword.", ephemeral=True)
+            await interaction.followup.send(embed=_ui_embed("Keywordchannel set", "Empty keyword.", color=0xED4245), ephemeral=True)
             return
         ok, reason = set_keyword_channel_override(kw_s, int(channel.id))
         await interaction.followup.send(
-            f"keywordchannel set: ok={ok} reason={reason} keyword={kw_s} channel=<#{int(channel.id)}>",
+            embed=_ui_embed(
+                "Keywordchannel set",
+                f"ok={ok} reason={reason}\nkeyword={kw_s}\nchannel=<#{int(channel.id)}>",
+            ),
             ephemeral=True,
         )
 
@@ -1058,7 +1417,10 @@ def register_commands(*, bot, forwarder) -> None:
             pass
         kw_s = str(keyword or "").strip()
         ok, reason = remove_keyword_channel_override(kw_s)
-        await interaction.followup.send(f"keywordchannel clear: ok={ok} reason={reason} keyword={kw_s}", ephemeral=True)
+        await interaction.followup.send(
+            embed=_ui_embed("Keywordchannel clear", f"ok={ok} reason={reason}\nkeyword={kw_s}"),
+            ephemeral=True,
+        )
 
     @kwchan.command(name="list", description="List keyword->extra channel overrides")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -1069,7 +1431,7 @@ def register_commands(*, bot, forwarder) -> None:
             pass
         mp = load_keyword_channel_overrides(force=True)
         if not mp:
-            await interaction.followup.send("keywordchannel overrides: (none)", ephemeral=True)
+            await interaction.followup.send(embed=_ui_embed("Keywordchannel list", "overrides: (none)"), ephemeral=True)
             return
         lines = []
         for k in sorted(mp.keys())[:100]:
@@ -1079,10 +1441,10 @@ def register_commands(*, bot, forwarder) -> None:
                 cid = 0
             if cid > 0:
                 lines.append(f"- **{k}** -> <#{cid}> (`{cid}`)")
-        msg = "keywordchannel overrides:\n" + "\n".join(lines[:60])
+        msg = "overrides:\n" + "\n".join(lines[:60])
         if len(lines) > 60:
             msg += f"\n... (+{len(lines)-60} more)"
-        await interaction.followup.send(msg, ephemeral=True)
+        await interaction.followup.send(embed=_ui_embed("Keywordchannel list", msg[:3500]), ephemeral=True)
 
     # Add groups to the tree for destination guild(s) only.
     for g in guild_objs:

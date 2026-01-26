@@ -6,10 +6,11 @@ import os
 import time
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from logging_utils import log_fetchall, log_warn
 import settings_store as cfg
+from utils import chunk_text, format_embeds_for_forwarding
 
 _BOT_DIR = Path(__file__).resolve().parent
 _CONFIG_DIR = _BOT_DIR / "config"
@@ -17,6 +18,7 @@ _FETCHALL_PATH = _CONFIG_DIR / "fetchall_mappings.json"
 
 _FILE_LOCK = threading.RLock()
 _DISCORD_API_BASE = "https://discord.com/api/v9"
+_CATEGORY_CHANNEL_LIMIT = 50
 
 
 def load_fetchall_mappings() -> Dict[str, Any]:
@@ -233,6 +235,136 @@ async def _ensure_separator(dest_category, *, source_guild_id: int, source_guild
     except Exception:
         return None
 
+
+def _overflow_category_name(base_name: str, *, idx: int) -> str:
+    bn = str(base_name or "").strip() or "mirror"
+    return f"{bn}-overflow-{int(idx)}"[:90]
+
+
+def _category_channel_count(cat) -> int:
+    try:
+        # Discord limit applies to total channels in category (text/voice/etc).
+        return int(len(getattr(cat, "channels", []) or []))
+    except Exception:
+        try:
+            return int(len(getattr(cat, "text_channels", []) or []))
+        except Exception:
+            return 0
+
+
+def _category_has_capacity(cat) -> bool:
+    try:
+        return _category_channel_count(cat) < int(_CATEGORY_CHANNEL_LIMIT)
+    except Exception:
+        return True
+
+
+async def _get_or_create_overflow_category(destination_guild, *, base_category, idx: int):
+    """
+    Find or create an overflow category for the given base category.
+    Returns a discord.CategoryChannel or None.
+    """
+    try:
+        import discord
+    except Exception:
+        return None
+    name = _overflow_category_name(getattr(base_category, "name", "") or "mirror", idx=idx)
+    # Find existing by name
+    try:
+        for c in list(getattr(destination_guild, "categories", []) or []):
+            if isinstance(c, discord.CategoryChannel) and str(getattr(c, "name", "")) == str(name):
+                return c
+    except Exception:
+        pass
+    # Create new one
+    try:
+        created = await destination_guild.create_category(
+            name,
+            reason="MWDataManagerBot fetchall overflow category",
+        )
+        try:
+            # place it right after base for readability
+            if hasattr(created, "edit") and hasattr(base_category, "position"):
+                await created.edit(position=int(getattr(base_category, "position", 0) or 0) + int(idx))
+        except Exception:
+            pass
+        return created
+    except Exception:
+        return None
+
+
+def _list_overflow_categories(destination_guild, *, base_category) -> List[Any]:
+    """Return overflow categories in numeric order."""
+    base_name = str(getattr(base_category, "name", "") or "").strip()
+    out = []
+    try:
+        for c in list(getattr(destination_guild, "categories", []) or []):
+            nm = str(getattr(c, "name", "") or "")
+            if base_name and nm.startswith(f"{base_name}-overflow-"):
+                out.append(c)
+    except Exception:
+        return []
+    # Sort by suffix int if possible
+    def _key(cat):
+        nm = str(getattr(cat, "name", "") or "")
+        try:
+            tail = nm.split("-overflow-", 1)[1]
+            return int(tail)
+        except Exception:
+            return 999999
+    try:
+        out.sort(key=_key)
+    except Exception:
+        pass
+    return out
+
+
+async def _pick_category_for_new_channel(destination_guild, *, base_category):
+    """
+    Choose a destination category with capacity.
+    Creates overflow categories as needed.
+    """
+    if _category_has_capacity(base_category):
+        return base_category
+    # Try existing overflows first
+    for c in _list_overflow_categories(destination_guild, base_category=base_category):
+        if _category_has_capacity(c):
+            return c
+    # Create a new overflow category
+    idx = 2
+    try:
+        existing = _list_overflow_categories(destination_guild, base_category=base_category)
+        if existing:
+            try:
+                last_nm = str(getattr(existing[-1], "name", "") or "")
+                idx = int(last_nm.split("-overflow-", 1)[1]) + 1
+            except Exception:
+                idx = 2 + len(existing)
+    except Exception:
+        idx = 2
+    created = await _get_or_create_overflow_category(destination_guild, base_category=base_category, idx=idx)
+    if created is not None:
+        return created
+    return base_category
+
+
+async def _ensure_separator_anywhere(destination_guild, *, base_category, source_guild_id: int, source_guild_name: str) -> Optional[int]:
+    """Ensure separator exists; create it in a category with capacity if needed."""
+    try:
+        import discord
+    except Exception:
+        return None
+    # Search across all text channels for existing separator
+    try:
+        for ch in list(getattr(destination_guild, "text_channels", []) or []):
+            topic = getattr(ch, "topic", "") or ""
+            if topic.startswith("separator for") and str(source_guild_id) in topic:
+                return int(ch.id)
+    except Exception:
+        pass
+    # Create in a category that has room
+    cat = await _pick_category_for_new_channel(destination_guild, base_category=base_category)
+    return await _ensure_separator(cat, source_guild_id=source_guild_id, source_guild_name=source_guild_name)
 
 async def _fetch_guild_channels_via_user_token(
     *, source_guild_id: int, user_token: str
@@ -504,61 +636,6 @@ async def list_source_guild_channels(
         "type_counts": type_counts,
     }
 
-def _format_embeds_for_forwarding(embeds: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Trim/clean embeds to a safe dict shape before sending."""
-    out: List[Dict[str, Any]] = []
-    for e in embeds or []:
-        if not isinstance(e, dict):
-            continue
-        embed: Dict[str, Any] = {}
-        if e.get("title"):
-            embed["title"] = e.get("title")
-        if e.get("url"):
-            embed["url"] = e.get("url")
-        desc = e.get("description") or ""
-        fields = e.get("fields") if isinstance(e.get("fields"), list) else []
-        if desc or fields:
-            embed["description"] = desc or "\u200b"
-            embed_fields = []
-            for field in fields:
-                if not isinstance(field, dict):
-                    continue
-                name = field.get("name") or "\u200b"
-                value = field.get("value")
-                if not value:
-                    continue
-                cleaned = {"name": name, "value": value}
-                if field.get("inline") is not None:
-                    cleaned["inline"] = field.get("inline")
-                embed_fields.append(cleaned)
-            if embed_fields:
-                embed["fields"] = embed_fields
-        if "image" in e and isinstance(e.get("image"), dict) and e["image"].get("url"):
-            embed["image"] = {"url": e["image"]["url"]}
-        if "thumbnail" in e and isinstance(e.get("thumbnail"), dict) and e["thumbnail"].get("url"):
-            embed["thumbnail"] = {"url": e["thumbnail"]["url"]}
-        if "author" in e and isinstance(e.get("author"), dict) and e["author"].get("name"):
-            embed["author"] = {"name": e["author"].get("name"), "url": e["author"].get("url")}
-        if "footer" in e and isinstance(e.get("footer"), dict) and e["footer"].get("text"):
-            embed["footer"] = {"text": e["footer"].get("text")}
-        if embed:
-            out.append(embed)
-    return out[:10]
-
-
-def _chunk_text(text: str, limit: int = 2000) -> List[str]:
-    if not text:
-        return [""]
-    if len(text) <= limit:
-        return [text]
-    chunks: List[str] = []
-    remaining = text
-    while remaining:
-        chunks.append(remaining[:limit])
-        remaining = remaining[limit:]
-    return chunks
-
-
 async def _send_message_to_channel(*, dest_channel, content: str, embeds: List[Dict[str, Any]]) -> None:
     try:
         import discord
@@ -579,7 +656,7 @@ async def _send_message_to_channel(*, dest_channel, content: str, embeds: List[D
             except Exception:
                 continue
 
-    chunks = _chunk_text(content, 2000)
+    chunks = chunk_text(content, 2000)
     for i, chunk in enumerate(chunks):
         if i == 0 and embed_objs:
             await dest_channel.send(content=chunk, embeds=embed_objs[:10], allowed_mentions=allowed_mentions)
@@ -593,6 +670,7 @@ async def run_fetchall(
     entry: Dict[str, Any],
     destination_guild,
     source_user_token: Optional[str] = None,
+    progress_cb: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
 ) -> Dict[str, Any]:
     """
     Basic fetch-all (standalone):
@@ -631,7 +709,9 @@ async def run_fetchall(
 
     source_guild = bot.get_guild(int(source_guild_id))
     source_guild_name = str(entry.get("name") or "").strip() or f"guild_{source_guild_id}"
-    await _ensure_separator(dest_category, source_guild_id=source_guild_id, source_guild_name=source_guild_name)
+    await _ensure_separator_anywhere(
+        destination_guild, base_category=dest_category, source_guild_id=source_guild_id, source_guild_name=source_guild_name
+    )
 
     source_category_ids = entry.get("source_category_ids") if isinstance(entry.get("source_category_ids"), list) else []
     ignored_ids: Set[int] = set()
@@ -687,9 +767,9 @@ async def run_fetchall(
         )
         src_channels_to_mirror.extend(selected)
 
-    # Build existing mirror index by topic
+    # Build existing mirror index by topic (scan across ALL destination channels, including overflow categories)
     existing_by_source: dict[int, discord.TextChannel] = {}
-    for ch in list(getattr(dest_category, "text_channels", []) or []):
+    for ch in list(getattr(destination_guild, "text_channels", []) or []):
         info = _parse_mirror_topic(getattr(ch, "topic", None))
         if info and info[0] == source_guild_id:
             existing_by_source[info[1]] = ch
@@ -697,6 +777,26 @@ async def run_fetchall(
     created = 0
     kept = 0
     attempted = 0
+    errors = 0
+    total_sources = int(len(src_channels_to_mirror or []))
+    if progress_cb is not None:
+        try:
+            await progress_cb(
+                {
+                    "stage": "start",
+                    "mode": str(mode),
+                    "source_guild_id": int(source_guild_id),
+                    "source_guild_name": str(source_guild_name),
+                    "destination_category_id": int(dest_category_id),
+                    "total_sources": int(total_sources),
+                    "attempted": 0,
+                    "created": 0,
+                    "existing": int(len(existing_by_source)),
+                    "errors": 0,
+                }
+            )
+        except Exception:
+            pass
     for src_id, src_name in src_channels_to_mirror:
         attempted += 1
         src_id = int(src_id or 0)
@@ -708,25 +808,85 @@ async def run_fetchall(
         desired_name = _slugify_channel_name(str(src_name), fallback_prefix="mirror")
         topic = _build_mirror_topic(source_guild_id, src_id)
         full_topic = f"{topic} | source={source_guild_name}#{src_name}"
-        # ensure unique name within category
+        # Choose a category with capacity (base or overflow)
+        dest_cat = await _pick_category_for_new_channel(destination_guild, base_category=dest_category)
+        # ensure unique name within chosen category
         final_name = desired_name
-        taken = {c.name for c in dest_category.text_channels}
+        try:
+            taken = {c.name for c in getattr(dest_cat, "text_channels", []) or []}
+        except Exception:
+            taken = set()
         if final_name in taken:
             final_name = (final_name[:80] + f"-{str(src_id)[-4:]}")[:90]
         try:
             await destination_guild.create_text_channel(
                 final_name,
-                category=dest_category,
+                category=dest_cat,
                 topic=full_topic,
                 reason="MWDataManagerBot fetchall mirror channel",
             )
             created += 1
         except Exception as e:
+            # If the category filled up between check+create, retry once in a new overflow category.
+            err_s = str(e)
+            if "Maximum number of channels in category reached" in err_s or "Maximum number of channels in category" in err_s:
+                try:
+                    dest_cat2 = await _pick_category_for_new_channel(destination_guild, base_category=dest_category)
+                    if dest_cat2 is not None and dest_cat2 != dest_cat:
+                        await destination_guild.create_text_channel(
+                            final_name,
+                            category=dest_cat2,
+                            topic=full_topic,
+                            reason="MWDataManagerBot fetchall mirror channel (overflow retry)",
+                        )
+                        created += 1
+                        continue
+                except Exception:
+                    pass
+            errors += 1
             log_warn(f"[FETCHALL] failed to create mirror for {source_guild_id}:{src_id}: {e}")
+        if progress_cb is not None:
+            try:
+                await progress_cb(
+                    {
+                        "stage": "mirrors",
+                        "mode": str(mode),
+                        "source_guild_id": int(source_guild_id),
+                        "source_guild_name": str(source_guild_name),
+                        "destination_category_id": int(dest_category_id),
+                        "total_sources": int(total_sources),
+                        "attempted": int(attempted),
+                        "created": int(created),
+                        "existing": int(kept),
+                        "errors": int(errors),
+                        "current_channel_id": int(src_id or 0),
+                        "current_channel_name": str(src_name or ""),
+                    }
+                )
+            except Exception:
+                pass
 
     log_fetchall(
         f"source={source_guild_id} dest_category={dest_category_id} mode={mode} attempted={attempted} created={created} existing={kept}"
     )
+    if progress_cb is not None:
+        try:
+            await progress_cb(
+                {
+                    "stage": "done",
+                    "mode": str(mode),
+                    "source_guild_id": int(source_guild_id),
+                    "source_guild_name": str(source_guild_name),
+                    "destination_category_id": int(dest_category_id),
+                    "total_sources": int(total_sources),
+                    "attempted": int(attempted),
+                    "created": int(created),
+                    "existing": int(kept),
+                    "errors": int(errors),
+                }
+            )
+        except Exception:
+            pass
     if attempted == 0:
         # Treat as failure so commands/users see a concrete reason.
         extra: Dict[str, Any] = {
@@ -769,6 +929,7 @@ async def run_fetchall(
         "attempted": attempted,
         "created": created,
         "existing": kept,
+        "errors": errors,
     }
 
 
@@ -779,6 +940,7 @@ async def run_fetchsync(
     destination_guild,
     source_user_token: str,
     dryrun: bool = False,
+    progress_cb: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
 ) -> Dict[str, Any]:
     """
     Fetch messages from source channels using a user token and mirror them into destination channels.
@@ -821,7 +983,12 @@ async def run_fetchsync(
     # In dryrun we avoid creating channels; for run mode we ensure separator exists.
     if not dryrun:
         try:
-            await _ensure_separator(dest_category, source_guild_id=source_guild_id, source_guild_name=source_guild_name)
+            await _ensure_separator_anywhere(
+                destination_guild,
+                base_category=dest_category,
+                source_guild_id=source_guild_id,
+                source_guild_name=source_guild_name,
+            )
         except Exception:
             pass
 
@@ -860,9 +1027,9 @@ async def run_fetchsync(
             pass
         return extra
 
-    # Build existing mirror index by topic
+    # Build existing mirror index by topic (scan across ALL destination channels, including overflow categories)
     existing_by_source: dict[int, discord.TextChannel] = {}
-    for ch in list(getattr(dest_category, "text_channels", []) or []):
+    for ch in list(getattr(destination_guild, "text_channels", []) or []):
         info = _parse_mirror_topic(getattr(ch, "topic", None))
         if info and info[0] == source_guild_id:
             existing_by_source[info[1]] = ch
@@ -870,7 +1037,12 @@ async def run_fetchsync(
     mirror_by_source: Dict[int, discord.TextChannel] = dict(existing_by_source)
     created_channels = 0
     if not dryrun:
-        taken = {c.name for c in dest_category.text_channels}
+        # Track taken names per destination category
+        taken_by_cat: Dict[int, Set[str]] = {}
+        try:
+            taken_by_cat[int(dest_category.id)] = {c.name for c in dest_category.text_channels}
+        except Exception:
+            taken_by_cat[int(dest_category.id)] = set()
         for src_id, src_name in src_channels_to_mirror:
             sid = int(src_id or 0)
             if sid <= 0 or sid in mirror_by_source:
@@ -878,28 +1050,75 @@ async def run_fetchsync(
             desired_name = _slugify_channel_name(str(src_name), fallback_prefix="mirror")
             topic = _build_mirror_topic(source_guild_id, sid)
             full_topic = f"{topic} | source={source_guild_name}#{src_name}"
+            # Choose category with capacity (base or overflow)
+            dest_cat = await _pick_category_for_new_channel(destination_guild, base_category=dest_category)
+            try:
+                taken = taken_by_cat.setdefault(int(dest_cat.id), {c.name for c in getattr(dest_cat, "text_channels", []) or []})
+            except Exception:
+                taken = taken_by_cat.setdefault(int(getattr(dest_cat, "id", 0) or 0), set())
             final_name = desired_name
             if final_name in taken:
                 final_name = (final_name[:80] + f"-{str(sid)[-4:]}")[:90]
             try:
                 created = await destination_guild.create_text_channel(
                     final_name,
-                    category=dest_category,
+                    category=dest_cat,
                     topic=full_topic,
                     reason="MWDataManagerBot fetchsync mirror channel",
                 )
                 mirror_by_source[sid] = created
-                taken.add(final_name)
+                try:
+                    taken.add(final_name)
+                except Exception:
+                    pass
                 created_channels += 1
             except Exception as e:
+                err_s = str(e)
+                if "Maximum number of channels in category reached" in err_s or "Maximum number of channels in category" in err_s:
+                    try:
+                        dest_cat2 = await _pick_category_for_new_channel(destination_guild, base_category=dest_category)
+                        if dest_cat2 is not None and dest_cat2 != dest_cat:
+                            created = await destination_guild.create_text_channel(
+                                final_name,
+                                category=dest_cat2,
+                                topic=full_topic,
+                                reason="MWDataManagerBot fetchsync mirror channel (overflow retry)",
+                            )
+                            mirror_by_source[sid] = created
+                            created_channels += 1
+                            continue
+                    except Exception:
+                        pass
                 log_warn(f"[FETCHSYNC] failed to create mirror for {source_guild_id}:{sid}: {e}")
 
     channels_processed = 0
     would_send = 0
     sent = 0
+    errors = 0
     per_channel_limit = 50  # initial backfill limit (your selection)
     max_per_channel = int(getattr(cfg, "FETCHALL_MAX_MESSAGES_PER_CHANNEL", 400) or 400)
     send_min_interval = float(getattr(cfg, "SEND_MIN_INTERVAL_SECONDS", 0.0) or 0.0)
+    channels_total = int(len(src_channels_to_mirror or []))
+
+    if progress_cb is not None:
+        try:
+            await progress_cb(
+                {
+                    "stage": "start",
+                    "dryrun": bool(dryrun),
+                    "source_guild_id": int(source_guild_id),
+                    "source_guild_name": str(source_guild_name),
+                    "destination_category_id": int(dest_category_id),
+                    "channels_total": int(channels_total),
+                    "channels_processed": 0,
+                    "created_mirror_channels": int(created_channels),
+                    "sent": 0,
+                    "would_send": 0,
+                    "errors": 0,
+                }
+            )
+        except Exception:
+            pass
 
     for src_id, _src_name in src_channels_to_mirror:
         sid = int(src_id or 0)
@@ -921,6 +1140,7 @@ async def run_fetchsync(
             )
             if not ok:
                 log_warn(f"[FETCHSYNC] source_channel_id={sid} fetch_failed reason={reason}")
+                errors += 1
                 continue
             msgs_to_send = list(reversed(msgs))
             if dryrun:
@@ -934,7 +1154,7 @@ async def run_fetchsync(
                     attachments = m.get("attachments") if isinstance(m.get("attachments"), list) else []
                     att_urls = [str(a.get("url") or "") for a in attachments if isinstance(a, dict) and a.get("url")]
                     embeds = m.get("embeds") if isinstance(m.get("embeds"), list) else []
-                    embed_dicts = _format_embeds_for_forwarding([e for e in embeds if isinstance(e, dict)])
+                    embed_dicts = format_embeds_for_forwarding([e for e in embeds if isinstance(e, dict)])
                     if att_urls:
                         content = (content + "\n" + "\n".join(att_urls[:10])).strip()
                     if not content and not embed_dicts:
@@ -948,6 +1168,7 @@ async def run_fetchsync(
                             await asyncio.sleep(send_min_interval)
                     except Exception as e:
                         log_warn(f"[FETCHSYNC] send_failed source_channel_id={sid} ({type(e).__name__}: {e})")
+                        errors += 1
                         break
             if (not dryrun) and last_sent_id:
                 persist_channel_cursor(source_guild_id=source_guild_id, source_channel_id=sid, last_seen_message_id=last_sent_id)
@@ -961,6 +1182,7 @@ async def run_fetchsync(
             )
             if not ok:
                 log_warn(f"[FETCHSYNC] source_channel_id={sid} fetch_failed reason={reason}")
+                errors += 1
                 break
             if not msgs:
                 break
@@ -982,7 +1204,7 @@ async def run_fetchsync(
                 attachments = m.get("attachments") if isinstance(m.get("attachments"), list) else []
                 att_urls = [str(a.get("url") or "") for a in attachments if isinstance(a, dict) and a.get("url")]
                 embeds = m.get("embeds") if isinstance(m.get("embeds"), list) else []
-                embed_dicts = _format_embeds_for_forwarding([e for e in embeds if isinstance(e, dict)])
+                embed_dicts = format_embeds_for_forwarding([e for e in embeds if isinstance(e, dict)])
                 if att_urls:
                     content = (content + "\n" + "\n".join(att_urls[:10])).strip()
                 if not content and not embed_dicts:
@@ -996,6 +1218,7 @@ async def run_fetchsync(
                         await asyncio.sleep(send_min_interval)
                 except Exception as e:
                     log_warn(f"[FETCHSYNC] send_failed source_channel_id={sid} ({type(e).__name__}: {e})")
+                    errors += 1
                     break
 
             if last_sent_id:
@@ -1005,6 +1228,27 @@ async def run_fetchsync(
 
         if (not dryrun) and last_sent_id:
             persist_channel_cursor(source_guild_id=source_guild_id, source_channel_id=sid, last_seen_message_id=last_sent_id)
+
+        if progress_cb is not None:
+            try:
+                await progress_cb(
+                    {
+                        "stage": "channels",
+                        "dryrun": bool(dryrun),
+                        "source_guild_id": int(source_guild_id),
+                        "source_guild_name": str(source_guild_name),
+                        "destination_category_id": int(dest_category_id),
+                        "channels_total": int(channels_total),
+                        "channels_processed": int(channels_processed),
+                        "current_channel_id": int(sid),
+                        "created_mirror_channels": int(created_channels),
+                        "sent": int(sent),
+                        "would_send": int(would_send),
+                        "errors": int(errors),
+                    }
+                )
+            except Exception:
+                pass
 
     try:
         log_fetchall(
@@ -1022,5 +1266,6 @@ async def run_fetchsync(
         "created_channels": created_channels,
         "would_send": would_send,
         "sent": sent,
+        "errors": errors,
     }
 

@@ -13,51 +13,14 @@ from utils import (
     augment_text_with_affiliate_redirects,
     augment_text_with_dmflip,
     augment_text_with_ringinthedeals,
+    chunk_text,
     collect_embed_strings,
     extract_all_raw_links_from_text,
     extract_urls_from_text,
+    format_embeds_for_forwarding,
     generate_content_signature,
     rewrite_affiliate_links_in_message,
 )
-
-
-def _format_embeds_for_forwarding(embeds: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Trim/clean embeds to a safe dict shape before forwarding."""
-    out: List[Dict[str, Any]] = []
-    for e in embeds or []:
-        if not isinstance(e, dict):
-            continue
-        embed: Dict[str, Any] = {}
-        if e.get("title"):
-            embed["title"] = e.get("title")
-        if e.get("url"):
-            embed["url"] = e.get("url")
-        desc = e.get("description") or ""
-        fields = e.get("fields") if isinstance(e.get("fields"), list) else []
-        if desc or fields:
-            embed["description"] = desc or "\u200b"
-            embed_fields = []
-            for field in fields:
-                if not isinstance(field, dict):
-                    continue
-                name = field.get("name") or "\u200b"
-                value = field.get("value")
-                if not value:
-                    continue
-                cleaned = {"name": name, "value": value}
-                if field.get("inline") is not None:
-                    cleaned["inline"] = field.get("inline")
-                embed_fields.append(cleaned)
-            if embed_fields:
-                embed["fields"] = embed_fields
-        if "image" in e and isinstance(e.get("image"), dict) and e["image"].get("url"):
-            embed["image"] = {"url": e["image"]["url"]}
-        if "thumbnail" in e and isinstance(e.get("thumbnail"), dict) and e["thumbnail"].get("url"):
-            embed["thumbnail"] = {"url": e["thumbnail"]["url"]}
-        if embed:
-            out.append(embed)
-    return out[:10]
-
 
 def _should_filter_message(payload: Dict[str, Any]) -> bool:
     try:
@@ -74,20 +37,6 @@ def _should_filter_message(payload: Dict[str, Any]) -> bool:
         return False
     except Exception:
         return True
-
-
-def _chunk_text(text: str, limit: int = 2000) -> List[str]:
-    if not text:
-        return [""]
-    if len(text) <= limit:
-        return [text]
-    chunks: List[str] = []
-    remaining = text
-    while remaining:
-        chunks.append(remaining[:limit])
-        remaining = remaining[limit:]
-    return chunks
-
 
 def _is_image_attachment(att: Dict[str, Any]) -> bool:
     try:
@@ -304,7 +253,7 @@ class MessageForwarder:
                 continue
 
         first_msg = None
-        chunks = _chunk_text(content, 2000)
+        chunks = chunk_text(content, 2000)
         for i, chunk in enumerate(chunks):
             # Simple per-destination throttle to reduce 429 spam (discord.py will still handle true rate limits).
             try:
@@ -859,7 +808,7 @@ class MessageForwarder:
             except Exception:
                 replaced = False
 
-        embeds_out = _format_embeds_for_forwarding(embeds)
+        embeds_out = format_embeds_for_forwarding(embeds)
         # Render image attachments as embeds for better Discord UX (no "image.png" link spam).
         try:
             embeds_out = _append_image_attachments_as_embeds(embeds_out, attachments)
