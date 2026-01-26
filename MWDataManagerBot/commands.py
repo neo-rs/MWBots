@@ -763,7 +763,7 @@ def register_commands(*, bot, forwarder) -> None:
                         cat_lines.append(f"- `{cid}`  [open](https://discord.com/channels/{sgid}/{cid})")
                 emb.add_field(
                     name=f"Source categories ({len(cats)})",
-                    value="\n".join(cat_lines) if cat_lines else "(none - means ALL categories)",
+                    value="\n".join(cat_lines) if cat_lines else "(none - REQUIRED; set via /fetchmap browse)",
                     inline=False,
                 )
                 emb.add_field(name="Ignored channels", value=str(len(ignored)), inline=True)
@@ -788,15 +788,10 @@ def register_commands(*, bot, forwarder) -> None:
         view = _Pager(entries)
         await interaction.followup.send(embed=view._embed(), view=view, ephemeral=True)
 
-    @fetchmap.command(name="browse", description="Browse a source guild's categories/channels and toggle fetch/ignore")
-    @app_commands.checks.has_permissions(manage_guild=True)
-    @app_commands.autocomplete(source_guild_id=_fetchmap_guild_autocomplete)
-    async def fetchmap_browse(interaction: discord.Interaction, source_guild_id: int = 0) -> None:
+    async def _fetchmap_browse_for_guild(interaction: discord.Interaction, source_guild_id: int) -> None:
         """
-        Interactive UI:
-        - Prev/Next category
-        - Toggle current category in mapping
-        - Multi-select channels in the category to toggle ignore
+        Internal handler for browsing a specific source guild.
+        (This must be a normal coroutine function so UI callbacks can call it.)
         """
         try:
             await interaction.response.defer(ephemeral=True, thinking=True)
@@ -810,53 +805,8 @@ def register_commands(*, bot, forwarder) -> None:
                 ephemeral=True,
             )
             return
-
-        # If no sgid provided, show a dropdown selection of mappings (RSAdminBot-style).
         if sgid <= 0:
-            entries = iter_fetchall_entries()
-            opts: List[discord.SelectOption] = []
-            for e in entries:
-                if not isinstance(e, dict):
-                    continue
-                try:
-                    g = int(e.get("source_guild_id", 0) or 0)
-                except Exception:
-                    g = 0
-                if g <= 0:
-                    continue
-                nm = str(e.get("name") or "").strip() or f"guild_{g}"
-                opts.append(discord.SelectOption(label=nm[:100], value=str(g), description=str(g)))
-                if len(opts) >= 25:
-                    break
-            if not opts:
-                await interaction.followup.send(embed=_ui_embed("Fetchmap browse", "No fetchall mappings found.", color=0xED4245), ephemeral=True)
-                return
-
-            class _PickView(discord.ui.View):
-                def __init__(self):
-                    super().__init__(timeout=60 * 10)
-                    sel = discord.ui.Select(placeholder="Select source server...", min_values=1, max_values=1, options=opts)
-                    sel.callback = self._on_select  # type: ignore
-                    self.add_item(sel)
-                    self._sel = sel
-
-                async def _on_select(self, i: discord.Interaction) -> None:
-                    try:
-                        v = str((self._sel.values or [""])[0])
-                        chosen = int(v)
-                    except Exception:
-                        chosen = 0
-                    if chosen <= 0:
-                        await i.response.send_message(embed=_ui_embed("Fetchmap browse", "Invalid selection.", color=0xED4245), ephemeral=True)
-                        return
-                    # Re-run browse with chosen id (edit in place).
-                    try:
-                        await i.response.defer(ephemeral=True, thinking=True)
-                    except Exception:
-                        pass
-                    await fetchmap_browse(i, source_guild_id=int(chosen))
-
-            await interaction.followup.send(embed=_ui_embed("Fetchmap browse", "Pick a source guild to browse:"), view=_PickView(), ephemeral=True)
+            await interaction.followup.send(embed=_ui_embed("Fetchmap browse", "Invalid source guild id.", color=0xED4245), ephemeral=True)
             return
 
         # Load mapping entry (if present)
@@ -1070,6 +1020,68 @@ def register_commands(*, bot, forwarder) -> None:
 
         view = _BrowseView()
         await interaction.followup.send(embed=_build_embed(0, 0), view=view, ephemeral=True)
+
+    @fetchmap.command(name="browse", description="Browse a source guild's categories/channels and toggle fetch/ignore")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.autocomplete(source_guild_id=_fetchmap_guild_autocomplete)
+    async def fetchmap_browse(interaction: discord.Interaction, source_guild_id: int = 0) -> None:
+        """
+        Interactive UI:
+        - Pick mapping via dropdown (if no source_guild_id)
+        - Prev/Next category
+        - Toggle current category in mapping
+        - Multi-select channels in the category to toggle ignore
+        """
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception:
+            pass
+        sgid = int(source_guild_id or 0)
+
+        # If no sgid provided, show a dropdown selection of mappings (RSAdminBot-style).
+        if sgid <= 0:
+            entries = iter_fetchall_entries()
+            opts: List[discord.SelectOption] = []
+            for e in entries:
+                if not isinstance(e, dict):
+                    continue
+                try:
+                    g = int(e.get("source_guild_id", 0) or 0)
+                except Exception:
+                    g = 0
+                if g <= 0:
+                    continue
+                nm = str(e.get("name") or "").strip() or f"guild_{g}"
+                opts.append(discord.SelectOption(label=nm[:100], value=str(g), description=str(g)))
+                if len(opts) >= 25:
+                    break
+            if not opts:
+                await interaction.followup.send(embed=_ui_embed("Fetchmap browse", "No fetchall mappings found.", color=0xED4245), ephemeral=True)
+                return
+
+            class _PickView(discord.ui.View):
+                def __init__(self):
+                    super().__init__(timeout=60 * 10)
+                    sel = discord.ui.Select(placeholder="Select source server...", min_values=1, max_values=1, options=opts)
+                    sel.callback = self._on_select  # type: ignore
+                    self.add_item(sel)
+                    self._sel = sel
+
+                async def _on_select(self, i: discord.Interaction) -> None:
+                    try:
+                        v = str((self._sel.values or [""])[0])
+                        chosen = int(v)
+                    except Exception:
+                        chosen = 0
+                    if chosen <= 0:
+                        await i.response.send_message(embed=_ui_embed("Fetchmap browse", "Invalid selection.", color=0xED4245), ephemeral=True)
+                        return
+                    await _fetchmap_browse_for_guild(i, int(chosen))
+
+            await interaction.followup.send(embed=_ui_embed("Fetchmap browse", "Pick a source guild to browse:"), view=_PickView(), ephemeral=True)
+            return
+
+        await _fetchmap_browse_for_guild(interaction, sgid)
 
     @fetchmap.command(name="upsert", description="Add/update a fetchall mapping entry")
     @app_commands.checks.has_permissions(manage_guild=True)

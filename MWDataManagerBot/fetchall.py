@@ -714,29 +714,13 @@ async def run_fetchall(
     )
 
     source_category_ids = entry.get("source_category_ids") if isinstance(entry.get("source_category_ids"), list) else []
-    # Safety: require explicit categories (prevents "mirror whole server" accidents).
-    try:
-        _cats = [int(x) for x in (source_category_ids or []) if int(x) > 0]
-    except Exception:
-        _cats = []
-    if not _cats:
-        return {
-            "ok": False,
-            "reason": "missing_source_category_ids",
-            "source_guild_id": int(source_guild_id),
-            "http_status": int(status or 0),
-        }
     # Safety: require explicit source_category_ids so we don't accidentally mirror entire servers.
     try:
         _cats = [int(x) for x in (source_category_ids or []) if int(x) > 0]
     except Exception:
         _cats = []
     if not _cats:
-        return {
-            "ok": False,
-            "reason": "missing_source_category_ids",
-            "source_guild_id": int(source_guild_id),
-        }
+        return {"ok": False, "reason": "missing_source_category_ids", "source_guild_id": int(source_guild_id)}
     ignored_ids: Set[int] = set()
     try:
         raw_ignored = entry.get("ignored_channel_ids") if isinstance(entry.get("ignored_channel_ids"), list) else []
@@ -1016,6 +1000,13 @@ async def run_fetchsync(
             pass
 
     source_category_ids = entry.get("source_category_ids") if isinstance(entry.get("source_category_ids"), list) else []
+    # Safety: require explicit categories (prevents "mirror whole server" accidents).
+    try:
+        _cats = [int(x) for x in (source_category_ids or []) if int(x) > 0]
+    except Exception:
+        _cats = []
+    if not _cats:
+        return {"ok": False, "reason": "missing_source_category_ids", "source_guild_id": int(source_guild_id)}
     ignored_ids: Set[int] = set()
     try:
         raw_ignored = entry.get("ignored_channel_ids") if isinstance(entry.get("ignored_channel_ids"), list) else []
@@ -1044,7 +1035,7 @@ async def run_fetchsync(
         }
         try:
             extra.update(_summarize_api_channels(api_channels))
-            extra["source_category_ids"] = [int(x) for x in (source_category_ids or []) if int(x) > 0]
+            extra["source_category_ids"] = _cats
             extra["ignored_count"] = int(len(ignored_ids or set()))
         except Exception:
             pass
