@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from fetchall import iter_fetchall_entries, run_fetchall, run_fetchsync, set_ignored_channel_ids, upsert_mapping
-from keywords import add_keyword, invalidate_keywords_cache, load_keywords, remove_keyword
+from keywords import add_keyword, invalidate_keywords_cache, load_keywords, remove_keyword, scan_keywords
 from logging_utils import log_info, log_warn
 import settings_store as cfg
 
@@ -597,6 +597,60 @@ def register_commands(*, bot, forwarder) -> None:
             pass
         n = _reload_keywords_into_forwarder()
         await interaction.followup.send(f"Keywords reloaded. count={n}", ephemeral=True)
+
+    @kw.command(name="test", description="Test text against monitored keywords (optional: post output)")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(text="Sample text to test", send_output="If true, also post the test output to the MONITORED_KEYWORD channel")
+    async def kw_test(interaction: discord.Interaction, text: str, send_output: bool = False) -> None:
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception:
+            pass
+        sample = str(text or "").strip()
+        if not sample:
+            await interaction.followup.send("Empty text.", ephemeral=True)
+            return
+        kws = load_keywords(force=True)
+        matched = scan_keywords(sample, kws)
+        preview = ", ".join(matched[:15])
+        extra = "" if len(matched) <= 15 else f" ... (+{len(matched)-15} more)"
+        await interaction.followup.send(
+            f"Keyword test: matched={len(matched)} {preview}{extra}".strip(),
+            ephemeral=True,
+        )
+
+        if not send_output:
+            return
+        dest = int(getattr(cfg, "SMARTFILTER_MONITORED_KEYWORD_CHANNEL_ID", 0) or 0)
+        if dest <= 0:
+            await interaction.followup.send("MONITORED_KEYWORD channel is not configured.", ephemeral=True)
+            return
+        try:
+            who = getattr(getattr(interaction, "user", None), "display_name", None) or getattr(
+                getattr(interaction, "user", None), "name", None
+            )
+        except Exception:
+            who = None
+        lines = []
+        lines.append("Monitored keyword test")
+        if who:
+            lines.append(f"by: {who}")
+        lines.append(f"matched: {len(matched)}")
+        if matched:
+            lines.append("keywords: " + ", ".join(matched[:25]) + ("" if len(matched) <= 25 else " ..."))
+        lines.append("")
+        lines.append(sample)
+        out = "\n".join(lines).strip()
+        try:
+            import discord as _discord  # local import to keep module globals clean
+
+            allowed = _discord.AllowedMentions.none()
+        except Exception:
+            allowed = None
+        try:
+            await forwarder._send_to_destination(dest_channel_id=dest, content=out, embeds=[], allowed_mentions=allowed)
+        except Exception as e:
+            await interaction.followup.send(f"Send failed: {type(e).__name__}: {e}", ephemeral=True)
 
     # Add groups to the tree for destination guild(s) only.
     for g in guild_objs:
