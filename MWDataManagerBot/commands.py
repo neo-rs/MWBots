@@ -552,13 +552,12 @@ def register_commands(*, bot, forwarder) -> None:
                                 continue
                         self.selected[cid] = nm or f"category_{cid}"
                     try:
+                        mode = "DELETE" if do_confirm else "DRYRUN"
                         await interaction.response.edit_message(
                             content=(
-                                "fetchclear: pick destination categories.\n"
-                                f"- delete_all={delete_all}\n"
-                                f"- confirm={do_confirm}\n"
-                                f"- {self._summary()}\n"
-                                "Tip: you can add selections across pages, then press Done."
+                                "Fetchclear: pick destination categories\n"
+                                f"{mode} • delete_all={delete_all} • {self._summary()}\n"
+                                "Tip: add selections across pages, then press Done."
                             )[:1950],
                             view=self,
                         )
@@ -585,11 +584,9 @@ def register_commands(*, bot, forwarder) -> None:
                     self.selected = {}
                     await interaction.response.edit_message(
                         content=(
-                            "fetchclear: pick destination categories.\n"
-                            f"- delete_all={delete_all}\n"
-                            f"- confirm={do_confirm}\n"
-                            "- selected=0\n"
-                            "Tip: choose multiple categories from the dropdown."
+                            "Fetchclear: pick destination categories\n"
+                            f"{'DELETE' if do_confirm else 'DRYRUN'} • delete_all={delete_all} • selected=0\n"
+                            "Tip: choose multiple categories from the dropdown, then press Done."
                         )[:1950],
                         view=self,
                     )
@@ -607,10 +604,9 @@ def register_commands(*, bot, forwarder) -> None:
 
             view = _PickCatsView()
             prompt = (
-                "fetchclear: pick destination categories.\n"
-                f"- delete_all={delete_all}\n"
-                f"- confirm={do_confirm}\n"
-                "Tip: choose multiple categories from the dropdown."
+                "Fetchclear: pick destination categories\n"
+                f"{'DELETE' if do_confirm else 'DRYRUN'} • delete_all={delete_all} • selected=0\n"
+                "Tip: choose multiple categories from the dropdown, then press Done."
             )
             try:
                 msg = await ctx.send(prompt, view=view)
@@ -703,10 +699,10 @@ def register_commands(*, bot, forwarder) -> None:
         if not do_confirm:
             ids_csv = ",".join(str(int(getattr(c, "id", 0) or 0)) for c in cats if int(getattr(c, "id", 0) or 0) > 0)
             lines: List[str] = [
-                "fetchclear DRYRUN",
-                f"- delete_all: {delete_all}",
-                f"- categories: {len(cats)}",
-                f"- would_delete_total: {total}",
+                "Fetchclear (DRYRUN)",
+                f"{_render_progress_bar(0, max(1, int(total)))}",
+                f"would_delete_total={total} categories={len(cats)} delete_all={delete_all}",
+                "NOTE: DRYRUN ONLY — nothing was deleted.",
                 "",
                 "Per-category:",
             ]
@@ -726,14 +722,22 @@ def register_commands(*, bot, forwarder) -> None:
                     lines.append("  - ... (truncated)")
             lines += [
                 "",
-                "Run:",
+                "To delete for real, run:",
                 f"!fetchclear {ids_csv} " + ("all " if delete_all else "") + "confirm",
             ]
             await ctx.send("\n".join(lines)[:1950])
             return
 
         # Execute deletes with progress
-        progress = await ctx.send(f"fetchclear: deleting {total} channel(s) across {len(cats)} category(ies)...")
+        progress = await ctx.send(
+            "\n".join(
+                [
+                    "Fetchclear (DELETE)",
+                    _render_progress_bar(0, int(total)),
+                    f"deleted=0 errors=0 total={total} categories={len(cats)} delete_all={delete_all}",
+                ]
+            )[:1950]
+        )
         deleted = 0
         errors = 0
         last_edit = 0.0
@@ -760,7 +764,9 @@ def register_commands(*, bot, forwarder) -> None:
                     try:
                         await progress.edit(
                             content=(
-                                f"fetchclear: {bar} deleted={deleted} errors={errors}\n"
+                                "Fetchclear (DELETE)\n"
+                                f"{bar}\n"
+                                f"deleted={deleted} errors={errors} total={total} categories={len(cats)} delete_all={delete_all}\n"
                                 f"category {cat_idx}/{len(cats)}: {cat_name} ({cat_id})"
                             )[:1950]
                         )
@@ -769,7 +775,13 @@ def register_commands(*, bot, forwarder) -> None:
                 # Small delay to be gentle
                 await asyncio.sleep(0.35)
 
-        await progress.edit(content=f"fetchclear complete: deleted={deleted}/{total} errors={errors}")
+        await progress.edit(
+            content=(
+                "Fetchclear (DONE)\n"
+                f"{_render_progress_bar(int(total), int(total))}\n"
+                f"deleted={deleted}/{total} errors={errors} categories={len(cats)} delete_all={delete_all}"
+            )[:1950]
+        )
 
     @bot.command(name="fetchauth")
     async def fetchauth_cmd(ctx, source_guild_id: str = "") -> None:
