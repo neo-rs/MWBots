@@ -10,7 +10,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from logging_utils import log_fetchall, log_warn
 import settings_store as cfg
-from utils import chunk_text, format_embeds_for_forwarding
+from utils import append_image_attachments_as_embeds, chunk_text, format_embeds_for_forwarding, is_image_attachment
 
 _BOT_DIR = Path(__file__).resolve().parent
 _CONFIG_DIR = _BOT_DIR / "config"
@@ -19,6 +19,60 @@ _FETCHALL_PATH = _CONFIG_DIR / "fetchall_mappings.json"
 _FILE_LOCK = threading.RLock()
 _DISCORD_API_BASE = "https://discord.com/api/v9"
 _CATEGORY_CHANNEL_LIMIT = 50
+
+
+def _is_substantive_fetched_message(*, content: str, embeds: List[Dict[str, Any]], attachments: List[Dict[str, Any]], min_chars: int) -> bool:
+    """
+    Fetchsync filter:
+    - Drop empty messages and "ping-only / attention-only" messages.
+    - Keep messages with embeds/attachments or links even if short.
+    """
+    try:
+        content = str(content or "")
+    except Exception:
+        content = ""
+    try:
+        embeds = [e for e in (embeds or []) if isinstance(e, dict)]
+    except Exception:
+        embeds = []
+    try:
+        attachments = [a for a in (attachments or []) if isinstance(a, dict)]
+    except Exception:
+        attachments = []
+
+    # If it has media/embeds, keep it.
+    if embeds or attachments:
+        return True
+
+    raw = (content or "").strip()
+    if not raw:
+        return False
+
+    import re
+
+    # Pure mention blast (roles/users/everyone/here).
+    if re.fullmatch(r"(?:\s|<@[!&]?\d+>|@everyone|@here)+", raw):
+        return False
+
+    # Keep anything with a URL even if short (links often are the whole payload).
+    if re.search(r"https?://\S+", raw):
+        return True
+
+    # Remove mention tokens, then apply minimum length.
+    cleaned = re.sub(r"<@[!&]?\d+>", " ", raw)
+    cleaned = cleaned.replace("@everyone", " ").replace("@here", " ")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return False
+
+    try:
+        mc = int(min_chars or 0)
+    except Exception:
+        mc = 0
+    mc = max(0, min(500, mc))
+    if mc <= 0:
+        return True
+    return len(cleaned) >= mc
 
 
 def load_fetchall_mappings() -> Dict[str, Any]:
@@ -382,6 +436,60 @@ async def _fetch_guild_channels_via_user_token(
     return status, None
 
 
+async def _fetch_guild_info_via_user_token(*, source_guild_id: int, user_token: str) -> Tuple[int, Optional[Dict[str, Any]]]:
+    """
+    Fetch source guild metadata (name/icon) using a user token.
+    Returns (http_status, guild_dict_or_none).
+    """
+    if source_guild_id <= 0 or not user_token:
+        return 0, None
+    url = f"{_DISCORD_API_BASE}/guilds/{int(source_guild_id)}"
+    status, data = await _discord_api_get_json(url=url, user_token=str(user_token).strip(), params=None)
+    if status == 200 and isinstance(data, dict):
+        return status, data
+    return status, None
+
+
+def _guild_icon_url(*, guild_id: int, icon_hash: str) -> str:
+    try:
+        h = str(icon_hash or "").strip()
+    except Exception:
+        h = ""
+    if not h:
+        return ""
+    ext = "png"
+    try:
+        if h.startswith("a_"):
+            ext = "gif"
+    except Exception:
+        ext = "png"
+    return f"https://cdn.discordapp.com/icons/{int(guild_id)}/{h}.{ext}?size=64"
+
+
+def _source_brand_embed(
+    *, source_guild_id: int, source_guild_name: str, source_guild_icon_url: str, source_channel_id: int, source_channel_name: str
+) -> Dict[str, Any]:
+    """Small header embed to show source server avatar + name for mirrored messages."""
+    sgid = int(source_guild_id or 0)
+    cid = int(source_channel_id or 0)
+    cname = str(source_channel_name or "").strip()
+    gname = str(source_guild_name or "").strip() or f"guild_{sgid}"
+    icon_url = str(source_guild_icon_url or "").strip()
+    chan_url = ""
+    if sgid > 0 and cid > 0:
+        chan_url = f"https://discord.com/channels/{sgid}/{cid}"
+    author: Dict[str, Any] = {"name": gname}
+    if chan_url:
+        author["url"] = chan_url
+    if icon_url:
+        author["icon_url"] = icon_url
+    desc = f"#{cname}" if cname else ""
+    out: Dict[str, Any] = {"author": author}
+    if desc:
+        out["description"] = desc
+    return out
+
+
 async def _discord_api_get_json(
     *,
     url: str,
@@ -709,6 +817,18 @@ async def run_fetchall(
 
     source_guild = bot.get_guild(int(source_guild_id))
     source_guild_name = str(entry.get("name") or "").strip() or f"guild_{source_guild_id}"
+    source_guild_icon_url = ""
+    try:
+        _st, ginfo = await _fetch_guild_info_via_user_token(source_guild_id=source_guild_id, user_token=token)
+        if isinstance(ginfo, dict):
+            nm = str(ginfo.get("name") or "").strip()
+            if nm:
+                source_guild_name = nm
+            icon_hash = str(ginfo.get("icon") or "").strip()
+            if icon_hash:
+                source_guild_icon_url = _guild_icon_url(guild_id=int(source_guild_id), icon_hash=icon_hash)
+    except Exception:
+        source_guild_icon_url = ""
     await _ensure_separator_anywhere(
         destination_guild, base_category=dest_category, source_guild_id=source_guild_id, source_guild_name=source_guild_name
     )
@@ -1109,9 +1229,15 @@ async def run_fetchsync(
     would_send = 0
     sent = 0
     errors = 0
-    per_channel_limit = 50  # initial backfill limit (your selection)
+    # initial backfill limit for channels with no cursor yet
+    per_channel_limit = int(getattr(cfg, "FETCHSYNC_INITIAL_BACKFILL_LIMIT", 20) or 20)
+    if per_channel_limit < 1:
+        per_channel_limit = 1
+    if per_channel_limit > 50:
+        per_channel_limit = 50
     max_per_channel = int(getattr(cfg, "FETCHALL_MAX_MESSAGES_PER_CHANNEL", 400) or 400)
     send_min_interval = float(getattr(cfg, "SEND_MIN_INTERVAL_SECONDS", 0.0) or 0.0)
+    min_chars = int(getattr(cfg, "FETCHSYNC_MIN_CONTENT_CHARS", 25) or 25)
     channels_total = int(len(src_channels_to_mirror or []))
 
     if progress_cb is not None:
@@ -1134,7 +1260,206 @@ async def run_fetchsync(
         except Exception:
             pass
 
-    for src_id, _src_name in src_channels_to_mirror:
+    import re
+
+    def _strip_mentions_only(text: str) -> str:
+        s = str(text or "")
+        s = re.sub(r"<@[!&]?\d+>", " ", s)
+        s = s.replace("@everyone", " ").replace("@here", " ")
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
+
+    def _bundle_candidate(*, content: str, embeds: List[Dict[str, Any]], attachments: List[Dict[str, Any]]) -> bool:
+        # Attachments-only consecutive posts by same author should be grouped.
+        if not attachments:
+            return False
+        if embeds:
+            return False
+        cleaned = _strip_mentions_only(content)
+        if not cleaned:
+            return True
+        # Treat "..." / "." / punctuation-only as empty for bundling.
+        if re.fullmatch(r"[\W_]+", cleaned):
+            return True
+        return False
+
+    async def _process_msgs(
+        *,
+        msgs_to_send: List[Dict[str, Any]],
+        dest_channel,
+        src_channel_id: int,
+        src_channel_name: str,
+        last_cursor_id: str,
+    ) -> Tuple[int, int, str, int]:
+        """
+        Returns (sent_inc, would_send_inc, new_last_cursor_id, errors_inc).
+        - In dryrun: counts would_send (outbound message count).
+        - In run: counts sent (outbound message count).
+        """
+        sent_inc = 0
+        would_inc = 0
+        err_inc = 0
+        cursor_id = str(last_cursor_id or "").strip()
+
+        i = 0
+        while i < len(msgs_to_send or []):
+            m = msgs_to_send[i]
+            if not isinstance(m, dict):
+                i += 1
+                continue
+            mid = str(m.get("id") or "").strip()
+            content = str(m.get("content") or "")
+            attachments = m.get("attachments") if isinstance(m.get("attachments"), list) else []
+            embeds = m.get("embeds") if isinstance(m.get("embeds"), list) else []
+            embeds_dicts_raw = [e for e in embeds if isinstance(e, dict)]
+            author = m.get("author") if isinstance(m.get("author"), dict) else {}
+            author_id = str(author.get("id") or "").strip()
+
+            # Group consecutive attachment-only messages by the same author.
+            if _bundle_candidate(content=content, embeds=embeds_dicts_raw, attachments=attachments):
+                bundle_attachments: List[Dict[str, Any]] = []
+                bundle_last_id = mid
+                j = i
+                while j < len(msgs_to_send):
+                    mm = msgs_to_send[j]
+                    if not isinstance(mm, dict):
+                        break
+                    mmid = str(mm.get("id") or "").strip()
+                    mmcontent = str(mm.get("content") or "")
+                    mmattachments = mm.get("attachments") if isinstance(mm.get("attachments"), list) else []
+                    mmembeds = mm.get("embeds") if isinstance(mm.get("embeds"), list) else []
+                    mmauthor = mm.get("author") if isinstance(mm.get("author"), dict) else {}
+                    mmauthor_id = str(mmauthor.get("id") or "").strip()
+                    if mmauthor_id != author_id:
+                        break
+                    if not _bundle_candidate(
+                        content=mmcontent, embeds=[e for e in mmembeds if isinstance(e, dict)], attachments=mmattachments
+                    ):
+                        break
+                    for a in mmattachments:
+                        if isinstance(a, dict):
+                            bundle_attachments.append(a)
+                    if mmid:
+                        bundle_last_id = mmid
+                    j += 1
+
+                # Build one outbound message
+                non_image_urls = []
+                for a in bundle_attachments:
+                    if not isinstance(a, dict):
+                        continue
+                    if is_image_attachment(a):
+                        continue
+                    u = str(a.get("url") or a.get("proxy_url") or "").strip()
+                    if u:
+                        non_image_urls.append(u)
+                out_content = ""
+                if non_image_urls:
+                    out_content = "\n".join(non_image_urls[:10]).strip()
+                # Reserve 1 embed slot for branding, rest for images
+                embed_body = append_image_attachments_as_embeds([], bundle_attachments, max_embeds=9)
+                embeds_out: List[Dict[str, Any]] = [_source_brand_embed(
+                    source_guild_id=source_guild_id,
+                    source_guild_name=source_guild_name,
+                    source_guild_icon_url=source_guild_icon_url,
+                    source_channel_id=int(src_channel_id),
+                    source_channel_name=str(src_channel_name or ""),
+                )] + embed_body
+
+                # If nothing to send, just advance cursor.
+                if not out_content and not embed_body:
+                    if bundle_last_id:
+                        cursor_id = bundle_last_id
+                    i = j
+                    continue
+
+                if dryrun:
+                    would_inc += 1
+                    if bundle_last_id:
+                        cursor_id = bundle_last_id
+                    i = j
+                    continue
+
+                try:
+                    await _send_message_to_channel(dest_channel=dest_channel, content=out_content[:1950], embeds=embeds_out[:10])
+                    sent_inc += 1
+                    if bundle_last_id:
+                        cursor_id = bundle_last_id
+                    if send_min_interval > 0:
+                        await asyncio.sleep(send_min_interval)
+                except Exception as e:
+                    log_warn(f"[FETCHSYNC] send_failed source_channel_id={src_channel_id} ({type(e).__name__}: {e})")
+                    err_inc += 1
+                    break
+                i = j
+                continue
+
+            # Non-bundled message: apply substantive filter
+            if not _is_substantive_fetched_message(
+                content=content, embeds=embeds_dicts_raw, attachments=attachments, min_chars=min_chars
+            ):
+                if mid:
+                    cursor_id = mid
+                i += 1
+                continue
+
+            # Build embeds (reserve slot for branding)
+            embed_body = format_embeds_for_forwarding(embeds_dicts_raw)[:9]
+            try:
+                embed_body = append_image_attachments_as_embeds(embed_body, attachments, max_embeds=9)
+            except Exception:
+                embed_body = embed_body
+            # Non-image attachments as URLs
+            non_image_urls = []
+            for a in attachments:
+                if not isinstance(a, dict):
+                    continue
+                if is_image_attachment(a):
+                    continue
+                u = str(a.get("url") or a.get("proxy_url") or "").strip()
+                if u:
+                    non_image_urls.append(u)
+            if non_image_urls:
+                content = (content + "\n" + "\n".join(non_image_urls[:10])).strip()
+
+            # If nothing, advance cursor.
+            if not content and not embed_body:
+                if mid:
+                    cursor_id = mid
+                i += 1
+                continue
+
+            embeds_out: List[Dict[str, Any]] = [_source_brand_embed(
+                source_guild_id=source_guild_id,
+                source_guild_name=source_guild_name,
+                source_guild_icon_url=source_guild_icon_url,
+                source_channel_id=int(src_channel_id),
+                source_channel_name=str(src_channel_name or ""),
+            )] + embed_body
+
+            if dryrun:
+                would_inc += 1
+                if mid:
+                    cursor_id = mid
+                i += 1
+                continue
+
+            try:
+                await _send_message_to_channel(dest_channel=dest_channel, content=str(content or "")[:1950], embeds=embeds_out[:10])
+                sent_inc += 1
+                if mid:
+                    cursor_id = mid
+                if send_min_interval > 0:
+                    await asyncio.sleep(send_min_interval)
+            except Exception as e:
+                log_warn(f"[FETCHSYNC] send_failed source_channel_id={src_channel_id} ({type(e).__name__}: {e})")
+                err_inc += 1
+                break
+            i += 1
+
+        return sent_inc, would_inc, cursor_id, err_inc
+
+    for src_id, src_name in src_channels_to_mirror:
         sid = int(src_id or 0)
         if sid <= 0:
             continue
@@ -1146,7 +1471,7 @@ async def run_fetchsync(
 
         cursor = _get_cursor(entry, source_channel_id=sid)
         total_fetched = 0
-        last_sent_id: str = ""
+        last_cursor_id: str = ""
 
         if not cursor:
             ok, msgs, reason = await _fetch_channel_messages_page(
@@ -1157,35 +1482,18 @@ async def run_fetchsync(
                 errors += 1
                 continue
             msgs_to_send = list(reversed(msgs))
-            if dryrun:
-                would_send += len(msgs_to_send)
-                if msgs_to_send:
-                    last_sent_id = str(msgs_to_send[-1].get("id") or "").strip()
-            else:
-                for m in msgs_to_send:
-                    mid = str(m.get("id") or "").strip()
-                    content = str(m.get("content") or "")
-                    attachments = m.get("attachments") if isinstance(m.get("attachments"), list) else []
-                    att_urls = [str(a.get("url") or "") for a in attachments if isinstance(a, dict) and a.get("url")]
-                    embeds = m.get("embeds") if isinstance(m.get("embeds"), list) else []
-                    embed_dicts = format_embeds_for_forwarding([e for e in embeds if isinstance(e, dict)])
-                    if att_urls:
-                        content = (content + "\n" + "\n".join(att_urls[:10])).strip()
-                    if not content and not embed_dicts:
-                        continue
-                    try:
-                        await _send_message_to_channel(dest_channel=dest_channel, content=content, embeds=embed_dicts)
-                        sent += 1
-                        if mid:
-                            last_sent_id = mid
-                        if send_min_interval > 0:
-                            await asyncio.sleep(send_min_interval)
-                    except Exception as e:
-                        log_warn(f"[FETCHSYNC] send_failed source_channel_id={sid} ({type(e).__name__}: {e})")
-                        errors += 1
-                        break
-            if (not dryrun) and last_sent_id:
-                persist_channel_cursor(source_guild_id=source_guild_id, source_channel_id=sid, last_seen_message_id=last_sent_id)
+            s_inc, w_inc, new_cursor, e_inc = await _process_msgs(
+                msgs_to_send=msgs_to_send,
+                dest_channel=dest_channel,
+                src_channel_id=sid,
+                src_channel_name=str(src_name or ""),
+                last_cursor_id="",
+            )
+            sent += int(s_inc)
+            would_send += int(w_inc)
+            errors += int(e_inc)
+            if new_cursor:
+                persist_channel_cursor(source_guild_id=source_guild_id, source_channel_id=sid, last_seen_message_id=str(new_cursor))
             continue
 
         after = cursor
@@ -1202,46 +1510,27 @@ async def run_fetchsync(
                 break
             msgs_to_send = list(reversed(msgs))
             total_fetched += len(msgs_to_send)
-            if dryrun:
-                would_send += len(msgs_to_send)
-                last_id = str(msgs_to_send[-1].get("id") or "").strip()
-                if last_id:
-                    after = last_id
-                    last_sent_id = last_id
-                else:
-                    break
-                continue
-
-            for m in msgs_to_send:
-                mid = str(m.get("id") or "").strip()
-                content = str(m.get("content") or "")
-                attachments = m.get("attachments") if isinstance(m.get("attachments"), list) else []
-                att_urls = [str(a.get("url") or "") for a in attachments if isinstance(a, dict) and a.get("url")]
-                embeds = m.get("embeds") if isinstance(m.get("embeds"), list) else []
-                embed_dicts = format_embeds_for_forwarding([e for e in embeds if isinstance(e, dict)])
-                if att_urls:
-                    content = (content + "\n" + "\n".join(att_urls[:10])).strip()
-                if not content and not embed_dicts:
-                    continue
-                try:
-                    await _send_message_to_channel(dest_channel=dest_channel, content=content, embeds=embed_dicts)
-                    sent += 1
-                    if mid:
-                        last_sent_id = mid
-                    if send_min_interval > 0:
-                        await asyncio.sleep(send_min_interval)
-                except Exception as e:
-                    log_warn(f"[FETCHSYNC] send_failed source_channel_id={sid} ({type(e).__name__}: {e})")
-                    errors += 1
-                    break
-
-            if last_sent_id:
-                after = last_sent_id
+            s_inc, w_inc, new_cursor, e_inc = await _process_msgs(
+                msgs_to_send=msgs_to_send,
+                dest_channel=dest_channel,
+                src_channel_id=sid,
+                src_channel_name=str(src_name or ""),
+                last_cursor_id=last_cursor_id,
+            )
+            sent += int(s_inc)
+            would_send += int(w_inc)
+            errors += int(e_inc)
+            if new_cursor:
+                last_cursor_id = str(new_cursor)
+                after = str(new_cursor)
             else:
                 break
+            # if we hit a send error, stop paging this channel to preserve ordering
+            if e_inc:
+                break
 
-        if (not dryrun) and last_sent_id:
-            persist_channel_cursor(source_guild_id=source_guild_id, source_channel_id=sid, last_seen_message_id=last_sent_id)
+        if last_cursor_id:
+            persist_channel_cursor(source_guild_id=source_guild_id, source_channel_id=sid, last_seen_message_id=last_cursor_id)
 
         if progress_cb is not None:
             try:

@@ -105,6 +105,79 @@ def chunk_text(text: str, limit: int = 2000) -> List[str]:
     return chunks
 
 
+def is_image_attachment(att: Dict[str, Any]) -> bool:
+    try:
+        ct = str(att.get("content_type") or "").lower()
+        if ct.startswith("image/"):
+            return True
+    except Exception:
+        pass
+    try:
+        fn = str(att.get("filename") or "").lower()
+        if fn.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def append_image_attachments_as_embeds(
+    embeds_out: List[Dict[str, Any]], attachments: List[Dict[str, Any]], *, max_embeds: int = 10
+) -> List[Dict[str, Any]]:
+    """
+    Render image attachments as embed images (better UX than appending CDN URLs).
+    Returns a new embeds list capped to max_embeds.
+    """
+    if not attachments:
+        return list(embeds_out or [])[: int(max_embeds or 10)]
+    embeds_out = list(embeds_out or [])
+
+    # Avoid duplicating images already present in embeds.
+    existing_urls: Set[str] = set()
+    for e in embeds_out:
+        if not isinstance(e, dict):
+            continue
+        try:
+            img = e.get("image") or {}
+            if isinstance(img, dict) and img.get("url"):
+                existing_urls.add(str(img.get("url")))
+        except Exception:
+            pass
+        try:
+            thumb = e.get("thumbnail") or {}
+            if isinstance(thumb, dict) and thumb.get("url"):
+                existing_urls.add(str(thumb.get("url")))
+        except Exception:
+            pass
+
+    try:
+        cap = int(max_embeds or 10)
+    except Exception:
+        cap = 10
+    cap = max(1, min(10, cap))
+    slots = max(0, cap - len(embeds_out))
+    if slots <= 0:
+        return embeds_out[:cap]
+
+    added = 0
+    for a in attachments:
+        if added >= slots:
+            break
+        if not isinstance(a, dict):
+            continue
+        url = str(a.get("url") or a.get("proxy_url") or "").strip()
+        if not url:
+            continue
+        if url in existing_urls:
+            continue
+        if not is_image_attachment(a):
+            continue
+        embeds_out.append({"image": {"url": url}})
+        existing_urls.add(url)
+        added += 1
+    return embeds_out[:cap]
+
+
 def format_embeds_for_forwarding(embeds: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Trim/clean embeds to a safe dict shape before forwarding.

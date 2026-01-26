@@ -13,14 +13,18 @@ from utils import (
     augment_text_with_affiliate_redirects,
     augment_text_with_dmflip,
     augment_text_with_ringinthedeals,
+    append_image_attachments_as_embeds,
     chunk_text,
     collect_embed_strings,
     extract_all_raw_links_from_text,
     extract_urls_from_text,
     format_embeds_for_forwarding,
     generate_content_signature,
+    is_image_attachment,
     rewrite_affiliate_links_in_message,
 )
+
+from fetchall import iter_fetchall_entries, run_fetchsync
 
 def _should_filter_message(payload: Dict[str, Any]) -> bool:
     try:
@@ -37,70 +41,6 @@ def _should_filter_message(payload: Dict[str, Any]) -> bool:
         return False
     except Exception:
         return True
-
-def _is_image_attachment(att: Dict[str, Any]) -> bool:
-    try:
-        ct = str(att.get("content_type") or "").lower()
-        if ct.startswith("image/"):
-            return True
-    except Exception:
-        pass
-    try:
-        fn = str(att.get("filename") or "").lower()
-        if fn.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")):
-            return True
-    except Exception:
-        pass
-    return False
-
-
-def _append_image_attachments_as_embeds(
-    embeds_out: List[Dict[str, Any]], attachments: List[Dict[str, Any]]
-) -> List[Dict[str, Any]]:
-    """Render image attachments as embed images (better UX than appending CDN URLs)."""
-    if not attachments:
-        return embeds_out
-    embeds_out = list(embeds_out or [])
-    # Avoid duplicating images already present in embeds.
-    existing_urls: Set[str] = set()
-    for e in embeds_out:
-        if not isinstance(e, dict):
-            continue
-        try:
-            img = e.get("image") or {}
-            if isinstance(img, dict) and img.get("url"):
-                existing_urls.add(str(img.get("url")))
-        except Exception:
-            pass
-        try:
-            thumb = e.get("thumbnail") or {}
-            if isinstance(thumb, dict) and thumb.get("url"):
-                existing_urls.add(str(thumb.get("url")))
-        except Exception:
-            pass
-
-    slots = max(0, 10 - len(embeds_out))
-    if slots <= 0:
-        return embeds_out
-
-    added = 0
-    for a in attachments:
-        if added >= slots:
-            break
-        if not isinstance(a, dict):
-            continue
-        url = str(a.get("url") or a.get("proxy_url") or "").strip()
-        if not url:
-            continue
-        if url in existing_urls:
-            continue
-        if not _is_image_attachment(a):
-            continue
-        embeds_out.append({"image": {"url": url}})
-        existing_urls.add(url)
-        added += 1
-    return embeds_out
-
 
 class MessageForwarder:
     def __init__(self, *, bot, keywords_list: List[str], tokens: Optional[Dict[str, str]] = None):
@@ -811,7 +751,7 @@ class MessageForwarder:
         embeds_out = format_embeds_for_forwarding(embeds)
         # Render image attachments as embeds for better Discord UX (no "image.png" link spam).
         try:
-            embeds_out = _append_image_attachments_as_embeds(embeds_out, attachments)
+            embeds_out = append_image_attachments_as_embeds(embeds_out, attachments, max_embeds=10)
         except Exception:
             embeds_out = embeds_out
         # For non-image attachments, append URLs (keeps access to files without reupload).
@@ -820,7 +760,7 @@ class MessageForwarder:
             for a in attachments:
                 if not isinstance(a, dict):
                     continue
-                if _is_image_attachment(a):
+                if is_image_attachment(a):
                     continue
                 u = str(a.get("url") or "").strip()
                 if u:
@@ -1141,6 +1081,67 @@ def run_bot(*, settings: Dict[str, Any], token: str) -> Optional[int]:
                     log_info(f"Slash commands synced to {synced} destination guild(s).")
             except Exception:
                 pass
+
+        # --- Fetchsync auto-poller (live updates via user token) ---
+        try:
+            poll_s = int(getattr(cfg, "FETCHSYNC_AUTO_POLL_SECONDS", 0) or 0)
+        except Exception:
+            poll_s = 0
+        if poll_s > 0:
+            try:
+                user_token = str((forwarder.tokens or {}).get("FETCHALL_USER_TOKEN") or "").strip()
+            except Exception:
+                user_token = ""
+            if not user_token:
+                log_warn("Fetchsync auto-poller disabled: missing FETCHALL_USER_TOKEN.")
+            else:
+                try:
+                    existing = getattr(bot, "_fetchsync_auto_task", None)
+                except Exception:
+                    existing = None
+                if existing is None:
+                    async def _auto_fetchsync_loop() -> None:
+                        await bot.wait_until_ready()
+                        while not bot.is_closed():
+                            started = time.time()
+                            try:
+                                entries = iter_fetchall_entries()
+                            except Exception:
+                                entries = []
+                            # Use the first destination guild (Mirror World) for all mappings.
+                            dest_guild = None
+                            try:
+                                for gid in sorted(int(x) for x in (cfg.DESTINATION_GUILD_IDS or set()) if int(x) > 0):
+                                    dest_guild = bot.get_guild(int(gid))
+                                    if dest_guild is not None:
+                                        break
+                            except Exception:
+                                dest_guild = None
+                            for entry in entries or []:
+                                try:
+                                    await run_fetchsync(
+                                        bot=bot,
+                                        entry=entry,
+                                        destination_guild=dest_guild,
+                                        source_user_token=user_token,
+                                        dryrun=False,
+                                        progress_cb=None,
+                                    )
+                                except Exception as e:
+                                    log_warn(f"[FETCHSYNC] auto poll failed ({type(e).__name__}: {e})")
+                                # small gap between mappings
+                                await asyncio.sleep(1.0)
+                            elapsed = max(0.0, time.time() - started)
+                            sleep_for = float(poll_s) - float(elapsed)
+                            if sleep_for < 5.0:
+                                sleep_for = 5.0
+                            await asyncio.sleep(sleep_for)
+
+                    try:
+                        bot._fetchsync_auto_task = asyncio.create_task(_auto_fetchsync_loop())
+                        log_info(f"Fetchsync auto-poller enabled: every {int(poll_s)}s")
+                    except Exception as e:
+                        log_warn(f"Fetchsync auto-poller failed to start ({type(e).__name__}: {e})")
 
     @bot.event
     async def on_message(message) -> None:

@@ -101,6 +101,17 @@ Notes:
 
 Note: **source categories are required**. If `source_category_ids` is empty, fetchall/fetchsync will return `missing_source_category_ids` to prevent mirroring an entire server by accident.
 
+Fetchsync filtering + live mode:
+- Fetchsync will **skip low-signal messages** like pure role/user mention blasts or very short "ping for attention" messages (configurable).
+- Mirrored messages include a small header embed showing the **source server name + icon**, so every mirrored post is clearly attributed.
+- Consecutive **attachment-only** messages posted by the same user are grouped into a **single** mirrored output (so multi-image drops don't spam).
+- Fetchsync can run continuously in the background (auto-poller) using the user token to keep mirror channels up to date.
+
+Config knobs (`config/settings.json`):
+- `fetchsync_initial_backfill_limit` (default 20, max 50): how many recent messages to seed the cursor when a source channel has no cursor yet.
+- `fetchsync_min_content_chars` (default 25): minimum non-mention text length to mirror (messages with embeds/attachments/URLs are still mirrored).
+- `fetchsync_auto_poll_seconds` (default 60; set 0 to disable): background polling interval for live updates.
+
 #### `/fetchmap upsert`
 - **Description**: Add/update a mapping entry.
 - **Parameters**:
