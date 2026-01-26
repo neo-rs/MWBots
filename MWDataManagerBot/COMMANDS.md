@@ -36,6 +36,18 @@ Notes:
 - **Admin-only**: No (but should be used by admins)
 - **Usage**: `!fetch 123456789012345678`
 
+#### `!fetchclear [category_id] [all] confirm`
+- **Description**: Delete mirror/separator channels inside a Mirror World destination category to fix overflow.
+- **Admin-only**: No (but should be used by admins)
+- **Safety**:
+  - Dryrun by default (no deletes unless `confirm` is provided)
+  - By default deletes only channels with topic `MIRROR:` or separator channels
+  - Add `all` to delete everything in the category
+- **Usage**:
+  - `!fetchclear` (dryrun, default category)
+  - `!fetchclear 1437856372300451851 confirm`
+  - `!fetchclear 1437856372300451851 all confirm`
+
 #### `!setfetchguild <source_guild_id> <destination_category_id>`
 - **Description**: Create/update a mapping entry in `config/fetchall_mappings.json`.
 - **Admin-only**: No (but should be used by admins)
@@ -86,6 +98,8 @@ Notes:
   - toggle category included in mapping
   - toggle ignored channels via multi-select
 - **Permissions**: `manage_guild`
+
+Note: **source categories are required**. If `source_category_ids` is empty, fetchall/fetchsync will return `missing_source_category_ids` to prevent mirroring an entire server by accident.
 
 #### `/fetchmap upsert`
 - **Description**: Add/update a mapping entry.

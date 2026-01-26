@@ -278,6 +278,137 @@ def register_commands(*, bot, forwarder) -> None:
             log_warn(f"fetchsync command failed: {e}")
             await ctx.send(f"Fetchsync failed: {type(e).__name__}: {e}")
 
+    @bot.command(name="fetchclear")
+    async def fetchclear_cmd(ctx, category_id: str = "", flag1: str = "", flag2: str = "") -> None:
+        """
+        Delete Mirror World mirror/separator channels in a destination category.
+
+        Safety:
+        - Dryrun by default (lists what would be deleted).
+        - Run with `confirm` to actually delete.
+        - Add `all` to delete non-mirror channels too.
+
+        Examples:
+          !fetchclear
+          !fetchclear 1437856372300451851
+          !fetchclear 1437856372300451851 confirm
+          !fetchclear 1437856372300451851 all confirm
+        """
+        try:
+            import asyncio
+            import time as _time
+            import discord  # type: ignore
+        except Exception as e:
+            await ctx.send(f"fetchclear failed: discord import error: {type(e).__name__}: {e}")
+            return
+
+        # Default to configured dest category if present; otherwise use the user-requested Daily Upcoming category.
+        default_cat = int(getattr(cfg, "FETCHALL_DEFAULT_DEST_CATEGORY_ID", 0) or 0)
+        if default_cat <= 0:
+            default_cat = 1437856372300451851
+
+        args = [str(category_id or "").strip(), str(flag1 or "").strip(), str(flag2 or "").strip()]
+        args = [a for a in args if a]
+        cat_id = 0
+        flags = set()
+        for a in args:
+            if a.isdigit() and cat_id <= 0:
+                try:
+                    cat_id = int(a)
+                except Exception:
+                    cat_id = 0
+                continue
+            flags.add(a.lower())
+        if cat_id <= 0:
+            cat_id = int(default_cat)
+
+        do_confirm = "confirm" in flags
+        delete_all = "all" in flags
+
+        if ctx.guild is None:
+            await ctx.send("fetchclear: must be run inside a guild/server.")
+            return
+
+        cat = ctx.guild.get_channel(int(cat_id))
+        if not isinstance(cat, discord.CategoryChannel):
+            await ctx.send(f"fetchclear: category not found or not a category: {cat_id}")
+            return
+
+        # Select channels to delete
+        targets = []
+        for ch in list(getattr(cat, "channels", []) or []):
+            try:
+                if not hasattr(ch, "delete"):
+                    continue
+            except Exception:
+                continue
+            topic = str(getattr(ch, "topic", "") or "")
+            name = str(getattr(ch, "name", "") or "")
+            is_mirror = bool(topic.startswith("MIRROR:"))
+            is_separator = bool(topic.startswith("separator for") or name.startswith("📅---"))
+            if delete_all:
+                targets.append(ch)
+            else:
+                if is_mirror or is_separator:
+                    targets.append(ch)
+
+        total = int(len(targets))
+        if total == 0:
+            await ctx.send(f"fetchclear: nothing to delete in category {cat_id} (delete_all={delete_all}).")
+            return
+
+        # Dryrun listing
+        if not do_confirm:
+            preview = []
+            for ch in targets[:20]:
+                try:
+                    preview.append(f"- #{getattr(ch,'name','')} ({getattr(ch,'id',0)})")
+                except Exception:
+                    continue
+            msg = (
+                f"fetchclear DRYRUN\n"
+                f"- category: {cat_id}\n"
+                f"- delete_all: {delete_all}\n"
+                f"- would_delete: {total}\n\n"
+                + "\n".join(preview)
+                + ("\n... (truncated)" if total > 20 else "")
+                + "\n\nRun: !fetchclear "
+                + (str(cat_id) + " " if cat_id else "")
+                + ("all " if delete_all else "")
+                + "confirm"
+            )
+            await ctx.send(msg[:1950])
+            return
+
+        # Execute deletes with progress
+        progress = await ctx.send(f"fetchclear: deleting {total} channel(s) in category {cat_id}...")
+        deleted = 0
+        errors = 0
+        last_edit = 0.0
+        for i, ch in enumerate(targets, start=1):
+            try:
+                await ch.delete(reason="MWDataManagerBot fetchclear")
+                deleted += 1
+            except Exception as e:
+                errors += 1
+                log_warn(f"fetchclear delete failed (channel_id={getattr(ch,'id',None)}): {type(e).__name__}: {e}")
+            # throttle edits
+            try:
+                now = float(_time.time())
+            except Exception:
+                now = 0.0
+            if now and (now - last_edit) >= 1.0:
+                last_edit = now
+                bar = _render_progress_bar(i, total)
+                try:
+                    await progress.edit(content=f"fetchclear: {bar} deleted={deleted} errors={errors}")
+                except Exception:
+                    pass
+            # Small delay to be gentle
+            await asyncio.sleep(0.35)
+
+        await progress.edit(content=f"fetchclear complete: deleted={deleted}/{total} errors={errors}")
+
     @bot.command(name="fetchauth")
     async def fetchauth_cmd(ctx, source_guild_id: str = "") -> None:
         """

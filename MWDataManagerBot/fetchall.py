@@ -714,6 +714,29 @@ async def run_fetchall(
     )
 
     source_category_ids = entry.get("source_category_ids") if isinstance(entry.get("source_category_ids"), list) else []
+    # Safety: require explicit categories (prevents "mirror whole server" accidents).
+    try:
+        _cats = [int(x) for x in (source_category_ids or []) if int(x) > 0]
+    except Exception:
+        _cats = []
+    if not _cats:
+        return {
+            "ok": False,
+            "reason": "missing_source_category_ids",
+            "source_guild_id": int(source_guild_id),
+            "http_status": int(status or 0),
+        }
+    # Safety: require explicit source_category_ids so we don't accidentally mirror entire servers.
+    try:
+        _cats = [int(x) for x in (source_category_ids or []) if int(x) > 0]
+    except Exception:
+        _cats = []
+    if not _cats:
+        return {
+            "ok": False,
+            "reason": "missing_source_category_ids",
+            "source_guild_id": int(source_guild_id),
+        }
     ignored_ids: Set[int] = set()
     try:
         raw_ignored = entry.get("ignored_channel_ids") if isinstance(entry.get("ignored_channel_ids"), list) else []
@@ -726,8 +749,8 @@ async def run_fetchall(
     if source_guild is not None:
         # Bot is in source guild: enumerate via cached guild/category objects.
         source_categories: list[discord.CategoryChannel] = []
-        if source_category_ids:
-            for cid in source_category_ids:
+        if _cats:
+            for cid in _cats:
                 try:
                     cat = source_guild.get_channel(int(cid))
                 except Exception:
@@ -735,7 +758,7 @@ async def run_fetchall(
                 if isinstance(cat, discord.CategoryChannel):
                     source_categories.append(cat)
         else:
-            source_categories = list(getattr(source_guild, "categories", []) or [])
+            source_categories = []
 
         for cat in source_categories:
             for src in list(getattr(cat, "text_channels", []) or []):
@@ -762,7 +785,7 @@ async def run_fetchall(
             }
         selected = _select_source_text_channels_from_api(
             api_channels,
-            source_category_ids=[int(x) for x in (source_category_ids or []) if int(x) > 0],
+            source_category_ids=_cats,
             ignored_channel_ids=ignored_ids,
         )
         src_channels_to_mirror.extend(selected)
@@ -900,7 +923,7 @@ async def run_fetchall(
         }
         if mode == "user_token":
             try:
-                extra["source_category_ids"] = [int(x) for x in (source_category_ids or []) if int(x) > 0]
+                extra["source_category_ids"] = _cats
                 extra["ignored_count"] = int(len(ignored_ids or set()))
             except Exception:
                 pass
@@ -1010,7 +1033,7 @@ async def run_fetchsync(
         }
     src_channels_to_mirror = _select_source_text_channels_from_api(
         api_channels,
-        source_category_ids=[int(x) for x in (source_category_ids or []) if int(x) > 0],
+        source_category_ids=_cats,
         ignored_channel_ids=ignored_ids,
     )
     if not src_channels_to_mirror:
