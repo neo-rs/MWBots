@@ -76,6 +76,7 @@
   "link_tracking_ttl_seconds": 86400,
   "fetchall_default_destination_category_id": 1437856372300451851,
   "fetchall_max_messages_per_channel": 400,
+  "fetchsync_auto_poll_seconds": 60,
   "edit_cooldown_seconds": 30,
   "fallback_channel_id": 1435066509860012073
 }

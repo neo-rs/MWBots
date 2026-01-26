@@ -110,6 +110,7 @@ def register_commands(*, bot, forwarder) -> None:
     async def fetchall_cmd(ctx) -> None:
         """Run fetch-all for all configured guild entries (mirror channel setup)."""
         try:
+            import asyncio
             import time as _time
 
             entries = iter_fetchall_entries()
@@ -118,6 +119,10 @@ def register_commands(*, bot, forwarder) -> None:
                 return
             total_maps = int(len(entries))
             progress_msg = await ctx.send(f"Fetchall starting... mappings={total_maps}")
+            try:
+                log_info(f"[fetchall] invoked mappings={total_maps}", event="fetchall_invoked", mappings=int(total_maps))
+            except Exception:
+                pass
             ok = 0
             source_token = _pick_fetchall_source_token() or None
             if not source_token:
@@ -146,6 +151,7 @@ def register_commands(*, bot, forwarder) -> None:
                         return
                     last_edit_ts = now
                     stage = str(payload.get("stage") or "")
+                    fail_reason = str(payload.get("reason") or "").strip()
                     total_sources = int(payload.get("total_sources", 0) or 0)
                     attempted = int(payload.get("attempted", 0) or 0)
                     created = int(payload.get("created", 0) or 0)
@@ -155,6 +161,8 @@ def register_commands(*, bot, forwarder) -> None:
                     current = str(payload.get("current_channel_name") or "").strip()
                     header = f"Fetchall: {name} ({map_idx}/{total_maps})"
                     lines = [header, bar, f"created={created} existing={existing} errors={errs} stage={stage}"]
+                    if stage == "fail" and fail_reason:
+                        lines.append(f"reason: {fail_reason}")
                     if current:
                         lines.append(f"channel: {current}")
                     text = "\n".join(lines).strip()
@@ -163,13 +171,23 @@ def register_commands(*, bot, forwarder) -> None:
                     except Exception:
                         return
 
-                result = await run_fetchall(
-                    bot=bot,
-                    entry=entry,
-                    destination_guild=getattr(ctx, "guild", None),
-                    source_user_token=source_token,
-                    progress_cb=_progress_cb,
-                )
+                try:
+                    # Prevent a single mapping from hanging the whole command forever.
+                    result = await asyncio.wait_for(
+                        run_fetchall(
+                            bot=bot,
+                            entry=entry,
+                            destination_guild=getattr(ctx, "guild", None),
+                            source_user_token=source_token,
+                            progress_cb=_progress_cb,
+                        ),
+                        timeout=180,
+                    )
+                except asyncio.TimeoutError:
+                    result = {"ok": False, "reason": "timeout"}
+                except Exception as e:
+                    result = {"ok": False, "reason": f"exception:{type(e).__name__}:{e}"}
+
                 if result.get("ok"):
                     ok += 1
                 else:

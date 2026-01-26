@@ -810,6 +810,12 @@ async def run_fetchall(
 
     source_guild_id = int(entry.get("source_guild_id", 0) or 0)
     if source_guild_id <= 0:
+        if progress_cb is not None:
+            try:
+                await progress_cb({"stage": "fail", "reason": "missing_source_guild_id"})
+            except Exception:
+                pass
+        log_warn("[FETCHALL] missing_source_guild_id")
         return {"ok": False, "reason": "missing_source_guild_id"}
 
     # User token (optional). Used for source guild discovery when bot is not in guild,
@@ -818,6 +824,14 @@ async def run_fetchall(
 
     dest_category_id = int(entry.get("destination_category_id", 0) or 0) or int(cfg.FETCHALL_DEFAULT_DEST_CATEGORY_ID or 0)
     if dest_category_id <= 0:
+        if progress_cb is not None:
+            try:
+                await progress_cb(
+                    {"stage": "fail", "reason": "missing_destination_category_id", "source_guild_id": int(source_guild_id)}
+                )
+            except Exception:
+                pass
+        log_warn(f"[FETCHALL] missing_destination_category_id (source_guild_id={source_guild_id})")
         return {"ok": False, "reason": "missing_destination_category_id"}
 
     if destination_guild is None:
@@ -828,15 +842,68 @@ async def run_fetchall(
                 destination_guild = g
                 break
     if destination_guild is None:
+        if progress_cb is not None:
+            try:
+                await progress_cb(
+                    {
+                        "stage": "fail",
+                        "reason": "destination_guild_not_found",
+                        "source_guild_id": int(source_guild_id),
+                        "destination_category_id": int(dest_category_id),
+                    }
+                )
+            except Exception:
+                pass
+        log_warn(f"[FETCHALL] destination_guild_not_found (source_guild_id={source_guild_id})")
         return {"ok": False, "reason": "destination_guild_not_found"}
 
     dest_category = destination_guild.get_channel(int(dest_category_id))
     if not isinstance(dest_category, discord.CategoryChannel):
+        if progress_cb is not None:
+            try:
+                await progress_cb(
+                    {
+                        "stage": "fail",
+                        "reason": f"destination_category_not_found:{dest_category_id}",
+                        "source_guild_id": int(source_guild_id),
+                        "destination_category_id": int(dest_category_id),
+                    }
+                )
+            except Exception:
+                pass
+        log_warn(f"[FETCHALL] destination_category_not_found:{dest_category_id} (source_guild_id={source_guild_id})")
         return {"ok": False, "reason": f"destination_category_not_found:{dest_category_id}"}
 
     source_guild = bot.get_guild(int(source_guild_id))
     source_guild_name = str(entry.get("name") or "").strip() or f"guild_{source_guild_id}"
     source_guild_icon_url = ""
+
+    # Always emit an "init" progress/log so the caller can see fetchall is running,
+    # even if we later exit early (e.g. missing categories).
+    if progress_cb is not None:
+        try:
+            await progress_cb(
+                {
+                    "stage": "init",
+                    "mode": "bot" if source_guild is not None else "user_token",
+                    "source_guild_id": int(source_guild_id),
+                    "source_guild_name": str(source_guild_name),
+                    "destination_category_id": int(dest_category_id),
+                    "total_sources": 0,
+                    "attempted": 0,
+                    "created": 0,
+                    "existing": 0,
+                    "errors": 0,
+                }
+            )
+        except Exception:
+            pass
+    try:
+        log_fetchall(
+            f"start source={source_guild_id} dest_category={dest_category_id} mode={'bot' if source_guild is not None else 'user_token'}"
+        )
+    except Exception:
+        pass
     try:
         if token:
             _st, ginfo = await _fetch_guild_info_via_user_token(source_guild_id=source_guild_id, user_token=token)
@@ -863,6 +930,20 @@ async def run_fetchall(
     except Exception:
         _cats = []
     if not _cats:
+        if progress_cb is not None:
+            try:
+                await progress_cb(
+                    {
+                        "stage": "fail",
+                        "reason": "missing_source_category_ids",
+                        "source_guild_id": int(source_guild_id),
+                        "source_guild_name": str(source_guild_name),
+                        "destination_category_id": int(dest_category_id),
+                    }
+                )
+            except Exception:
+                pass
+        log_warn(f"[FETCHALL] missing_source_category_ids (source_guild_id={source_guild_id})")
         return {"ok": False, "reason": "missing_source_category_ids", "source_guild_id": int(source_guild_id)}
     ignored_ids: Set[int] = set()
     try:
@@ -901,9 +982,40 @@ async def run_fetchall(
         # Fallback: use Discum/user token to list source channels via REST.
         mode = "user_token"
         if not token:
+            if progress_cb is not None:
+                try:
+                    await progress_cb(
+                        {
+                            "stage": "fail",
+                            "mode": "user_token",
+                            "reason": f"bot_not_in_source_guild:{source_guild_id} and no source_user_token provided",
+                            "source_guild_id": int(source_guild_id),
+                            "source_guild_name": str(source_guild_name),
+                            "destination_category_id": int(dest_category_id),
+                        }
+                    )
+                except Exception:
+                    pass
+            log_warn(f"[FETCHALL] bot_not_in_source_guild:{source_guild_id} and no source_user_token provided")
             return {"ok": False, "reason": f"bot_not_in_source_guild:{source_guild_id} and no source_user_token provided"}
         status, api_channels = await _fetch_guild_channels_via_user_token(source_guild_id=source_guild_id, user_token=token)
         if not api_channels:
+            if progress_cb is not None:
+                try:
+                    await progress_cb(
+                        {
+                            "stage": "fail",
+                            "mode": "user_token",
+                            "reason": f"failed_to_list_source_channels_via_token:{source_guild_id}",
+                            "http_status": int(status or 0),
+                            "source_guild_id": int(source_guild_id),
+                            "source_guild_name": str(source_guild_name),
+                            "destination_category_id": int(dest_category_id),
+                        }
+                    )
+                except Exception:
+                    pass
+            log_warn(f"[FETCHALL] failed_to_list_source_channels_via_token:{source_guild_id} http={int(status or 0)}")
             return {
                 "ok": False,
                 "reason": f"failed_to_list_source_channels_via_token:{source_guild_id}",
