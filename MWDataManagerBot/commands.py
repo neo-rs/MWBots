@@ -396,54 +396,124 @@ def register_commands(*, bot, forwarder) -> None:
                 dedup_pref.append(x)
             preferred_ids = dedup_pref
 
-            # Build candidate category list (in guild order).
-            preferred_set = set(preferred_ids)
-            guild_cats = list(getattr(ctx.guild, "categories", []) or [])
-            candidates: List["discord.CategoryChannel"] = []
-            for c in guild_cats:
-                try:
-                    if int(getattr(c, "id", 0) or 0) in preferred_set:
-                        candidates.append(c)
-                except Exception:
-                    continue
-            if not candidates:
-                candidates = [c for c in guild_cats if isinstance(c, discord.CategoryChannel)]
-
-            # Discord select menus cap at 25 options.
-            candidates = candidates[:25]
-            if not candidates:
+            guild_cats_all = [c for c in list(getattr(ctx.guild, "categories", []) or []) if isinstance(c, discord.CategoryChannel)]
+            if not guild_cats_all:
                 return []
 
-            opts: List["discord.SelectOption"] = []
-            for c in candidates:
+            # Prefer listing overflow categories for the selected base categories (if any),
+            # otherwise fall back to all guild categories.
+            preferred_set = set(preferred_ids)
+
+            def _is_overflow_of(base_name: str, cat_name: str) -> bool:
+                try:
+                    return bool(base_name) and str(cat_name or "").startswith(f"{base_name}-overflow-")
+                except Exception:
+                    return False
+
+            # Build "focused" list: base dest categories + their overflows (in guild order).
+            focused: List["discord.CategoryChannel"] = []
+            base_cats: List["discord.CategoryChannel"] = []
+            for c in guild_cats_all:
+                try:
+                    if int(getattr(c, "id", 0) or 0) in preferred_set:
+                        base_cats.append(c)
+                except Exception:
+                    continue
+            base_names = [str(getattr(c, "name", "") or "").strip() for c in base_cats]
+            for c in guild_cats_all:
                 try:
                     cid = int(getattr(c, "id", 0) or 0)
                 except Exception:
-                    continue
+                    cid = 0
                 if cid <= 0:
                     continue
-                name = str(getattr(c, "name", "") or "").strip() or f"category_{cid}"
+                nm = str(getattr(c, "name", "") or "").strip()
+                if cid in preferred_set:
+                    focused.append(c)
+                    continue
+                if any(_is_overflow_of(bn, nm) for bn in base_names if bn):
+                    focused.append(c)
+                    continue
+
+            candidates_all = focused if focused else guild_cats_all
+
+            # De-dupe preserving order
+            seen_ids = set()
+            dedup_candidates: List["discord.CategoryChannel"] = []
+            for c in candidates_all:
                 try:
-                    n_channels = int(len(getattr(c, "channels", []) or []))
+                    cid = int(getattr(c, "id", 0) or 0)
                 except Exception:
-                    n_channels = 0
-                desc = f"{n_channels} channel(s)"
-                opts.append(discord.SelectOption(label=name[:100], value=str(cid), description=desc[:100]))
-            opts = opts[:25]
-            if not opts:
-                return []
+                    cid = 0
+                if cid <= 0:
+                    continue
+                if cid in seen_ids:
+                    continue
+                seen_ids.add(cid)
+                dedup_candidates.append(c)
+            candidates_all = dedup_candidates
 
             author_id = int(getattr(getattr(ctx, "author", None), "id", 0) or 0)
 
             class _PickCatsView(discord.ui.View):
                 def __init__(self):
                     super().__init__(timeout=60)
-                    self.selected_ids: List[int] = []
+                    self.page = 0
+                    self.selected: Dict[int, str] = {}  # id -> name
+                    self._sel: Optional["discord.ui.Select"] = None
+                    self._refresh_select()
+
+                def _page_count(self) -> int:
+                    try:
+                        return max(1, int((len(candidates_all) + 24) // 25))
+                    except Exception:
+                        return 1
+
+                def _page_slice(self) -> List["discord.CategoryChannel"]:
+                    p = max(0, int(self.page))
+                    start = p * 25
+                    return candidates_all[start : start + 25]
+
+                def _summary(self) -> str:
+                    ids = list(self.selected.keys())
+                    shown = []
+                    for cid in ids[:6]:
+                        shown.append(f"{self.selected.get(cid, str(cid))} ({cid})")
+                    more = ""
+                    if len(ids) > 6:
+                        more = f" +{len(ids)-6} more"
+                    return f"selected={len(ids)} " + (", ".join(shown) + more if shown else "")
+
+                def _refresh_select(self) -> None:
+                    if self._sel is not None:
+                        try:
+                            self.remove_item(self._sel)
+                        except Exception:
+                            pass
+                    page_items = self._page_slice()
+                    opts: List["discord.SelectOption"] = []
+                    for c in page_items:
+                        try:
+                            cid = int(getattr(c, "id", 0) or 0)
+                        except Exception:
+                            continue
+                        if cid <= 0:
+                            continue
+                        name = str(getattr(c, "name", "") or "").strip() or f"category_{cid}"
+                        try:
+                            n_channels = int(len(getattr(c, "channels", []) or []))
+                        except Exception:
+                            n_channels = 0
+                        desc = f"{n_channels} channel(s)"
+                        opts.append(discord.SelectOption(label=name[:100], value=str(cid), description=desc[:100]))
+                    if not opts:
+                        self._sel = None
+                        return
                     self._sel = discord.ui.Select(
-                        placeholder="Select category/categories to clear (multi-select)",
+                        placeholder=f"Select categories to clear (multi-select) • page {self.page+1}/{self._page_count()}",
                         min_values=1,
                         max_values=min(25, len(opts)),
-                        options=opts,
+                        options=opts[:25],
                     )
                     self._sel.callback = self._on_select  # type: ignore
                     self.add_item(self._sel)
@@ -462,18 +532,73 @@ def register_commands(*, bot, forwarder) -> None:
                     return True
 
                 async def _on_select(self, interaction: "discord.Interaction") -> None:
-                    vals = list(getattr(self._sel, "values", []) or [])
-                    chosen: List[int] = []
+                    sel = self._sel
+                    vals = list(getattr(sel, "values", []) or []) if sel is not None else []
                     for v in vals:
                         try:
                             cid = int(str(v))
                         except Exception:
                             continue
-                        if cid > 0:
-                            chosen.append(cid)
-                    # de-dupe preserving order
-                    seen = set()
-                    self.selected_ids = [x for x in chosen if x > 0 and (x not in seen and not seen.add(x))]
+                        if cid <= 0:
+                            continue
+                        # resolve name from candidates list
+                        nm = ""
+                        for c in candidates_all:
+                            try:
+                                if int(getattr(c, "id", 0) or 0) == cid:
+                                    nm = str(getattr(c, "name", "") or "").strip()
+                                    break
+                            except Exception:
+                                continue
+                        self.selected[cid] = nm or f"category_{cid}"
+                    try:
+                        await interaction.response.edit_message(
+                            content=(
+                                "fetchclear: pick destination categories.\n"
+                                f"- delete_all={delete_all}\n"
+                                f"- confirm={do_confirm}\n"
+                                f"- {self._summary()}\n"
+                                "Tip: you can add selections across pages, then press Done."
+                            )[:1950],
+                            view=self,
+                        )
+                    except Exception:
+                        try:
+                            await interaction.response.defer()
+                        except Exception:
+                            pass
+
+                @discord.ui.button(label="Prev page", style=discord.ButtonStyle.secondary)
+                async def prev_page(self, interaction: "discord.Interaction", _b: "discord.ui.Button") -> None:
+                    self.page = (int(self.page) - 1) % self._page_count()
+                    self._refresh_select()
+                    await interaction.response.edit_message(view=self)
+
+                @discord.ui.button(label="Next page", style=discord.ButtonStyle.secondary)
+                async def next_page(self, interaction: "discord.Interaction", _b: "discord.ui.Button") -> None:
+                    self.page = (int(self.page) + 1) % self._page_count()
+                    self._refresh_select()
+                    await interaction.response.edit_message(view=self)
+
+                @discord.ui.button(label="Clear selection", style=discord.ButtonStyle.secondary)
+                async def clear_sel(self, interaction: "discord.Interaction", _b: "discord.ui.Button") -> None:
+                    self.selected = {}
+                    await interaction.response.edit_message(
+                        content=(
+                            "fetchclear: pick destination categories.\n"
+                            f"- delete_all={delete_all}\n"
+                            f"- confirm={do_confirm}\n"
+                            "- selected=0\n"
+                            "Tip: choose multiple categories from the dropdown."
+                        )[:1950],
+                        view=self,
+                    )
+
+                @discord.ui.button(label="Done", style=discord.ButtonStyle.success)
+                async def done_btn(self, interaction: "discord.Interaction", _b: "discord.ui.Button") -> None:
+                    if not self.selected:
+                        await interaction.response.send_message("Select at least 1 category first.", ephemeral=True)
+                        return
                     try:
                         await interaction.response.defer()
                     except Exception:
@@ -501,7 +626,13 @@ def register_commands(*, bot, forwarder) -> None:
                 await msg.edit(view=view)
             except Exception:
                 pass
-            return list(getattr(view, "selected_ids", []) or [])
+            ids = []
+            try:
+                ids = [int(x) for x in list(getattr(view, "selected", {}).keys()) if int(x) > 0]
+            except Exception:
+                ids = []
+            # preserve insertion order from dict keys (python 3.7+)
+            return ids
 
         # If no category ids were provided, use dropdown selection.
         if not category_ids:

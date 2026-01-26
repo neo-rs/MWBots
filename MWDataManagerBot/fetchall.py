@@ -248,14 +248,29 @@ def _build_mirror_topic(source_guild_id: int, source_channel_id: int) -> str:
 
 
 def _parse_mirror_topic(topic: Optional[str]) -> Optional[tuple[int, int]]:
-    if not topic or not topic.startswith(MIRROR_TOPIC_PREFIX):
+    """
+    Parse a mirror topic.
+
+    Current topics are written as:
+      MIRROR:<source_guild_id>:<source_channel_id> | source=<guild>#<channel>
+
+    Older topics may be exactly:
+      MIRROR:<source_guild_id>:<source_channel_id>
+
+    We intentionally ignore any trailing metadata after the two numeric ids.
+    """
+    if not topic:
         return None
-    payload = topic[len(MIRROR_TOPIC_PREFIX) :]
-    parts = payload.split(":")
-    if len(parts) != 2:
+    t = str(topic or "").strip()
+    if not t.startswith(MIRROR_TOPIC_PREFIX):
         return None
     try:
-        return int(parts[0]), int(parts[1])
+        import re
+
+        m = re.match(rf"^{re.escape(MIRROR_TOPIC_PREFIX)}(\d+):(\d+)", t)
+        if not m:
+            return None
+        return int(m.group(1)), int(m.group(2))
     except Exception:
         return None
 
