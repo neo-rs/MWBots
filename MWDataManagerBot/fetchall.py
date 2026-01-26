@@ -366,8 +366,10 @@ def _select_source_text_channels_from_api(
             continue
         if ch_id <= 0 or ch_id in ignored_channel_ids:
             continue
+        # Important: channel type 0 is valid but falsy, so do NOT use `or -1`.
         try:
-            ch_type = int(ch.get("type") or -1)
+            raw_type = ch.get("type", None)
+            ch_type = int(raw_type) if raw_type is not None else -1
         except Exception:
             ch_type = -1
         if ch_type not in allowed_types:
@@ -395,7 +397,8 @@ def _summarize_api_channels(channels: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not isinstance(ch, dict):
             continue
         try:
-            t = int(ch.get("type") or -1)
+            raw_type = ch.get("type", None)
+            t = int(raw_type) if raw_type is not None else -1
         except Exception:
             t = -1
         type_counts[t] = int(type_counts.get(t, 0) or 0) + 1
@@ -409,6 +412,97 @@ def _summarize_api_channels(channels: List[Dict[str, Any]]) -> Dict[str, Any]:
     categories = categories[:12]
     return {"total": len(channels or []), "type_counts": type_counts, "categories_preview": categories}
 
+
+def _discord_jump_url(guild_id: int, channel_id: int) -> str:
+    gid = int(guild_id or 0)
+    cid = int(channel_id or 0)
+    if gid <= 0 or cid <= 0:
+        return ""
+    return f"https://discord.com/channels/{gid}/{cid}"
+
+
+async def list_source_guild_channels(
+    *, source_guild_id: int, user_token: str
+) -> Dict[str, Any]:
+    """
+    List source guild categories + messageable channels using user token.
+    Returns a dict suitable for UI/debug (no secrets).
+    """
+    sgid = int(source_guild_id or 0)
+    token = str(user_token or "").strip()
+    if sgid <= 0:
+        return {"ok": False, "reason": "invalid_source_guild_id"}
+    if not token:
+        return {"ok": False, "reason": "missing_user_token"}
+    status, channels = await _fetch_guild_channels_via_user_token(source_guild_id=sgid, user_token=token)
+    if not channels:
+        return {"ok": False, "reason": "failed_to_list_source_channels_via_token", "http_status": int(status or 0)}
+
+    cats: List[Dict[str, Any]] = []
+    chan: List[Dict[str, Any]] = []
+    for c in channels:
+        if not isinstance(c, dict):
+            continue
+        try:
+            raw_type = c.get("type", None)
+            t = int(raw_type) if raw_type is not None else -1
+        except Exception:
+            t = -1
+        if t == 4:
+            try:
+                cid = int(c.get("id") or 0)
+            except Exception:
+                cid = 0
+            if cid > 0:
+                cats.append(
+                    {
+                        "id": cid,
+                        "name": str(c.get("name") or ""),
+                        "position": int(c.get("position") or 0) if str(c.get("position") or "").strip() else 0,
+                        "url": _discord_jump_url(sgid, cid),
+                    }
+                )
+        elif t in (0, 5):
+            try:
+                chid = int(c.get("id") or 0)
+            except Exception:
+                chid = 0
+            if chid <= 0:
+                continue
+            parent_id = 0
+            try:
+                pid = c.get("parent_id")
+                if pid is not None and str(pid).strip():
+                    parent_id = int(pid)
+            except Exception:
+                parent_id = 0
+            chan.append(
+                {
+                    "id": chid,
+                    "name": str(c.get("name") or f"channel_{chid}"),
+                    "parent_id": int(parent_id or 0),
+                    "type": int(t),
+                    "position": int(c.get("position") or 0) if str(c.get("position") or "").strip() else 0,
+                    "url": _discord_jump_url(sgid, chid),
+                }
+            )
+
+    cats_sorted = sorted(cats, key=lambda x: (int(x.get("position", 0) or 0), int(x.get("id", 0) or 0)))
+    chan_sorted = sorted(chan, key=lambda x: (int(x.get("parent_id", 0) or 0), int(x.get("position", 0) or 0), int(x.get("id", 0) or 0)))
+    type_counts = {}
+    try:
+        type_counts = _summarize_api_channels(channels).get("type_counts", {})  # type: ignore[assignment]
+    except Exception:
+        type_counts = {}
+    return {
+        "ok": True,
+        "http_status": int(status or 0),
+        "source_guild_id": sgid,
+        "categories": cats_sorted,
+        "channels": chan_sorted,
+        "total": int(len(channels)),
+        "type_counts": type_counts,
+    }
 
 def _format_embeds_for_forwarding(embeds: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Trim/clean embeds to a safe dict shape before sending."""

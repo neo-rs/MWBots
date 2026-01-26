@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from fetchall import load_fetchall_mappings, iter_fetchall_entries, run_fetchall, run_fetchsync, set_ignored_channel_ids, upsert_mapping
+from fetchall import (
+    iter_fetchall_entries,
+    list_source_guild_channels,
+    load_fetchall_mappings,
+    run_fetchall,
+    run_fetchsync,
+    set_ignored_channel_ids,
+    upsert_mapping,
+)
 from keywords import add_keyword, invalidate_keywords_cache, load_keywords, remove_keyword, scan_keywords
 from logging_utils import log_info, log_warn
 import settings_store as cfg
@@ -424,23 +432,305 @@ def register_commands(*, bot, forwarder) -> None:
         if not entries:
             await interaction.followup.send("No fetchall mappings found.", ephemeral=True)
             return
-        lines: List[str] = []
-        for e in entries:
+
+        # One-guild-per-page view (keeps it readable).
+        class _Pager(discord.ui.View):
+            def __init__(self, entries_list: List[Dict[str, Any]]):
+                super().__init__(timeout=60 * 10)
+                self.entries = entries_list
+                self.idx = 0
+
+            def _embed(self) -> discord.Embed:
+                e = self.entries[self.idx] if self.entries else {}
+                try:
+                    sgid = int(e.get("source_guild_id", 0) or 0)
+                except Exception:
+                    sgid = 0
+                name = str(e.get("name") or "").strip() or f"guild_{sgid}"
+                dcid = int(e.get("destination_category_id", 0) or 0)
+                cats = e.get("source_category_ids") if isinstance(e.get("source_category_ids"), list) else []
+                ignored = e.get("ignored_channel_ids") if isinstance(e.get("ignored_channel_ids"), list) else []
+                state = e.get("state") if isinstance(e.get("state"), dict) else {}
+                curs = (
+                    state.get("last_seen_message_id_by_channel")
+                    if isinstance(state.get("last_seen_message_id_by_channel"), dict)
+                    else {}
+                )
+
+                emb = discord.Embed(title=f"Fetchall mapping: {name}", color=0x5865F2)
+                emb.add_field(name="Source guild", value=str(sgid), inline=True)
+                emb.add_field(name="Dest category (Mirror World)", value=str(dcid), inline=True)
+                emb.add_field(name="Index", value=f"{self.idx+1}/{len(self.entries)}", inline=True)
+
+                # Category links (clickable URLs)
+                cat_lines: List[str] = []
+                for c in cats[:20]:
+                    try:
+                        cid = int(c)
+                    except Exception:
+                        continue
+                    if cid > 0 and sgid > 0:
+                        cat_lines.append(f"- `{cid}`  [open](https://discord.com/channels/{sgid}/{cid})")
+                emb.add_field(
+                    name=f"Source categories ({len(cats)})",
+                    value="\n".join(cat_lines) if cat_lines else "(none - means ALL categories)",
+                    inline=False,
+                )
+                emb.add_field(name="Ignored channels", value=str(len(ignored)), inline=True)
+                emb.add_field(name="Cursors", value=str(len(curs) if isinstance(curs, dict) else 0), inline=True)
+                emb.set_footer(text="Use /fetchmap browse to see categories/channels and toggle include/ignore.")
+                return emb
+
+            @discord.ui.button(label="Prev", style=discord.ButtonStyle.secondary)
+            async def prev_btn(self, interaction: discord.Interaction, _btn: discord.ui.Button) -> None:
+                if not self.entries:
+                    return
+                self.idx = (self.idx - 1) % len(self.entries)
+                await interaction.response.edit_message(embed=self._embed(), view=self)
+
+            @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary)
+            async def next_btn(self, interaction: discord.Interaction, _btn: discord.ui.Button) -> None:
+                if not self.entries:
+                    return
+                self.idx = (self.idx + 1) % len(self.entries)
+                await interaction.response.edit_message(embed=self._embed(), view=self)
+
+        view = _Pager(entries)
+        await interaction.followup.send(embed=view._embed(), view=view, ephemeral=True)
+
+    @fetchmap.command(name="browse", description="Browse a source guild's categories/channels and toggle fetch/ignore")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def fetchmap_browse(interaction: discord.Interaction, source_guild_id: int) -> None:
+        """
+        Interactive UI:
+        - Prev/Next category
+        - Toggle current category in mapping
+        - Multi-select channels in the category to toggle ignore
+        """
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception:
+            pass
+        sgid = int(source_guild_id or 0)
+        if sgid <= 0:
+            await interaction.followup.send("source_guild_id must be a positive integer.", ephemeral=True)
+            return
+        source_token = _pick_fetchall_source_token()
+        if not source_token:
+            await interaction.followup.send("Missing FETCHALL_USER_TOKEN (needed to read source servers).", ephemeral=True)
+            return
+
+        # Load mapping entry (if present)
+        cfg_data = load_fetchall_mappings()
+        entry: Dict[str, Any] = {}
+        for e in (cfg_data.get("guilds", []) or []):
+            if isinstance(e, dict) and int(e.get("source_guild_id", 0) or 0) == sgid:
+                entry = e
+                break
+        name = str(entry.get("name") or "").strip() or f"guild_{sgid}"
+        dest_cat = int(entry.get("destination_category_id", 0) or 0)
+        selected_cats: List[int] = []
+        try:
+            raw = entry.get("source_category_ids") if isinstance(entry.get("source_category_ids"), list) else []
+            selected_cats = [int(x) for x in raw if int(x) > 0]
+        except Exception:
+            selected_cats = []
+        ignored: List[int] = []
+        try:
+            raw_ig = entry.get("ignored_channel_ids") if isinstance(entry.get("ignored_channel_ids"), list) else []
+            ignored = [int(x) for x in raw_ig if int(x) > 0]
+        except Exception:
+            ignored = []
+
+        info = await list_source_guild_channels(source_guild_id=sgid, user_token=source_token)
+        if not info.get("ok"):
+            await interaction.followup.send(
+                f"Browse failed: reason={info.get('reason')} http={info.get('http_status')}",
+                ephemeral=True,
+            )
+            return
+        categories = info.get("categories") if isinstance(info.get("categories"), list) else []
+        channels = info.get("channels") if isinstance(info.get("channels"), list) else []
+
+        # Map parent_id -> channels
+        by_parent: Dict[int, List[Dict[str, Any]]] = {}
+        for ch in channels:
+            if not isinstance(ch, dict):
+                continue
             try:
-                sgid = int(e.get("source_guild_id", 0) or 0)
+                pid = int(ch.get("parent_id") or 0)
             except Exception:
-                sgid = 0
-            name = str(e.get("name") or "").strip() or f"guild_{sgid}"
-            dcid = int(e.get("destination_category_id", 0) or 0)
-            cats = e.get("source_category_ids") if isinstance(e.get("source_category_ids"), list) else []
-            ignored = e.get("ignored_channel_ids") if isinstance(e.get("ignored_channel_ids"), list) else []
-            state = e.get("state") if isinstance(e.get("state"), dict) else {}
-            curs = state.get("last_seen_message_id_by_channel") if isinstance(state.get("last_seen_message_id_by_channel"), dict) else {}
-            lines.append(f"- {name} sgid={sgid} dest_cat={dcid} source_cats={len(cats)} ignored={len(ignored)} cursors={len(curs)}")
-        msg = "Fetchall mappings:\n" + "\n".join(lines[:60])
-        if len(lines) > 60:
-            msg += f"\n... and {len(lines)-60} more"
-        await interaction.followup.send(msg, ephemeral=True)
+                pid = 0
+            by_parent.setdefault(pid, []).append(ch)
+
+        # Keep only categories that actually have messageable channels (optional UX)
+        cat_list: List[Dict[str, Any]] = []
+        for c in categories:
+            if not isinstance(c, dict):
+                continue
+            try:
+                cid = int(c.get("id") or 0)
+            except Exception:
+                continue
+            if cid <= 0:
+                continue
+            cat_list.append(c)
+        if not cat_list:
+            await interaction.followup.send("No categories found in source guild.", ephemeral=True)
+            return
+
+        ignored_set = set(ignored)
+        selected_set = set(selected_cats)
+
+        def _build_embed(cat_idx: int, chan_page: int) -> discord.Embed:
+            cat = cat_list[cat_idx]
+            cid = int(cat.get("id") or 0)
+            cname = str(cat.get("name") or "").strip() or f"category_{cid}"
+            url = str(cat.get("url") or "").strip()
+            in_map = cid in selected_set
+
+            emb = discord.Embed(title=f"{name} (sgid={sgid})", color=0x57F287 if in_map else 0xFEE75C)
+            emb.add_field(name="Dest category (Mirror World)", value=str(dest_cat), inline=True)
+            emb.add_field(name="Selected source categories", value=str(len(selected_set)), inline=True)
+            emb.add_field(name="Ignored channels", value=str(len(ignored_set)), inline=True)
+
+            cat_line = f"**{cname}**\n`{cid}`"
+            if url:
+                cat_line += f"\n[open]({url})"
+            cat_line += f"\nselected_in_mapping={bool(in_map)}"
+            emb.add_field(name=f"Category {cat_idx+1}/{len(cat_list)}", value=cat_line, inline=False)
+
+            chs = list(by_parent.get(cid, []) or [])
+            page_size = 20
+            start = max(0, int(chan_page) * page_size)
+            page = chs[start : start + page_size]
+            lines: List[str] = []
+            for ch in page:
+                try:
+                    chid = int(ch.get("id") or 0)
+                except Exception:
+                    continue
+                nm = str(ch.get("name") or f"channel_{chid}")
+                u = str(ch.get("url") or "").strip() or f"https://discord.com/channels/{sgid}/{chid}"
+                mark = " (ignored)" if chid in ignored_set else ""
+                lines.append(f"- [{nm}]({u}) `{chid}`{mark}")
+            if not lines:
+                lines = ["(No messageable channels found in this category.)"]
+            emb.add_field(name=f"Channels (page {chan_page+1})", value="\n".join(lines)[:1024], inline=False)
+            emb.set_footer(text="Tip: if your mapping has the wrong category IDs, toggle the correct category on this screen.")
+            return emb
+
+        class _BrowseView(discord.ui.View):
+            def __init__(self):
+                super().__init__(timeout=60 * 20)
+                self.cat_idx = 0
+                self.chan_page = 0
+                self._select = None
+                self._refresh_select()
+
+            def _current_cat_id(self) -> int:
+                try:
+                    return int(cat_list[self.cat_idx].get("id") or 0)
+                except Exception:
+                    return 0
+
+            def _refresh_select(self) -> None:
+                # rebuild select menu for current category + page
+                if self._select is not None:
+                    try:
+                        self.remove_item(self._select)
+                    except Exception:
+                        pass
+                cid = self._current_cat_id()
+                chs = list(by_parent.get(cid, []) or [])
+                page_size = 25
+                start = max(0, int(self.chan_page) * page_size)
+                page = chs[start : start + page_size]
+                opts: List[discord.SelectOption] = []
+                for ch in page:
+                    try:
+                        chid = int(ch.get("id") or 0)
+                    except Exception:
+                        continue
+                    nm = str(ch.get("name") or f"channel_{chid}")
+                    desc = "ignored" if chid in ignored_set else "not ignored"
+                    opts.append(discord.SelectOption(label=nm[:100], value=str(chid), description=desc))
+                if not opts:
+                    return
+                sel = discord.ui.Select(
+                    placeholder="Toggle ignore for selected channels (this page)",
+                    min_values=1,
+                    max_values=min(25, len(opts)),
+                    options=opts[:25],
+                )
+
+                async def _on_select(i: discord.Interaction) -> None:
+                    # toggle ignore status
+                    try:
+                        vals = list(sel.values or [])
+                    except Exception:
+                        vals = []
+                    changed = 0
+                    for v in vals:
+                        try:
+                            chid = int(v)
+                        except Exception:
+                            continue
+                        if chid in ignored_set:
+                            ignored_set.remove(chid)
+                        else:
+                            ignored_set.add(chid)
+                        changed += 1
+                    if changed:
+                        set_ignored_channel_ids(source_guild_id=sgid, ignored_channel_ids=sorted(list(ignored_set)))
+                    self._refresh_select()
+                    await i.response.edit_message(embed=_build_embed(self.cat_idx, self.chan_page), view=self)
+
+                sel.callback = _on_select  # type: ignore
+                self._select = sel
+                self.add_item(sel)
+
+            @discord.ui.button(label="Prev category", style=discord.ButtonStyle.secondary)
+            async def prev_cat(self, i: discord.Interaction, _b: discord.ui.Button) -> None:
+                self.cat_idx = (self.cat_idx - 1) % len(cat_list)
+                self.chan_page = 0
+                self._refresh_select()
+                await i.response.edit_message(embed=_build_embed(self.cat_idx, self.chan_page), view=self)
+
+            @discord.ui.button(label="Next category", style=discord.ButtonStyle.secondary)
+            async def next_cat(self, i: discord.Interaction, _b: discord.ui.Button) -> None:
+                self.cat_idx = (self.cat_idx + 1) % len(cat_list)
+                self.chan_page = 0
+                self._refresh_select()
+                await i.response.edit_message(embed=_build_embed(self.cat_idx, self.chan_page), view=self)
+
+            @discord.ui.button(label="Toggle category in mapping", style=discord.ButtonStyle.primary)
+            async def toggle_cat(self, i: discord.Interaction, _b: discord.ui.Button) -> None:
+                cid = self._current_cat_id()
+                if cid <= 0:
+                    await i.response.send_message("Invalid category.", ephemeral=True)
+                    return
+                if cid in selected_set:
+                    selected_set.remove(cid)
+                else:
+                    selected_set.add(cid)
+                upsert_mapping(source_guild_id=sgid, source_category_ids=sorted(list(selected_set)))
+                await i.response.edit_message(embed=_build_embed(self.cat_idx, self.chan_page), view=self)
+
+            @discord.ui.button(label="Prev channels", style=discord.ButtonStyle.secondary)
+            async def prev_ch(self, i: discord.Interaction, _b: discord.ui.Button) -> None:
+                self.chan_page = max(0, int(self.chan_page) - 1)
+                self._refresh_select()
+                await i.response.edit_message(embed=_build_embed(self.cat_idx, self.chan_page), view=self)
+
+            @discord.ui.button(label="Next channels", style=discord.ButtonStyle.secondary)
+            async def next_ch(self, i: discord.Interaction, _b: discord.ui.Button) -> None:
+                self.chan_page = int(self.chan_page) + 1
+                self._refresh_select()
+                await i.response.edit_message(embed=_build_embed(self.cat_idx, self.chan_page), view=self)
+
+        view = _BrowseView()
+        await interaction.followup.send(embed=_build_embed(0, 0), view=view, ephemeral=True)
 
     @fetchmap.command(name="upsert", description="Add/update a fetchall mapping entry")
     @app_commands.checks.has_permissions(manage_guild=True)
