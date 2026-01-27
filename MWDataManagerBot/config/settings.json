@@ -35,6 +35,12 @@
   "monitor_all_destination_channels": false,
   "monitor_webhook_messages_only": true,
   "use_webhooks_for_forwarding": true,
+  "fetchall_startup_clear_enabled": true,
+  "fetchall_startup_clear_category_ids": [
+    1437856372300451851
+  ],
+  "fetchall_startup_clear_only_mirror_channels": true,
+  "fetchall_startup_clear_delay_seconds": 2,
   "send_min_interval_seconds": 0.75,
   "enable_default_fallback": false,
   "enable_raw_link_unwrap": true,

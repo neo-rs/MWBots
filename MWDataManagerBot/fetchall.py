@@ -1677,15 +1677,24 @@ async def run_fetchsync(
                 out_content = ""
                 if non_image_urls:
                     out_content = "\n".join(non_image_urls[:10]).strip()
-                # Reserve 1 embed slot for branding, rest for images
-                embed_body = append_image_attachments_as_embeds([], bundle_attachments, max_embeds=9)
-                embeds_out: List[Dict[str, Any]] = [_source_brand_embed(
-                    source_guild_id=source_guild_id,
-                    source_guild_name=source_guild_name,
-                    source_guild_icon_url=source_guild_icon_url,
-                    source_channel_id=int(src_channel_id),
-                    source_channel_name=str(src_channel_name or ""),
-                )] + embed_body
+                # When sending via webhook, the identity already matches the source author/server,
+                # so we avoid adding a redundant "branding" embed card.
+                include_brand = not bool(getattr(cfg, "USE_WEBHOOKS_FOR_FORWARDING", False))
+                embed_cap = 9 if include_brand else 10
+
+                embed_body = append_image_attachments_as_embeds([], bundle_attachments, max_embeds=embed_cap)
+                embeds_out: List[Dict[str, Any]] = []
+                if include_brand:
+                    embeds_out.append(
+                        _source_brand_embed(
+                            source_guild_id=source_guild_id,
+                            source_guild_name=source_guild_name,
+                            source_guild_icon_url=source_guild_icon_url,
+                            source_channel_id=int(src_channel_id),
+                            source_channel_name=str(src_channel_name or ""),
+                        )
+                    )
+                embeds_out += embed_body
 
                 # If nothing to send, just advance cursor.
                 if not out_content and not embed_body:
@@ -1731,10 +1740,13 @@ async def run_fetchsync(
                 i += 1
                 continue
 
-            # Build embeds (reserve slot for branding)
-            embed_body = format_embeds_for_forwarding(embeds_dicts_raw)[:9]
+            include_brand = not bool(getattr(cfg, "USE_WEBHOOKS_FOR_FORWARDING", False))
+            embed_cap = 9 if include_brand else 10
+
+            # Build embeds (reserve slot for branding when needed)
+            embed_body = format_embeds_for_forwarding(embeds_dicts_raw)[:embed_cap]
             try:
-                embed_body = append_image_attachments_as_embeds(embed_body, attachments, max_embeds=9)
+                embed_body = append_image_attachments_as_embeds(embed_body, attachments, max_embeds=embed_cap)
             except Exception:
                 embed_body = embed_body
             # Non-image attachments as URLs
@@ -1757,13 +1769,18 @@ async def run_fetchsync(
                 i += 1
                 continue
 
-            embeds_out: List[Dict[str, Any]] = [_source_brand_embed(
-                source_guild_id=source_guild_id,
-                source_guild_name=source_guild_name,
-                source_guild_icon_url=source_guild_icon_url,
-                source_channel_id=int(src_channel_id),
-                source_channel_name=str(src_channel_name or ""),
-            )] + embed_body
+            embeds_out: List[Dict[str, Any]] = []
+            if include_brand:
+                embeds_out.append(
+                    _source_brand_embed(
+                        source_guild_id=source_guild_id,
+                        source_guild_name=source_guild_name,
+                        source_guild_icon_url=source_guild_icon_url,
+                        source_channel_id=int(src_channel_id),
+                        source_channel_name=str(src_channel_name or ""),
+                    )
+                )
+            embeds_out += embed_body
 
             if dryrun:
                 would_inc += 1
