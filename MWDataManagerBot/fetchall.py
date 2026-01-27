@@ -885,7 +885,6 @@ async def run_fetchall(
     # Optional branding: icon URL for the source guild (best-effort). If unavailable, leave blank.
     # This MUST be defined so downstream embed builders don't crash.
     source_guild_icon_url = ""
-    source_guild_icon_url = ""
 
     # Always emit an "init" progress/log so the caller can see fetchall is running,
     # even if we later exit early (e.g. missing categories).
@@ -1298,6 +1297,9 @@ async def run_fetchsync(
         return {"ok": False, "reason": f"destination_category_not_found:{dest_category_id}"}
 
     source_guild_name = str(entry.get("name") or "").strip() or f"guild_{source_guild_id}"
+    # Optional branding: icon URL for the source guild (best-effort). If unavailable, leave blank.
+    # This MUST be defined so embed builders don't crash (auto-poller previously crashed here).
+    source_guild_icon_url = ""
 
     # In dryrun we avoid creating channels; for run mode we ensure separator exists.
     if not dryrun:
