@@ -234,15 +234,44 @@ def persist_channel_cursor(*, source_guild_id: int, source_channel_id: int, last
 def _slugify_channel_name(name: str, fallback_prefix: str = "channel") -> str:
     import re
 
-    # Normalize unicode so names like "pokémon" become "pokemon" (instead of "pok-mon").
+    # Keep emojis + non-ASCII letters (matches source server channel names).
+    # Discord channel names can't contain spaces, so we normalize whitespace/punctuation into hyphens.
     raw = str(name or "").strip()
     try:
-        norm = unicodedata.normalize("NFKD", raw)
-        norm = norm.encode("ascii", errors="ignore").decode("ascii")
+        raw = unicodedata.normalize("NFKC", raw)
     except Exception:
-        norm = raw
+        raw = raw
 
-    slug = re.sub(r"[^a-z0-9\-_]+", "-", (norm or "").lower())
+    out = []
+    for ch in raw:
+        try:
+            if ch.isspace():
+                out.append("-")
+                continue
+        except Exception:
+            pass
+        if ch in ("-", "_"):
+            out.append(ch)
+            continue
+        # Keep letters/digits in any language + combining marks.
+        try:
+            if ch.isalnum():
+                out.append(ch.lower())
+                continue
+        except Exception:
+            pass
+        try:
+            cat = unicodedata.category(ch)
+        except Exception:
+            cat = ""
+        # Combining marks (accents) + emoji/symbols
+        if cat.startswith("M") or cat in ("So", "Sk"):
+            out.append(ch)
+            continue
+        # Normalize remaining punctuation to hyphen separators.
+        out.append("-")
+
+    slug = "".join(out)
     slug = re.sub(r"-{2,}", "-", slug).strip("-")
     if not slug:
         slug = f"{fallback_prefix}-{int(time.time())}"
@@ -1219,7 +1248,9 @@ async def run_fetchall(
                 except Exception:
                     pass
             continue
-        desired_name = _slugify_channel_name(str(src_name), fallback_prefix="mirror")
+        raw_name = str(src_name or "").strip()
+        # Source channel names are already Discord-valid; keep emojis/Unicode as-is.
+        desired_name = (raw_name[:90] if raw_name else _slugify_channel_name(str(src_name), fallback_prefix="mirror"))
         topic = _build_mirror_topic(source_guild_id, src_id)
         full_topic = f"{topic} | source={source_guild_name}#{src_name}"
         # Choose a category with capacity (base or overflow)
@@ -1500,7 +1531,8 @@ async def run_fetchsync(
             sid = int(src_id or 0)
             if sid <= 0 or sid in mirror_by_source:
                 continue
-            desired_name = _slugify_channel_name(str(src_name), fallback_prefix="mirror")
+            raw_name = str(src_name or "").strip()
+            desired_name = (raw_name[:90] if raw_name else _slugify_channel_name(str(src_name), fallback_prefix="mirror"))
             topic = _build_mirror_topic(source_guild_id, sid)
             full_topic = f"{topic} | source={source_guild_name}#{src_name}"
             # Choose category with capacity (base or overflow)
