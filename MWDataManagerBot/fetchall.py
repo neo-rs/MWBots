@@ -882,6 +882,9 @@ async def run_fetchall(
 
     source_guild = bot.get_guild(int(source_guild_id))
     source_guild_name = str(entry.get("name") or "").strip() or f"guild_{source_guild_id}"
+    # Optional branding: icon URL for the source guild (best-effort). If unavailable, leave blank.
+    # This MUST be defined so downstream embed builders don't crash.
+    source_guild_icon_url = ""
     source_guild_icon_url = ""
 
     # Always emit an "init" progress/log so the caller can see fetchall is running,
