@@ -173,6 +173,8 @@ def register_commands(*, bot, forwarder) -> None:
 
                 try:
                     # Prevent a single mapping from hanging the whole command forever.
+                    # Creating large numbers of channels can be slow due to Discord rate limits,
+                    # so this timeout must be generous.
                     result = await asyncio.wait_for(
                         run_fetchall(
                             bot=bot,
@@ -181,7 +183,7 @@ def register_commands(*, bot, forwarder) -> None:
                             source_user_token=source_token,
                             progress_cb=_progress_cb,
                         ),
-                        timeout=180,
+                        timeout=1800,
                     )
                 except asyncio.TimeoutError:
                     result = {"ok": False, "reason": "timeout"}

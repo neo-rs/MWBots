@@ -1113,6 +1113,27 @@ async def run_fetchall(
             taken = set()
         if final_name in taken:
             final_name = (final_name[:80] + f"-{str(src_id)[-4:]}")[:90]
+        # Emit progress BEFORE the create call, so the user sees activity even if Discord rate-limits creation.
+        if progress_cb is not None:
+            try:
+                await progress_cb(
+                    {
+                        "stage": "creating",
+                        "mode": str(mode),
+                        "source_guild_id": int(source_guild_id),
+                        "source_guild_name": str(source_guild_name),
+                        "destination_category_id": int(dest_category_id),
+                        "total_sources": int(total_sources),
+                        "attempted": int(attempted),
+                        "created": int(created),
+                        "existing": int(kept),
+                        "errors": int(errors),
+                        "current_channel_id": int(src_id or 0),
+                        "current_channel_name": str(src_name or ""),
+                    }
+                )
+            except Exception:
+                pass
         try:
             await destination_guild.create_text_channel(
                 final_name,
