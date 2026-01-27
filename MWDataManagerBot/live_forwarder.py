@@ -150,12 +150,15 @@ class MessageForwarder:
         dest_channel_id: int,
         content: str,
         embeds: List[Dict[str, Any]],
+        webhook_username: str = "",
+        webhook_avatar_url: str = "",
         allowed_mentions=None,
         reference=None,
         view=None,
         return_first_message: bool = False,
     ):
         import discord
+        from webhook_sender import send_via_webhook_or_bot
 
         channel = self.bot.get_channel(int(dest_channel_id))
         if channel is None:
@@ -212,16 +215,39 @@ class MessageForwarder:
                     if wait > 0:
                         await asyncio.sleep(wait)
             if i == 0 and embed_objs:
-                first_msg = await channel.send(
-                    content=chunk,
-                    embeds=embed_objs[:10],
-                    allowed_mentions=allowed_mentions,
-                    reference=reference,
-                    view=view,
-                )
+                # Only use webhook for plain forwards (no reference/view/components).
+                if reference is None and view is None:
+                    await send_via_webhook_or_bot(
+                        dest_channel=channel,
+                        content=chunk,
+                        embeds=embed_objs[:10],
+                        username=webhook_username,
+                        avatar_url=webhook_avatar_url,
+                        reason="MWDataManagerBot live forward",
+                    )
+                    first_msg = None
+                else:
+                    first_msg = await channel.send(
+                        content=chunk,
+                        embeds=embed_objs[:10],
+                        allowed_mentions=allowed_mentions,
+                        reference=reference,
+                        view=view,
+                    )
             else:
                 # Only attach reference/view on the first chunk.
-                msg = await channel.send(content=chunk, allowed_mentions=allowed_mentions)
+                if reference is None and view is None:
+                    await send_via_webhook_or_bot(
+                        dest_channel=channel,
+                        content=chunk,
+                        embeds=[],
+                        username=webhook_username,
+                        avatar_url=webhook_avatar_url,
+                        reason="MWDataManagerBot live forward (chunk)",
+                    )
+                    msg = None
+                else:
+                    msg = await channel.send(content=chunk, allowed_mentions=allowed_mentions)
                 if first_msg is None:
                     first_msg = msg
             try:
@@ -799,6 +825,22 @@ class MessageForwarder:
         except Exception:
             pass
 
+        # Webhook identity (so forwarded posts look like the original sender).
+        wh_username = ""
+        wh_avatar_url = ""
+        try:
+            author_obj = getattr(message, "author", None)
+            if author_obj is not None:
+                wh_username = str(getattr(author_obj, "display_name", None) or getattr(author_obj, "name", None) or "").strip()
+                try:
+                    av = getattr(author_obj, "display_avatar", None)
+                    wh_avatar_url = str(getattr(av, "url", "") or "").strip()
+                except Exception:
+                    wh_avatar_url = ""
+        except Exception:
+            wh_username = ""
+            wh_avatar_url = ""
+
         if not dispatch_link_types:
             trace["decision"] = {"action": "unclassified", "reason": "no_destination"}
             try:
@@ -869,7 +911,13 @@ class MessageForwarder:
                 dest_traces.append(dest_trace)
                 continue
             try:
-                await self._send_to_destination(dest_channel_id=dest_channel_id, content=formatted_content, embeds=embeds_out)
+                await self._send_to_destination(
+                    dest_channel_id=dest_channel_id,
+                    content=formatted_content,
+                    embeds=embeds_out,
+                    webhook_username=wh_username,
+                    webhook_avatar_url=wh_avatar_url,
+                )
                 self.sent_to_destinations[dest_key] = now
                 try:
                     self.sent_to_destinations[(dest_channel_id, f"sig-{content_sig}")] = now

@@ -5,6 +5,7 @@ import json
 import os
 import time
 import threading
+import unicodedata
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
@@ -233,11 +234,68 @@ def persist_channel_cursor(*, source_guild_id: int, source_channel_id: int, last
 def _slugify_channel_name(name: str, fallback_prefix: str = "channel") -> str:
     import re
 
-    slug = re.sub(r"[^a-z0-9-]+", "-", (name or "").lower())
+    # Normalize unicode so names like "pokémon" become "pokemon" (instead of "pok-mon").
+    raw = str(name or "").strip()
+    try:
+        norm = unicodedata.normalize("NFKD", raw)
+        norm = norm.encode("ascii", errors="ignore").decode("ascii")
+    except Exception:
+        norm = raw
+
+    slug = re.sub(r"[^a-z0-9\-_]+", "-", (norm or "").lower())
     slug = re.sub(r"-{2,}", "-", slug).strip("-")
     if not slug:
         slug = f"{fallback_prefix}-{int(time.time())}"
     return slug[:90]
+
+
+# Cache for source guild branding (name + icon url) to avoid repeated REST calls during polling.
+_GUILD_BRAND_CACHE: Dict[int, Tuple[float, str, str]] = {}
+_GUILD_BRAND_TTL_SECONDS: int = 60 * 60
+
+
+async def _get_source_guild_brand(*, source_guild_id: int, user_token: str, fallback_name: str) -> Tuple[str, str]:
+    """
+    Return (guild_name, guild_icon_url) best-effort using the user token.
+    Uses an in-memory cache to reduce Discord REST calls.
+    """
+    sgid = int(source_guild_id or 0)
+    token = str(user_token or "").strip()
+    name = str(fallback_name or "").strip() or f"guild_{sgid}"
+    if sgid <= 0 or not token:
+        return name, ""
+
+    now = float(time.time())
+    try:
+        cached = _GUILD_BRAND_CACHE.get(sgid)
+    except Exception:
+        cached = None
+    if cached is not None:
+        try:
+            ts, nm, icon = cached
+            if (now - float(ts)) < float(_GUILD_BRAND_TTL_SECONDS):
+                return (str(nm or name).strip() or name, str(icon or "").strip())
+        except Exception:
+            pass
+
+    icon_url = ""
+    try:
+        status, ginfo = await _fetch_guild_info_via_user_token(source_guild_id=sgid, user_token=token)
+        if status == 200 and isinstance(ginfo, dict):
+            nm = str(ginfo.get("name") or "").strip()
+            if nm:
+                name = nm
+            icon_hash = str(ginfo.get("icon") or "").strip()
+            if icon_hash:
+                icon_url = _guild_icon_url(guild_id=sgid, icon_hash=icon_hash)
+    except Exception:
+        icon_url = ""
+
+    try:
+        _GUILD_BRAND_CACHE[sgid] = (now, name, icon_url)
+    except Exception:
+        pass
+    return name, icon_url
 
 
 MIRROR_TOPIC_PREFIX = "MIRROR:"
@@ -765,17 +823,60 @@ async def list_source_guild_channels(
         "type_counts": type_counts,
     }
 
-async def _send_message_to_channel(*, dest_channel, content: str, embeds: List[Dict[str, Any]]) -> None:
+def _author_avatar_url(author: Dict[str, Any]) -> str:
     try:
-        import discord
+        aid = str(author.get("id") or "").strip()
+    except Exception:
+        aid = ""
+    if not aid:
+        return ""
+    try:
+        avatar = str(author.get("avatar") or "").strip()
+    except Exception:
+        avatar = ""
+    if not avatar:
+        return ""
+    ext = "png"
+    try:
+        if avatar.startswith("a_"):
+            ext = "gif"
+    except Exception:
+        ext = "png"
+    return f"https://cdn.discordapp.com/avatars/{aid}/{avatar}.{ext}?size=64"
+
+
+def _author_display_name(author: Dict[str, Any]) -> str:
+    # Prefer global_name when present; fallback to username.
+    try:
+        gn = str(author.get("global_name") or "").strip()
+    except Exception:
+        gn = ""
+    if gn:
+        return gn
+    try:
+        un = str(author.get("username") or "").strip()
+    except Exception:
+        un = ""
+    return un
+
+
+async def _send_message_to_channel(
+    *,
+    dest_channel,
+    content: str,
+    embeds: List[Dict[str, Any]],
+    webhook_username: str = "",
+    webhook_avatar_url: str = "",
+    reason: str = "",
+) -> None:
+    """
+    Send to destination channel.
+    Prefer webhooks (clean identity) when enabled; otherwise normal bot send.
+    """
+    try:
+        import discord  # type: ignore
     except Exception:
         discord = None  # type: ignore
-    allowed_mentions = None
-    try:
-        if discord is not None:
-            allowed_mentions = discord.AllowedMentions.none()
-    except Exception:
-        allowed_mentions = None
 
     embed_objs = []
     if discord is not None:
@@ -785,12 +886,28 @@ async def _send_message_to_channel(*, dest_channel, content: str, embeds: List[D
             except Exception:
                 continue
 
+    from webhook_sender import send_via_webhook_or_bot
+
     chunks = chunk_text(content, 2000)
     for i, chunk in enumerate(chunks):
         if i == 0 and embed_objs:
-            await dest_channel.send(content=chunk, embeds=embed_objs[:10], allowed_mentions=allowed_mentions)
+            await send_via_webhook_or_bot(
+                dest_channel=dest_channel,
+                content=chunk,
+                embeds=embed_objs[:10],
+                username=webhook_username,
+                avatar_url=webhook_avatar_url,
+                reason=reason or "MWDataManagerBot fetchsync mirror",
+            )
         else:
-            await dest_channel.send(content=chunk, allowed_mentions=allowed_mentions)
+            await send_via_webhook_or_bot(
+                dest_channel=dest_channel,
+                content=chunk,
+                embeds=[],
+                username=webhook_username,
+                avatar_url=webhook_avatar_url,
+                reason=reason or "MWDataManagerBot fetchsync mirror (chunk)",
+            )
 
 
 async def run_fetchall(
@@ -1300,6 +1417,14 @@ async def run_fetchsync(
     # Optional branding: icon URL for the source guild (best-effort). If unavailable, leave blank.
     # This MUST be defined so embed builders don't crash (auto-poller previously crashed here).
     source_guild_icon_url = ""
+    try:
+        source_guild_name, source_guild_icon_url = await _get_source_guild_brand(
+            source_guild_id=int(source_guild_id),
+            user_token=token,
+            fallback_name=source_guild_name,
+        )
+    except Exception:
+        pass
 
     # In dryrun we avoid creating channels; for run mode we ensure separator exists.
     if not dryrun:
@@ -1508,6 +1633,8 @@ async def run_fetchsync(
             embeds_dicts_raw = [e for e in embeds if isinstance(e, dict)]
             author = m.get("author") if isinstance(m.get("author"), dict) else {}
             author_id = str(author.get("id") or "").strip()
+            wh_username = _author_display_name(author) or str(source_guild_name or "")
+            wh_avatar = _author_avatar_url(author) or str(source_guild_icon_url or "")
 
             # Group consecutive attachment-only messages by the same author.
             if _bundle_candidate(content=content, embeds=embeds_dicts_raw, attachments=attachments):
@@ -1575,7 +1702,14 @@ async def run_fetchsync(
                     continue
 
                 try:
-                    await _send_message_to_channel(dest_channel=dest_channel, content=out_content[:1950], embeds=embeds_out[:10])
+                    await _send_message_to_channel(
+                        dest_channel=dest_channel,
+                        content=out_content[:1950],
+                        embeds=embeds_out[:10],
+                        webhook_username=wh_username,
+                        webhook_avatar_url=wh_avatar,
+                        reason="MWDataManagerBot fetchsync bundle",
+                    )
                     sent_inc += 1
                     if bundle_last_id:
                         cursor_id = bundle_last_id
@@ -1639,7 +1773,14 @@ async def run_fetchsync(
                 continue
 
             try:
-                await _send_message_to_channel(dest_channel=dest_channel, content=str(content or "")[:1950], embeds=embeds_out[:10])
+                await _send_message_to_channel(
+                    dest_channel=dest_channel,
+                    content=str(content or "")[:1950],
+                    embeds=embeds_out[:10],
+                    webhook_username=wh_username,
+                    webhook_avatar_url=wh_avatar,
+                    reason="MWDataManagerBot fetchsync",
+                )
                 sent_inc += 1
                 if mid:
                     cursor_id = mid

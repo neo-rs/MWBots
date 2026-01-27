@@ -1017,6 +1017,7 @@ def register_commands(*, bot, forwarder) -> None:
                 poll_s = int(getattr(cfg, "FETCHSYNC_AUTO_POLL_SECONDS", 0) or 0)
             except Exception:
                 poll_s = 0
+            use_wh = bool(getattr(cfg, "USE_WEBHOOKS_FOR_FORWARDING", False))
             dests = [
                 int(cfg.FALLBACK_CHANNEL_ID or 0),
                 int(cfg.SMARTFILTER_AMAZON_CHANNEL_ID or 0),
@@ -1046,6 +1047,7 @@ def register_commands(*, bot, forwarder) -> None:
                 f"- raw_unwrap={raw_unwrap}\n"
                 f"- fetchall_user_token_loaded={fetchall_has_token}\n"
                 f"- fetchsync_auto_poll_seconds={poll_s}\n"
+                f"- use_webhooks_for_forwarding={use_wh}\n"
                 f"- smartfilter_destinations_set={sum(1 for x in dests if x>0)}/{len(dests)}\n"
                 f"- global_trigger_destinations_set={sum(1 for x in globals_ if x>0)}/{len(globals_)}\n"
                 f"- fallback_channel_id={int(cfg.FALLBACK_CHANNEL_ID or 0)}"

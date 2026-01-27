@@ -18,6 +18,9 @@ MONITOR_ALL_DESTINATION_CHANNELS: bool = False
 MONITOR_CATEGORY_IDS: Set[int] = set()
 MONITOR_WEBHOOK_MESSAGES_ONLY: bool = True
 
+# Outbound: send forwarded/mirrored messages via channel webhooks (for clean identity).
+USE_WEBHOOKS_FOR_FORWARDING: bool = False
+
 # Outbound send throttling (prevents Discord 429 spam)
 SEND_MIN_INTERVAL_SECONDS: float = 0.0
 
@@ -132,6 +135,7 @@ def init(settings: Dict[str, Any]) -> None:
     global DESTINATION_GUILD_IDS, SOURCE_GUILD_IDS
     global SMART_SOURCE_CHANNELS_ONLINE, SMART_SOURCE_CHANNELS_INSTORE, SMART_SOURCE_CHANNELS_CLEARANCE, SMART_SOURCE_CHANNELS_MISC, SMART_SOURCE_CHANNELS
     global MONITOR_ALL_DESTINATION_CHANNELS, MONITOR_CATEGORY_IDS, MONITOR_WEBHOOK_MESSAGES_ONLY
+    global USE_WEBHOOKS_FOR_FORWARDING
     global SEND_MIN_INTERVAL_SECONDS
     global MIRRORWORLD_ROUTE_ONLINE, MIRRORWORLD_ROUTE_INSTORE
     global ENABLE_DEFAULT_FALLBACK
@@ -168,6 +172,7 @@ def init(settings: Dict[str, Any]) -> None:
     MONITOR_ALL_DESTINATION_CHANNELS = bool(settings.get("monitor_all_destination_channels", False))
     MONITOR_CATEGORY_IDS = _parse_int_set(settings.get("monitor_category_ids"))
     MONITOR_WEBHOOK_MESSAGES_ONLY = bool(settings.get("monitor_webhook_messages_only", True))
+    USE_WEBHOOKS_FOR_FORWARDING = bool(settings.get("use_webhooks_for_forwarding", False))
 
     try:
         SEND_MIN_INTERVAL_SECONDS = float(settings.get("send_min_interval_seconds", 0.0) or 0.0)
