@@ -1019,17 +1019,31 @@ def register_commands(*, bot, forwarder) -> None:
             self.author = getattr(interaction, "user", None)
             self._ephemeral = bool(ephemeral)
 
-        async def send(self, content: str = None, *, embed=None, embeds=None, view=None, allowed_mentions=None, reference=None, wait: bool = True):
+        async def send(
+            self,
+            content: str = None,
+            *,
+            embed=None,
+            embeds=None,
+            view=None,
+            allowed_mentions=None,
+            reference=None,  # ignored (followups don't support message reference)
+            wait: bool = True,
+        ):
             # All slash responses use followups; wrappers always defer first.
-            return await self._i.followup.send(
-                content=content,
-                embed=embed,
-                embeds=embeds,
-                view=view,
-                allowed_mentions=allowed_mentions,
-                ephemeral=self._ephemeral,
-                wait=bool(wait),
-            )
+            # IMPORTANT: only pass "view" when it's a real discord.ui.View; discord.py raises on view=None.
+            kwargs: Dict[str, Any] = {"ephemeral": self._ephemeral, "wait": bool(wait)}
+            if content is not None:
+                kwargs["content"] = content
+            if embed is not None:
+                kwargs["embed"] = embed
+            if embeds is not None:
+                kwargs["embeds"] = embeds
+            if view is not None:
+                kwargs["view"] = view
+            if allowed_mentions is not None:
+                kwargs["allowed_mentions"] = allowed_mentions
+            return await self._i.followup.send(**kwargs)
 
     @app_commands.command(name="fetchall", description="Create/update mirror channels from fetchall mappings")
     @app_commands.checks.has_permissions(manage_channels=True)
