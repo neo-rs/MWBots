@@ -38,7 +38,7 @@ except Exception:
 
 def register_commands(*, bot, forwarder) -> None:
     """
-    Register prefix commands on the provided discord.py commands.Bot instance.
+    Register slash commands on the provided discord.py commands.Bot instance.
 
     This is intentionally kept as a separate module so command debugging does not
     require scrolling through the live forwarder pipeline.
@@ -106,19 +106,45 @@ def register_commands(*, bot, forwarder) -> None:
             dedup.append(v)
         return dedup
 
-    @bot.command(name="fetchall")
-    async def fetchall_cmd(ctx) -> None:
-        """Run fetch-all for all configured guild entries (mirror channel setup)."""
+    async def _cmd_fetchall(ctx, source_guild_id: int = 0) -> None:
+        """Run fetch-all for configured guild entries (mirror channel setup)."""
         try:
             import asyncio
             import time as _time
 
             entries = iter_fetchall_entries()
+            try:
+                sgid_filter = int(source_guild_id or 0)
+            except Exception:
+                sgid_filter = 0
+            if sgid_filter > 0:
+                filtered = []
+                for e in entries:
+                    if not isinstance(e, dict):
+                        continue
+                    try:
+                        if int(e.get("source_guild_id", 0) or 0) == sgid_filter:
+                            filtered.append(e)
+                    except Exception:
+                        continue
+                entries = filtered
             if not entries:
-                await ctx.send("No fetchall mappings found (MWDataManagerBot/config/fetchall_mappings.json).")
+                if sgid_filter > 0:
+                    try:
+                        await ctx.send(embed=_ui_embed("Fetchall", f"No mapping found.\nsource_guild_id={sgid_filter}", color=0xED4245))
+                    except Exception:
+                        await ctx.send(f"No fetchall mapping found for source_guild_id={sgid_filter}.")
+                else:
+                    try:
+                        await ctx.send(embed=_ui_embed("Fetchall", "No fetchall mappings found.", color=0xED4245))
+                    except Exception:
+                        await ctx.send("No fetchall mappings found (MWDataManagerBot/config/fetchall_mappings.json).")
                 return
             total_maps = int(len(entries))
-            progress_msg = await ctx.send(f"Fetchall starting... mappings={total_maps}")
+            try:
+                progress_msg = await ctx.send(embed=_ui_embed("Fetchall", f"Starting...\n- mappings: `{total_maps}`"))
+            except Exception:
+                progress_msg = await ctx.send(f"Fetchall starting... mappings={total_maps}")
             try:
                 log_info(f"[fetchall] invoked mappings={total_maps}", event="fetchall_invoked", mappings=int(total_maps))
             except Exception:
@@ -126,10 +152,20 @@ def register_commands(*, bot, forwarder) -> None:
             ok = 0
             source_token = _pick_fetchall_source_token() or None
             if not source_token:
-                await ctx.send(
-                    "Fetchall note: FETCHALL_USER_TOKEN is missing. "
-                    "Fetchall will only work for source guilds the bot is in; other mappings will fail."
-                )
+                try:
+                    await ctx.send(
+                        embed=_ui_embed(
+                            "Fetchall note",
+                            "FETCHALL_USER_TOKEN is missing.\n"
+                            "Fetchall will only work for source guilds the bot is in; other mappings will fail.",
+                            color=0xFEE75C,
+                        )
+                    )
+                except Exception:
+                    await ctx.send(
+                        "Fetchall note: FETCHALL_USER_TOKEN is missing. "
+                        "Fetchall will only work for source guilds the bot is in; other mappings will fail."
+                    )
             map_idx = 0
             last_edit_ts = 0.0
             for entry in entries:
@@ -167,7 +203,7 @@ def register_commands(*, bot, forwarder) -> None:
                         lines.append(f"channel: {current}")
                     text = "\n".join(lines).strip()
                     try:
-                        await progress_msg.edit(content=text[:1950])
+                        await progress_msg.edit(embed=_ui_embed(header, text[:3500]), content=None)
                     except Exception:
                         return
 
@@ -198,117 +234,28 @@ def register_commands(*, bot, forwarder) -> None:
                     extra = ""
                     if reason == "missing_source_category_ids":
                         extra = " (set categories via /fetchmap browse)"
-                    await ctx.send(f"fetchall failed: {name} sgid={sgid} reason={reason}{extra} http={hs}")
+                    try:
+                        await ctx.send(
+                            embed=_ui_embed(
+                                "Fetchall failed",
+                                f"name={name}\nsgid={sgid}\nreason={reason}{extra}\nhttp={hs}",
+                                color=0xED4245,
+                            )
+                        )
+                    except Exception:
+                        await ctx.send(f"fetchall failed: {name} sgid={sgid} reason={reason}{extra} http={hs}")
             try:
-                await progress_msg.edit(content=f"Fetchall complete: {ok}/{total_maps} succeeded.")
+                await progress_msg.edit(embed=_ui_embed("Fetchall complete", f"ok={ok}/{total_maps}"), content=None)
             except Exception:
                 await ctx.send(f"Fetchall complete: {ok}/{total_maps} succeeded.")
         except Exception as e:
             log_warn(f"fetchall command failed: {e}")
-            await ctx.send(f"Fetchall failed: {type(e).__name__}: {e}")
-
-    @bot.command(name="fetchsync")
-    async def fetchsync_cmd(ctx, source_guild_id: str = "") -> None:
-        """Pull messages via user token and mirror them into Mirror World channels."""
-        try:
-            import time as _time
-
-            entries = iter_fetchall_entries()
-            if not entries:
-                await ctx.send("No fetchall mappings found (MWDataManagerBot/config/fetchall_mappings.json).")
-                return
-
-            sgid_filter: int = 0
-            if (source_guild_id or "").strip():
-                try:
-                    sgid_filter = int(source_guild_id)
-                except Exception:
-                    await ctx.send("Usage: !fetchsync [source_guild_id]")
-                    return
-
-            source_token = _pick_fetchall_source_token()
-            if not source_token:
-                await ctx.send("Missing FETCHALL_USER_TOKEN (needed to read source servers).")
-                return
-
-            selected = []
-            for e in entries:
-                try:
-                    if sgid_filter and int(e.get("source_guild_id", 0)) != int(sgid_filter):
-                        continue
-                except Exception:
-                    continue
-                selected.append(e)
-            if not selected:
-                await ctx.send(f"No mapping found for source_guild_id={sgid_filter}.")
-                return
-
-            total_maps = int(len(selected))
-            progress_msg = await ctx.send(f"Fetchsync starting... mappings={total_maps}")
-            ok = 0
-            total_sent = 0
-            map_idx = 0
-            last_edit_ts = 0.0
-            for entry in selected:
-                map_idx += 1
-                try:
-                    sgid = int(entry.get("source_guild_id", 0) or 0)
-                except Exception:
-                    sgid = 0
-                name = str(entry.get("name") or "").strip() or f"guild_{sgid}"
-
-                async def _progress_cb(payload: Dict[str, Any]) -> None:
-                    nonlocal last_edit_ts
-                    try:
-                        now = float(_time.time())
-                    except Exception:
-                        now = 0.0
-                    if last_edit_ts and now and (now - last_edit_ts) < 1.0:
-                        return
-                    last_edit_ts = now
-                    stage = str(payload.get("stage") or "")
-                    total_ch = int(payload.get("channels_total", 0) or 0)
-                    done_ch = int(payload.get("channels_processed", 0) or 0)
-                    sent = int(payload.get("sent", 0) or 0)
-                    would_send = int(payload.get("would_send", 0) or 0)
-                    errs = int(payload.get("errors", 0) or 0)
-                    bar = _render_progress_bar(done_ch, total_ch)
-                    header = f"Fetchsync: {name} ({map_idx}/{total_maps})"
-                    lines = [header, bar, f"sent={sent} would_send={would_send} errors={errs} stage={stage}"]
-                    text = "\n".join(lines).strip()
-                    try:
-                        await progress_msg.edit(content=text[:1950])
-                    except Exception:
-                        return
-
-                result = await run_fetchsync(
-                    bot=bot,
-                    entry=entry,
-                    destination_guild=getattr(ctx, "guild", None),
-                    source_user_token=source_token,
-                    dryrun=False,
-                    progress_cb=_progress_cb,
-                )
-                if result.get("ok"):
-                    ok += 1
-                try:
-                    total_sent += int(result.get("sent", 0) or 0)
-                except Exception:
-                    pass
-                if not result.get("ok"):
-                    reason = str(result.get("reason") or "").strip()
-                    hs = result.get("http_status")
-                    await ctx.send(f"fetchsync failed: sgid={sgid} reason={reason} http={hs}")
             try:
-                await progress_msg.edit(content=f"Fetchsync complete: {ok}/{total_maps} succeeded. sent={total_sent}")
+                await ctx.send(embed=_ui_embed("Fetchall failed", f"{type(e).__name__}: {e}", color=0xED4245))
             except Exception:
-                await ctx.send(f"Fetchsync complete: {ok}/{total_maps} succeeded. sent={total_sent}")
-        except Exception as e:
-            log_warn(f"fetchsync command failed: {e}")
-            await ctx.send(f"Fetchsync failed: {type(e).__name__}: {e}")
+                await ctx.send(f"Fetchall failed: {type(e).__name__}: {e}")
 
-    @bot.command(name="fetchclear")
-    async def fetchclear_cmd(ctx, *args: str) -> None:
+    async def _cmd_fetchclear(ctx, *args: str) -> None:
         """
         Delete Mirror World mirror/separator channels in a destination category.
 
@@ -319,12 +266,12 @@ def register_commands(*, bot, forwarder) -> None:
         - If no category is provided, shows a dropdown so you can select one or more categories.
 
         Examples:
-          !fetchclear
-          !fetchclear confirm
-          !fetchclear 1437856372300451851
-          !fetchclear 1437856372300451851 confirm
-          !fetchclear 1437856372300451851 all confirm
-          !fetchclear 111111111111111111,222222222222222222 confirm
+          /fetchclear
+          /fetchclear confirm:true
+          /fetchclear category_ids_csv:1437856372300451851
+          /fetchclear category_ids_csv:1437856372300451851 confirm:true
+          /fetchclear category_ids_csv:1437856372300451851 delete_all:true confirm:true
+          /fetchclear category_ids_csv:111111111111111111,222222222222222222 confirm:true
         """
         if discord is None:
             await ctx.send("fetchclear failed: discord.py import error (discord is unavailable in this runtime).")
@@ -685,6 +632,12 @@ def register_commands(*, bot, forwarder) -> None:
         bad: List[int] = []
         for cid in category_ids:
             ch = ctx.guild.get_channel(int(cid))
+            if ch is None:
+                # Channel/category might not be cached; fetch by id.
+                try:
+                    ch = await bot.fetch_channel(int(cid))
+                except Exception:
+                    ch = None
             if isinstance(ch, discord.CategoryChannel):
                 cats.append(ch)
             else:
@@ -764,7 +717,11 @@ def register_commands(*, bot, forwarder) -> None:
                 )[:4096]
                 summary.add_field(
                     name="To delete for real",
-                    value=(f"!fetchclear {ids_csv} " + ("all " if delete_all else "") + "confirm")[:1024],
+                    value=(
+                        f"/fetchclear category_ids_csv:{ids_csv} "
+                        + (f"delete_all:true " if delete_all else "")
+                        + "confirm:true"
+                    )[:1024],
                     inline=False,
                 )
                 await ctx.send(embed=summary)
@@ -775,7 +732,9 @@ def register_commands(*, bot, forwarder) -> None:
                         f"would_delete_total={total} categories={len(cats)} delete_all={delete_all}\n"
                         "NOTE: DRYRUN ONLY — nothing was deleted.\n\n"
                         "To delete for real, run:\n"
-                        f"!fetchclear {ids_csv} " + ("all " if delete_all else "") + "confirm"
+                        f"/fetchclear category_ids_csv:{ids_csv} "
+                        + ("delete_all:true " if delete_all else "")
+                        + "confirm:true"
                     )[:1950]
                 )
                 return
@@ -904,107 +863,19 @@ def register_commands(*, bot, forwarder) -> None:
         except Exception:
             pass
 
-    @bot.command(name="fetchauth")
-    async def fetchauth_cmd(ctx, source_guild_id: str = "") -> None:
-        """
-        Debug fetchall token + mapping selection without leaking tokens.
-        Usage: !fetchauth <source_guild_id>
-        """
-        sgid = 0
-        try:
-            sgid = int(str(source_guild_id or "").strip())
-        except Exception:
-            sgid = 0
-        if sgid <= 0:
-            await ctx.send("Usage: !fetchauth <source_guild_id>")
-            return
-        token = _pick_fetchall_source_token()
-        if not token:
-            await ctx.send("Missing FETCHALL_USER_TOKEN (needed to read source servers).")
-            return
-
-        # Load mapping entry if present (so category filters are applied)
-        cfg_data = load_fetchall_mappings()
-        entry = None
-        for e in (cfg_data.get("guilds", []) or []):
-            if isinstance(e, dict) and int(e.get("source_guild_id", 0) or 0) == sgid:
-                entry = e
-                break
-        if entry is None:
-            entry = {"source_guild_id": sgid, "destination_category_id": int(getattr(cfg, "FETCHALL_DEFAULT_DEST_CATEGORY_ID", 0) or 0)}
-
-        result = await run_fetchsync(
-            bot=bot,
-            entry=entry,
-            destination_guild=getattr(ctx, "guild", None),
-            source_user_token=token,
-            dryrun=True,
-        )
-        ok = bool(result.get("ok"))
-        reason = str(result.get("reason") or "").strip()
-        hs = result.get("http_status")
-        total = result.get("total")
-        types = result.get("type_counts")
-        cats = result.get("categories_preview")
-        await ctx.send(f"fetchauth: sgid={sgid} ok={ok} reason={reason} http={hs} total={total} types={types} cats={cats}")
-
-    @bot.command(name="fetch")
-    async def fetch_cmd(ctx, source_guild_id: str = "") -> None:
-        """Run fetch-all for a single source guild id (must exist in mappings)."""
-        try:
-            sgid = int(source_guild_id)
-        except Exception:
-            await ctx.send("Usage: !fetch <source_guild_id>")
-            return
-        entries = iter_fetchall_entries()
-        entry = None
-        for e in entries:
-            try:
-                if int(e.get("source_guild_id", 0)) == sgid:
-                    entry = e
-                    break
-            except Exception:
-                continue
-        if not entry:
-            await ctx.send(f"No mapping found for source_guild_id={sgid}. Use !setfetchguild first.")
-            return
-        source_token = _pick_fetchall_source_token() or None
-        result = await run_fetchall(
-            bot=bot,
-            entry=entry,
-            destination_guild=getattr(ctx, "guild", None),
-            source_user_token=source_token,
-        )
-        await ctx.send(f"Fetch result: ok={result.get('ok')} created={result.get('created')} existing={result.get('existing')}")
-
-    @bot.command(name="setfetchguild")
-    async def setfetchguild_cmd(ctx, source_guild_id: str = "", destination_category_id: str = "") -> None:
-        """Set/update a mapping entry in fetchall_mappings.json."""
-        try:
-            sgid = int(source_guild_id)
-            dcid = int(destination_category_id) if destination_category_id else 0
-            name = None
-            try:
-                if ctx.guild:
-                    name = getattr(ctx.guild, "name", None)
-            except Exception:
-                name = None
-            entry = upsert_mapping(source_guild_id=sgid, name=name, destination_category_id=dcid or None)
-            await ctx.send(f"Saved mapping: source_guild_id={entry.get('source_guild_id')} destination_category_id={entry.get('destination_category_id')}")
-        except Exception as e:
-            log_warn(f"setfetchguild failed: {e}")
-            await ctx.send(f"setfetchguild failed: {type(e).__name__}: {e}")
-
-    @bot.command(name="whereami")
-    async def whereami_cmd(ctx) -> None:
+    async def _cmd_whereami(ctx) -> None:
         """Quick runtime proof for discord-side debugging (local-only)."""
         try:
-            await ctx.send(f"MWDataManagerBot is running. guild={getattr(ctx.guild,'id',None)} channel={getattr(ctx.channel,'id',None)}")
+            gid = int(getattr(getattr(ctx, "guild", None), "id", 0) or 0)
+            cid = int(getattr(getattr(ctx, "channel", None), "id", 0) or 0)
+            try:
+                await ctx.send(embed=_ui_embed("Where am I", f"guild_id={gid}\nchannel_id={cid}"))
+            except Exception:
+                await ctx.send(f"MWDataManagerBot is running. guild={gid} channel={cid}")
         except Exception:
             await ctx.send("MWDataManagerBot is running.")
 
-    @bot.command(name="status")
-    async def status_cmd(ctx) -> None:
+    async def _cmd_status(ctx) -> None:
         """Show current monitor/destination configuration (helps diagnose 'no actions')."""
         try:
             monitored = len(cfg.SMART_SOURCE_CHANNELS)
@@ -1039,8 +910,8 @@ def register_commands(*, bot, forwarder) -> None:
                 int(cfg.SMARTFILTER_FLIPS_PROFITABLE_CHANNEL_ID or 0),
                 int(cfg.SMARTFILTER_FLIPS_LUNCHMONEY_CHANNEL_ID or 0),
             ]
-            await ctx.send(
-                "MWDataManagerBot status:\n"
+            text = (
+                "MWDataManagerBot status\n"
                 f"- destination_guild_ids={sorted(list(cfg.DESTINATION_GUILD_IDS))}\n"
                 f"- monitored_channels={monitored} monitor_category_ids={sorted(list(cfg.MONITOR_CATEGORY_IDS))} "
                 f"monitor_all={monitor_all} webhook_only={webhook_only}\n"
@@ -1052,91 +923,13 @@ def register_commands(*, bot, forwarder) -> None:
                 f"- global_trigger_destinations_set={sum(1 for x in globals_ if x>0)}/{len(globals_)}\n"
                 f"- fallback_channel_id={int(cfg.FALLBACK_CHANNEL_ID or 0)}"
             )
+            try:
+                await ctx.send(embed=_ui_embed("Status", text[:3500]))
+            except Exception:
+                await ctx.send(text[:1950])
         except Exception as e:
             log_warn(f"status failed: {e}")
             await ctx.send(f"status failed: {type(e).__name__}: {e}")
-
-    @bot.command(name="keywords")
-    async def keywords_cmd(ctx, action: str = "list", *, value: str = "") -> None:
-        """Manage monitored keywords. Usage: !keywords list | add <kw> | remove <kw> | reload"""
-        try:
-            act = str(action or "").strip().lower()
-        except Exception:
-            act = "list"
-        if act in {"reload", "refresh"}:
-            n = _reload_keywords_into_forwarder()
-            await ctx.send(f"Keywords reloaded. count={n}")
-            return
-        if act in {"add", "create", "new"}:
-            ok, reason = add_keyword(value)
-            n = _reload_keywords_into_forwarder()
-            await ctx.send(f"Keyword add: ok={ok} reason={reason} count={n}")
-            return
-        if act in {"remove", "rm", "del", "delete"}:
-            ok, reason = remove_keyword(value)
-            n = _reload_keywords_into_forwarder()
-            await ctx.send(f"Keyword remove: ok={ok} reason={reason} count={n}")
-            return
-        # list (default)
-        kws = load_keywords(force=True)
-        if not kws:
-            await ctx.send("Monitored keywords: (none)")
-            return
-        preview = ", ".join(kws[:40])
-        extra = "" if len(kws) <= 40 else f" ... (+{len(kws)-40} more)"
-        await ctx.send(f"Monitored keywords ({len(kws)}): {preview}{extra}")
-
-    @bot.command(name="slashstatus")
-    async def slashstatus_cmd(ctx) -> None:
-        """Debug: show slash commands known to this bot for the current guild."""
-        try:
-            import discord
-        except Exception as e:
-            await ctx.send(f"discord import failed: {type(e).__name__}: {e}")
-            return
-        try:
-            gid = int(getattr(getattr(ctx, "guild", None), "id", 0) or 0)
-        except Exception:
-            gid = 0
-        if gid <= 0:
-            await ctx.send("slashstatus: not in a guild context")
-            return
-        try:
-            cmds = bot.tree.get_commands(guild=discord.Object(id=gid))
-        except Exception as e:
-            await ctx.send(f"slashstatus failed: {type(e).__name__}: {e}")
-            return
-        names = []
-        for c in cmds or []:
-            try:
-                names.append(getattr(c, "name", str(c)))
-            except Exception:
-                continue
-        names = sorted(set([str(n) for n in names if n]))
-        await ctx.send(f"slashstatus: guild={gid} tree_commands={len(names)} names={', '.join(names)[:1700]}")
-
-    @bot.command(name="slashsync")
-    async def slashsync_cmd(ctx) -> None:
-        """Debug: force sync of slash commands to destination guild(s)."""
-        try:
-            import discord
-        except Exception as e:
-            await ctx.send(f"discord import failed: {type(e).__name__}: {e}")
-            return
-        dest_guild_ids = sorted(int(x) for x in (cfg.DESTINATION_GUILD_IDS or set()) if int(x) > 0)
-        if not dest_guild_ids:
-            await ctx.send("slashsync: no destination_guild_ids configured")
-            return
-        ok = 0
-        lines = []
-        for gid in dest_guild_ids:
-            try:
-                synced = await bot.tree.sync(guild=discord.Object(id=int(gid)))
-                ok += 1
-                lines.append(f"- guild={int(gid)} ok count={len(synced)}")
-            except Exception as e:
-                lines.append(f"- guild={int(gid)} fail {type(e).__name__}: {e}")
-        await ctx.send("slashsync:\n" + "\n".join(lines[:20]) + f"\nok={ok}/{len(dest_guild_ids)}")
 
     # ---------------------------------------------------------------------
     # Slash commands (registered only to destination guild(s))
@@ -1212,6 +1005,82 @@ def register_commands(*, bot, forwarder) -> None:
         except Exception:
             pass
         return emb
+
+    class _SlashCtx:
+        """
+        Minimal ctx adapter so existing command logic can be reused for slash commands
+        without re-implementing everything twice.
+        """
+
+        def __init__(self, interaction: discord.Interaction, *, ephemeral: bool = True):
+            self._i = interaction
+            self.guild = getattr(interaction, "guild", None)
+            self.channel = getattr(interaction, "channel", None)
+            self.author = getattr(interaction, "user", None)
+            self._ephemeral = bool(ephemeral)
+
+        async def send(self, content: str = None, *, embed=None, embeds=None, view=None, allowed_mentions=None, reference=None, wait: bool = True):
+            # All slash responses use followups; wrappers always defer first.
+            return await self._i.followup.send(
+                content=content,
+                embed=embed,
+                embeds=embeds,
+                view=view,
+                allowed_mentions=allowed_mentions,
+                ephemeral=self._ephemeral,
+                wait=bool(wait),
+            )
+
+    @app_commands.command(name="fetchall", description="Create/update mirror channels from fetchall mappings")
+    @app_commands.checks.has_permissions(manage_channels=True)
+    @app_commands.autocomplete(source_guild_id=_fetchmap_guild_autocomplete)
+    async def fetchall_slash(interaction: discord.Interaction, source_guild_id: int = 0) -> None:
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception:
+            pass
+        ctx = _SlashCtx(interaction, ephemeral=True)
+        await _cmd_fetchall(ctx, source_guild_id=int(source_guild_id or 0))
+
+    @app_commands.command(name="fetchclear", description="Delete mirror/separator channels in destination categories")
+    @app_commands.checks.has_permissions(manage_channels=True)
+    async def fetchclear_slash(
+        interaction: discord.Interaction,
+        category_ids_csv: str = "",
+        confirm: bool = False,
+        delete_all: bool = False,
+    ) -> None:
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception:
+            pass
+        args: List[str] = []
+        if str(category_ids_csv or "").strip():
+            args.append(str(category_ids_csv or "").strip())
+        if bool(delete_all):
+            args.append("all")
+        if bool(confirm):
+            args.append("confirm")
+        ctx = _SlashCtx(interaction, ephemeral=True)
+        await _cmd_fetchclear(ctx, *args)
+
+    @app_commands.command(name="status", description="Show current MWDataManagerBot configuration summary")
+    async def status_slash(interaction: discord.Interaction) -> None:
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception:
+            pass
+        ctx = _SlashCtx(interaction, ephemeral=True)
+        await _cmd_status(ctx)
+
+    @app_commands.command(name="whereami", description="Show guild/channel ids (runtime proof)")
+    async def whereami_slash(interaction: discord.Interaction) -> None:
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception:
+            pass
+        ctx = _SlashCtx(interaction, ephemeral=True)
+        await _cmd_whereami(ctx)
 
     @fetchmap.command(name="list", description="List current fetchall mappings")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -2109,3 +1978,19 @@ def register_commands(*, bot, forwarder) -> None:
             bot.tree.add_command(kwchan, guild=g)
         except Exception as e:
             log_warn(f"Failed to add /keywordchannel to tree for guild={getattr(g,'id',None)}: {type(e).__name__}: {e}")
+        try:
+            bot.tree.add_command(fetchall_slash, guild=g)
+        except Exception as e:
+            log_warn(f"Failed to add /fetchall to tree for guild={getattr(g,'id',None)}: {type(e).__name__}: {e}")
+        try:
+            bot.tree.add_command(fetchclear_slash, guild=g)
+        except Exception as e:
+            log_warn(f"Failed to add /fetchclear to tree for guild={getattr(g,'id',None)}: {type(e).__name__}: {e}")
+        try:
+            bot.tree.add_command(status_slash, guild=g)
+        except Exception as e:
+            log_warn(f"Failed to add /status to tree for guild={getattr(g,'id',None)}: {type(e).__name__}: {e}")
+        try:
+            bot.tree.add_command(whereami_slash, guild=g)
+        except Exception as e:
+            log_warn(f"Failed to add /whereami to tree for guild={getattr(g,'id',None)}: {type(e).__name__}: {e}")
