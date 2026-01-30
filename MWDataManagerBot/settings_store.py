@@ -21,6 +21,12 @@ MONITOR_WEBHOOK_MESSAGES_ONLY: bool = True
 # Outbound: send forwarded/mirrored messages via channel webhooks (for clean identity).
 USE_WEBHOOKS_FOR_FORWARDING: bool = False
 
+# Outbound: re-upload Discord attachments as real files (vs embed image URLs).
+FORWARD_ATTACHMENTS_AS_FILES: bool = True
+FORWARD_ATTACHMENTS_MAX_FILES: int = 10
+# Default to ~7.5MB to stay under common 8MB limits.
+FORWARD_ATTACHMENTS_MAX_BYTES: int = 7_500_000
+
 # Outbound send throttling (prevents Discord 429 spam)
 SEND_MIN_INTERVAL_SECONDS: float = 0.0
 
@@ -143,6 +149,7 @@ def init(settings: Dict[str, Any]) -> None:
     global SMART_SOURCE_CHANNELS_ONLINE, SMART_SOURCE_CHANNELS_INSTORE, SMART_SOURCE_CHANNELS_CLEARANCE, SMART_SOURCE_CHANNELS_MISC, SMART_SOURCE_CHANNELS
     global MONITOR_ALL_DESTINATION_CHANNELS, MONITOR_CATEGORY_IDS, MONITOR_WEBHOOK_MESSAGES_ONLY
     global USE_WEBHOOKS_FOR_FORWARDING
+    global FORWARD_ATTACHMENTS_AS_FILES, FORWARD_ATTACHMENTS_MAX_FILES, FORWARD_ATTACHMENTS_MAX_BYTES
     global SEND_MIN_INTERVAL_SECONDS
     global MIRRORWORLD_ROUTE_ONLINE, MIRRORWORLD_ROUTE_INSTORE
     global ENABLE_DEFAULT_FALLBACK
@@ -182,6 +189,15 @@ def init(settings: Dict[str, Any]) -> None:
     MONITOR_CATEGORY_IDS = _parse_int_set(settings.get("monitor_category_ids"))
     MONITOR_WEBHOOK_MESSAGES_ONLY = bool(settings.get("monitor_webhook_messages_only", True))
     USE_WEBHOOKS_FOR_FORWARDING = bool(settings.get("use_webhooks_for_forwarding", False))
+    FORWARD_ATTACHMENTS_AS_FILES = bool(settings.get("forward_attachments_as_files", True))
+    FORWARD_ATTACHMENTS_MAX_FILES = _get_int(settings, "forward_attachments_max_files", 10)
+    FORWARD_ATTACHMENTS_MAX_BYTES = _get_int(settings, "forward_attachments_max_bytes", 7_500_000)
+    if FORWARD_ATTACHMENTS_MAX_FILES < 0:
+        FORWARD_ATTACHMENTS_MAX_FILES = 0
+    if FORWARD_ATTACHMENTS_MAX_FILES > 10:
+        FORWARD_ATTACHMENTS_MAX_FILES = 10
+    if FORWARD_ATTACHMENTS_MAX_BYTES < 0:
+        FORWARD_ATTACHMENTS_MAX_BYTES = 0
 
     try:
         SEND_MIN_INTERVAL_SECONDS = float(settings.get("send_min_interval_seconds", 0.0) or 0.0)

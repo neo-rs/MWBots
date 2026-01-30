@@ -278,6 +278,7 @@ class MessageForwarder:
         dest_channel_id: int,
         content: str,
         embeds: List[Dict[str, Any]],
+        attachments: Optional[List[Dict[str, Any]]] = None,
         webhook_username: str = "",
         webhook_avatar_url: str = "",
         allowed_mentions=None,
@@ -342,19 +343,21 @@ class MessageForwarder:
                     wait = min_interval - (now - last)
                     if wait > 0:
                         await asyncio.sleep(wait)
-            if i == 0 and embed_objs:
+            if i == 0:
                 # Only use webhook for plain forwards (no reference/view/components).
                 if reference is None and view is None:
                     await send_via_webhook_or_bot(
                         dest_channel=channel,
                         content=chunk,
                         embeds=embed_objs[:10],
+                        attachments=attachments,
                         username=webhook_username,
                         avatar_url=webhook_avatar_url,
                         reason="MWDataManagerBot live forward",
                     )
                     first_msg = None
                 else:
+                    # Reference/view path: keep classic send. Attachments are not reuploaded here.
                     first_msg = await channel.send(
                         content=chunk,
                         embeds=embed_objs[:10],
@@ -369,6 +372,7 @@ class MessageForwarder:
                         dest_channel=channel,
                         content=chunk,
                         embeds=[],
+                        attachments=None,
                         username=webhook_username,
                         avatar_url=webhook_avatar_url,
                         reason="MWDataManagerBot live forward (chunk)",
@@ -903,26 +907,29 @@ class MessageForwarder:
                 replaced = False
 
         embeds_out = format_embeds_for_forwarding(embeds)
-        # Render image attachments as embeds for better Discord UX (no "image.png" link spam).
-        try:
-            embeds_out = append_image_attachments_as_embeds(embeds_out, attachments, max_embeds=10)
-        except Exception:
-            embeds_out = embeds_out
-        # For non-image attachments, append URLs (keeps access to files without reupload).
-        try:
-            non_image_urls = []
-            for a in attachments:
-                if not isinstance(a, dict):
-                    continue
-                if is_image_attachment(a):
-                    continue
-                u = str(a.get("url") or "").strip()
-                if u:
-                    non_image_urls.append(u)
-            if non_image_urls:
-                formatted_content = (formatted_content + "\n\n" + "\n".join(non_image_urls[:10])).strip()
-        except Exception:
-            pass
+        # Discum-style output: when reuploading attachments as real files, do NOT convert them into embed images.
+        use_files = bool(getattr(cfg, "FORWARD_ATTACHMENTS_AS_FILES", True))
+        if not use_files:
+            # Render image attachments as embeds for better Discord UX (legacy behavior).
+            try:
+                embeds_out = append_image_attachments_as_embeds(embeds_out, attachments, max_embeds=10)
+            except Exception:
+                embeds_out = embeds_out
+            # For non-image attachments, append URLs (keeps access to files without reupload).
+            try:
+                non_image_urls = []
+                for a in attachments:
+                    if not isinstance(a, dict):
+                        continue
+                    if is_image_attachment(a):
+                        continue
+                    u = str(a.get("url") or "").strip()
+                    if u:
+                        non_image_urls.append(u)
+                if non_image_urls:
+                    formatted_content = (formatted_content + "\n\n" + "\n".join(non_image_urls[:10])).strip()
+            except Exception:
+                pass
 
         # Route maps apply to *destinations* (legacy MirrorWorld routing maps).
         source_group = "unknown"
@@ -1043,6 +1050,7 @@ class MessageForwarder:
                     dest_channel_id=dest_channel_id,
                     content=formatted_content,
                     embeds=embeds_out,
+                    attachments=attachments if use_files else None,
                     webhook_username=wh_username,
                     webhook_avatar_url=wh_avatar_url,
                 )

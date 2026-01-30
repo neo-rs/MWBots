@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import io
 import json
 import threading
-import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from logging_utils import log_info, log_warn
 
@@ -132,6 +133,7 @@ async def send_via_webhook_or_bot(
     dest_channel,
     content: str,
     embeds,
+    attachments: Optional[List[Dict[str, Any]]] = None,
     username: str = "",
     avatar_url: str = "",
     reason: str = "",
@@ -159,6 +161,19 @@ async def send_via_webhook_or_bot(
         uname = uname[:80]
     av = str(avatar_url or "").strip()
 
+    use_files = bool(getattr(cfg, "FORWARD_ATTACHMENTS_AS_FILES", True))
+    try:
+        max_files = int(getattr(cfg, "FORWARD_ATTACHMENTS_MAX_FILES", 10) or 10)
+    except Exception:
+        max_files = 10
+    max_files = max(0, min(10, max_files))
+    try:
+        max_bytes = int(getattr(cfg, "FORWARD_ATTACHMENTS_MAX_BYTES", 7_500_000) or 7_500_000)
+    except Exception:
+        max_bytes = 7_500_000
+    if max_bytes < 0:
+        max_bytes = 0
+
     url = await _get_or_create_webhook_url(dest_channel=dest_channel, reason=reason)
     if url:
         # Webhook execute does not require bot token, but discord.py needs an aiohttp session.
@@ -166,15 +181,140 @@ async def send_via_webhook_or_bot(
 
         async with aiohttp.ClientSession() as session:
             wh = discord.Webhook.from_url(url, session=session)  # type: ignore[arg-type]
-            kwargs: Dict[str, Any] = {"content": str(content or ""), "embeds": list(embeds or [])[:10], "allowed_mentions": allowed_mentions}
+            files: List[Any] = []
+            skipped: List[str] = []
+            if use_files and attachments and max_files > 0 and max_bytes > 0:
+                files, skipped = await _download_attachment_files(
+                    session=session, attachments=attachments, max_files=max_files, max_bytes=max_bytes
+                )
+            final_content = str(content or "")
+            if skipped and len(final_content) < 1900:
+                extra = "\n".join(skipped[:5]).strip()
+                if extra:
+                    final_content = (final_content + ("\n" if final_content else "") + extra)[:1950]
+
+            kwargs: Dict[str, Any] = {
+                "content": final_content,
+                "embeds": list(embeds or [])[:10],
+                "allowed_mentions": allowed_mentions,
+            }
             if uname:
                 kwargs["username"] = uname
             if av:
                 kwargs["avatar_url"] = av
+            if files:
+                kwargs["files"] = files
             # wait=False keeps it fast (no message id needed).
             await wh.send(wait=False, **kwargs)
             return
 
     # Fallback: normal bot send
-    await dest_channel.send(content=str(content or ""), embeds=list(embeds or [])[:10], allowed_mentions=allowed_mentions)
+    files2: List[Any] = []
+    skipped2: List[str] = []
+    if use_files and attachments and max_files > 0 and max_bytes > 0:
+        try:
+            import aiohttp  # type: ignore
+
+            async with aiohttp.ClientSession() as session:
+                files2, skipped2 = await _download_attachment_files(
+                    session=session, attachments=attachments, max_files=max_files, max_bytes=max_bytes
+                )
+        except Exception:
+            files2, skipped2 = [], []
+    final_content2 = str(content or "")
+    if skipped2 and len(final_content2) < 1900:
+        extra2 = "\n".join(skipped2[:5]).strip()
+        if extra2:
+            final_content2 = (final_content2 + ("\n" if final_content2 else "") + extra2)[:1950]
+    kwargs2: Dict[str, Any] = {
+        "content": final_content2,
+        "embeds": list(embeds or [])[:10],
+        "allowed_mentions": allowed_mentions,
+    }
+    if files2:
+        kwargs2["files"] = files2
+    await dest_channel.send(**kwargs2)
+
+
+def _pick_attachment_url(a: Dict[str, Any]) -> str:
+    try:
+        u = str(a.get("url") or a.get("proxy_url") or "").strip()
+    except Exception:
+        u = ""
+    return u
+
+
+def _pick_attachment_filename(a: Dict[str, Any], url: str) -> str:
+    try:
+        fn = str(a.get("filename") or "").strip()
+    except Exception:
+        fn = ""
+    if fn:
+        return fn[:120]
+    try:
+        path = urlparse(url).path or ""
+        base = path.rsplit("/", 1)[-1].strip()
+    except Exception:
+        base = ""
+    return (base or "file")[:120]
+
+
+async def _download_attachment_files(
+    *,
+    session,
+    attachments: List[Dict[str, Any]],
+    max_files: int,
+    max_bytes: int,
+) -> Tuple[List[Any], List[str]]:
+    """
+    Download attachment URLs and return (files, skipped_urls).
+    Uses Discord CDN public URLs; no auth required.
+    """
+    files: List[Any] = []
+    skipped: List[str] = []
+    if not attachments or max_files <= 0 or max_bytes <= 0:
+        return files, skipped
+
+    try:
+        import discord  # type: ignore
+    except Exception:
+        return files, skipped
+
+    for a in attachments:
+        if len(files) >= max_files:
+            break
+        if not isinstance(a, dict):
+            continue
+        url = _pick_attachment_url(a)
+        if not url:
+            continue
+        try:
+            async with session.get(url, timeout=15) as resp:
+                if int(getattr(resp, "status", 0) or 0) != 200:
+                    skipped.append(url)
+                    continue
+                try:
+                    cl = int(resp.headers.get("Content-Length") or 0)
+                except Exception:
+                    cl = 0
+                if cl and cl > max_bytes:
+                    skipped.append(url)
+                    continue
+                data = await resp.read()
+        except Exception:
+            skipped.append(url)
+            continue
+        if not data:
+            skipped.append(url)
+            continue
+        if len(data) > max_bytes:
+            skipped.append(url)
+            continue
+        filename = _pick_attachment_filename(a, url)
+        try:
+            files.append(discord.File(fp=io.BytesIO(data), filename=filename))
+        except Exception:
+            skipped.append(url)
+            continue
+    return files, skipped
 

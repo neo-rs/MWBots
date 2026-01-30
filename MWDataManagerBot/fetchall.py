@@ -894,6 +894,7 @@ async def _send_message_to_channel(
     dest_channel,
     content: str,
     embeds: List[Dict[str, Any]],
+    attachments: Optional[List[Dict[str, Any]]] = None,
     webhook_username: str = "",
     webhook_avatar_url: str = "",
     reason: str = "",
@@ -919,11 +920,12 @@ async def _send_message_to_channel(
 
     chunks = chunk_text(content, 2000)
     for i, chunk in enumerate(chunks):
-        if i == 0 and embed_objs:
+        if i == 0:
             await send_via_webhook_or_bot(
                 dest_channel=dest_channel,
                 content=chunk,
                 embeds=embed_objs[:10],
+                attachments=attachments,
                 username=webhook_username,
                 avatar_url=webhook_avatar_url,
                 reason=reason or "MWDataManagerBot fetchsync mirror",
@@ -933,6 +935,7 @@ async def _send_message_to_channel(
                 dest_channel=dest_channel,
                 content=chunk,
                 embeds=[],
+                attachments=None,
                 username=webhook_username,
                 avatar_url=webhook_avatar_url,
                 reason=reason or "MWDataManagerBot fetchsync mirror (chunk)",
@@ -1697,24 +1700,27 @@ async def run_fetchsync(
                     j += 1
 
                 # Build one outbound message
+                use_files = bool(getattr(cfg, "FORWARD_ATTACHMENTS_AS_FILES", True))
                 non_image_urls = []
-                for a in bundle_attachments:
-                    if not isinstance(a, dict):
-                        continue
-                    if is_image_attachment(a):
-                        continue
-                    u = str(a.get("url") or a.get("proxy_url") or "").strip()
-                    if u:
-                        non_image_urls.append(u)
-                out_content = ""
-                if non_image_urls:
-                    out_content = "\n".join(non_image_urls[:10]).strip()
+                if not use_files:
+                    for a in bundle_attachments:
+                        if not isinstance(a, dict):
+                            continue
+                        if is_image_attachment(a):
+                            continue
+                        u = str(a.get("url") or a.get("proxy_url") or "").strip()
+                        if u:
+                            non_image_urls.append(u)
+                out_content = "\n".join(non_image_urls[:10]).strip() if non_image_urls else ""
                 # When sending via webhook, the identity already matches the source author/server,
                 # so we avoid adding a redundant "branding" embed card.
                 include_brand = not bool(getattr(cfg, "USE_WEBHOOKS_FOR_FORWARDING", False))
                 embed_cap = 9 if include_brand else 10
 
-                embed_body = append_image_attachments_as_embeds([], bundle_attachments, max_embeds=embed_cap)
+                embed_body: List[Dict[str, Any]] = []
+                if not use_files:
+                    # Legacy behavior: show images as embed images when not reuploading as files.
+                    embed_body = append_image_attachments_as_embeds([], bundle_attachments, max_embeds=embed_cap)
                 embeds_out: List[Dict[str, Any]] = []
                 if include_brand:
                     embeds_out.append(
@@ -1729,7 +1735,7 @@ async def run_fetchsync(
                 embeds_out += embed_body
 
                 # If nothing to send, just advance cursor.
-                if not out_content and not embed_body:
+                if not out_content and not embed_body and not (use_files and bundle_attachments):
                     if bundle_last_id:
                         cursor_id = bundle_last_id
                     i = j
@@ -1747,6 +1753,7 @@ async def run_fetchsync(
                         dest_channel=dest_channel,
                         content=out_content[:1950],
                         embeds=embeds_out[:10],
+                        attachments=bundle_attachments if use_files else None,
                         webhook_username=wh_username,
                         webhook_avatar_url=wh_avatar,
                         reason="MWDataManagerBot fetchsync bundle",
@@ -1775,27 +1782,30 @@ async def run_fetchsync(
             include_brand = not bool(getattr(cfg, "USE_WEBHOOKS_FOR_FORWARDING", False))
             embed_cap = 9 if include_brand else 10
 
+            use_files = bool(getattr(cfg, "FORWARD_ATTACHMENTS_AS_FILES", True))
+
             # Build embeds (reserve slot for branding when needed)
             embed_body = format_embeds_for_forwarding(embeds_dicts_raw)[:embed_cap]
-            try:
-                embed_body = append_image_attachments_as_embeds(embed_body, attachments, max_embeds=embed_cap)
-            except Exception:
-                embed_body = embed_body
-            # Non-image attachments as URLs
-            non_image_urls = []
-            for a in attachments:
-                if not isinstance(a, dict):
-                    continue
-                if is_image_attachment(a):
-                    continue
-                u = str(a.get("url") or a.get("proxy_url") or "").strip()
-                if u:
-                    non_image_urls.append(u)
-            if non_image_urls:
-                content = (content + "\n" + "\n".join(non_image_urls[:10])).strip()
+            if not use_files:
+                try:
+                    embed_body = append_image_attachments_as_embeds(embed_body, attachments, max_embeds=embed_cap)
+                except Exception:
+                    embed_body = embed_body
+                # Non-image attachments as URLs
+                non_image_urls = []
+                for a in attachments:
+                    if not isinstance(a, dict):
+                        continue
+                    if is_image_attachment(a):
+                        continue
+                    u = str(a.get("url") or a.get("proxy_url") or "").strip()
+                    if u:
+                        non_image_urls.append(u)
+                if non_image_urls:
+                    content = (content + "\n" + "\n".join(non_image_urls[:10])).strip()
 
             # If nothing, advance cursor.
-            if not content and not embed_body:
+            if not content and not embed_body and not (use_files and attachments):
                 if mid:
                     cursor_id = mid
                 i += 1
@@ -1826,6 +1836,7 @@ async def run_fetchsync(
                     dest_channel=dest_channel,
                     content=str(content or "")[:1950],
                     embeds=embeds_out[:10],
+                    attachments=attachments if use_files else None,
                     webhook_username=wh_username,
                     webhook_avatar_url=wh_avatar,
                     reason="MWDataManagerBot fetchsync",
