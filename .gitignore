@@ -6,6 +6,9 @@
 # Webhook maps are secrets (never commit)
 **/config/channel_map.json
 
+# Fetchall UI runtime overrides (never commit; persists across !mwupdate python-only updates)
+**/config/fetchall_mappings.runtime.json
+
 # Runtime / logs (never commit)
 **/logs/**
 **/*.log

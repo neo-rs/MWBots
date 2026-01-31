@@ -74,7 +74,8 @@ FALLBACK_CHANNEL_ID: int = 0
 FETCHALL_DEFAULT_DEST_CATEGORY_ID: int = 0
 FETCHALL_MAX_MESSAGES_PER_CHANNEL: int = 400
 FETCHSYNC_INITIAL_BACKFILL_LIMIT: int = 20
-FETCHSYNC_MIN_CONTENT_CHARS: int = 25
+# Fetchsync mirrors into "fetchall" channels. Default should be permissive so short updates aren't dropped.
+FETCHSYNC_MIN_CONTENT_CHARS: int = 1
 # Safety default: OFF. Enable explicitly in config/settings.json.
 FETCHSYNC_AUTO_POLL_SECONDS: int = 0
 
@@ -274,7 +275,11 @@ def init(settings: Dict[str, Any]) -> None:
     FETCHALL_DEFAULT_DEST_CATEGORY_ID = _get_int(settings, "fetchall_default_destination_category_id", 0)
     FETCHALL_MAX_MESSAGES_PER_CHANNEL = _get_int(settings, "fetchall_max_messages_per_channel", 400)
     FETCHSYNC_INITIAL_BACKFILL_LIMIT = _get_int(settings, "fetchsync_initial_backfill_limit", 20)
-    FETCHSYNC_MIN_CONTENT_CHARS = _get_int(settings, "fetchsync_min_content_chars", 25)
+    FETCHSYNC_MIN_CONTENT_CHARS = _get_int(settings, "fetchsync_min_content_chars", 1)
+    if FETCHSYNC_MIN_CONTENT_CHARS < 0:
+        FETCHSYNC_MIN_CONTENT_CHARS = 0
+    if FETCHSYNC_MIN_CONTENT_CHARS > 500:
+        FETCHSYNC_MIN_CONTENT_CHARS = 500
     # Default OFF unless explicitly enabled (prevents surprise background mirroring + channel creation).
     FETCHSYNC_AUTO_POLL_SECONDS = _get_int(settings, "fetchsync_auto_poll_seconds", 0)
 

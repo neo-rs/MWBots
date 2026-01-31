@@ -1582,6 +1582,7 @@ async def run_fetchsync(
 
     mirror_by_source: Dict[int, discord.TextChannel] = dict(existing_by_source)
     created_channels = 0
+    created_source_channel_ids: Set[int] = set()
     if not dryrun:
         # Track taken names per destination category
         taken_by_cat: Dict[int, Set[str]] = {}
@@ -1614,6 +1615,7 @@ async def run_fetchsync(
                     reason="MWDataManagerBot fetchsync mirror channel",
                 )
                 mirror_by_source[sid] = created
+                created_source_channel_ids.add(int(sid))
                 try:
                     taken.add(final_name)
                 except Exception:
@@ -1632,6 +1634,7 @@ async def run_fetchsync(
                                 reason="MWDataManagerBot fetchsync mirror channel (overflow retry)",
                             )
                             mirror_by_source[sid] = created
+                            created_source_channel_ids.add(int(sid))
                             created_channels += 1
                             continue
                     except Exception:
@@ -1927,6 +1930,14 @@ async def run_fetchsync(
             continue
 
         cursor = _get_cursor(entry, source_channel_id=sid)
+        # If the mirror channel is brand new (or empty), do an initial backfill even if a cursor exists.
+        # This prevents "empty fetch channels" after maintenance / category cleanup.
+        try:
+            dest_is_empty = bool(dest_channel is not None and not (getattr(dest_channel, "last_message_id", None) or 0))
+        except Exception:
+            dest_is_empty = False
+        if int(sid) in created_source_channel_ids or dest_is_empty:
+            cursor = ""
         total_fetched = 0
         last_cursor_id: str = ""
 
