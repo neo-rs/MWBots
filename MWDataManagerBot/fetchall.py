@@ -21,6 +21,12 @@ _FILE_LOCK = threading.RLock()
 _DISCORD_API_BASE = "https://discord.com/api/v9"
 _CATEGORY_CHANNEL_LIMIT = 50
 
+# Maintenance coordination:
+# - fetchclear / startup clear will SET the event while deleting channels
+# - fetchsync will observe and abort early (prevents race: delete vs send/create webhooks)
+FETCHALL_MAINTENANCE_LOCK: asyncio.Lock = asyncio.Lock()
+FETCHALL_MAINTENANCE_EVENT: asyncio.Event = asyncio.Event()
+
 
 def _is_substantive_fetched_message(*, content: str, embeds: List[Dict[str, Any]], attachments: List[Dict[str, Any]], min_chars: int) -> bool:
     """
@@ -964,6 +970,8 @@ async def run_fetchall(
         return {"ok": False, "reason": f"discord_import_failed: {e}"}
 
     source_guild_id = int(entry.get("source_guild_id", 0) or 0)
+    if FETCHALL_MAINTENANCE_EVENT.is_set():
+        return {"ok": False, "reason": "maintenance_in_progress", "source_guild_id": int(source_guild_id or 0)}
     if source_guild_id <= 0:
         if progress_cb is not None:
             try:
@@ -1423,6 +1431,9 @@ async def run_fetchsync(
     except Exception as e:
         return {"ok": False, "reason": f"discord_import_failed: {e}"}
 
+    if FETCHALL_MAINTENANCE_EVENT.is_set():
+        return {"ok": False, "reason": "maintenance_in_progress"}
+
     source_guild_id = int(entry.get("source_guild_id", 0) or 0)
     if source_guild_id <= 0:
         return {"ok": False, "reason": "missing_source_guild_id"}
@@ -1657,6 +1668,9 @@ async def run_fetchsync(
 
         i = 0
         while i < len(msgs_to_send or []):
+            if FETCHALL_MAINTENANCE_EVENT.is_set():
+                # Stop cleanly if a fetchclear/maintenance is running.
+                break
             m = msgs_to_send[i]
             if not isinstance(m, dict):
                 i += 1

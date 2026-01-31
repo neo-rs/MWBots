@@ -795,51 +795,78 @@ def register_commands(*, bot, forwarder) -> None:
             )
         except Exception:
             pass
-        progress = await ctx.send(
-            "\n".join(
-                [
-                    "Fetchclear (DELETE)",
-                    _render_progress_bar(0, int(total)),
-                    f"deleted=0 errors=0 total={total} categories={len(cats)} delete_all={delete_all}",
-                ]
-            )[:1950]
-        )
-        deleted = 0
-        errors = 0
-        last_edit = 0.0
-        done_total = 0
-        for cat_idx, (cat, targets) in enumerate(targets_by_cat, start=1):
-            cat_id = int(getattr(cat, "id", 0) or 0)
-            cat_name = str(getattr(cat, "name", "") or "").strip() or f"category_{cat_id}"
-            for ch in targets:
-                done_total += 1
-                try:
-                    await ch.delete(reason="MWDataManagerBot fetchclear")
-                    deleted += 1
-                except Exception as e:
-                    errors += 1
-                    log_warn(f"fetchclear delete failed (channel_id={getattr(ch,'id',None)}): {type(e).__name__}: {e}")
-                # throttle edits
-                try:
-                    now = float(_time.time())
-                except Exception:
-                    now = 0.0
-                if now and (now - last_edit) >= 1.0:
-                    last_edit = now
-                    bar = _render_progress_bar(done_total, total)
+        # Pause fetchsync while deleting to avoid webhook/channel 404 races.
+        try:
+            from fetchall import FETCHALL_MAINTENANCE_EVENT, FETCHALL_MAINTENANCE_LOCK
+        except Exception:
+            FETCHALL_MAINTENANCE_EVENT = None  # type: ignore
+            FETCHALL_MAINTENANCE_LOCK = None  # type: ignore
+
+        if FETCHALL_MAINTENANCE_LOCK is not None:
+            await FETCHALL_MAINTENANCE_LOCK.acquire()
+        if FETCHALL_MAINTENANCE_EVENT is not None:
+            try:
+                FETCHALL_MAINTENANCE_EVENT.set()
+            except Exception:
+                pass
+
+        try:
+            progress = await ctx.send(
+                "\n".join(
+                    [
+                        "Fetchclear (DELETE)",
+                        _render_progress_bar(0, int(total)),
+                        f"deleted=0 errors=0 total={total} categories={len(cats)} delete_all={delete_all}",
+                    ]
+                )[:1950]
+            )
+            deleted = 0
+            errors = 0
+            last_edit = 0.0
+            done_total = 0
+            for cat_idx, (cat, targets) in enumerate(targets_by_cat, start=1):
+                cat_id = int(getattr(cat, "id", 0) or 0)
+                cat_name = str(getattr(cat, "name", "") or "").strip() or f"category_{cat_id}"
+                for ch in targets:
+                    done_total += 1
                     try:
-                        await progress.edit(
-                            content=(
-                                "Fetchclear (DELETE)\n"
-                                f"{bar}\n"
-                                f"deleted={deleted} errors={errors} total={total} categories={len(cats)} delete_all={delete_all}\n"
-                                f"category {cat_idx}/{len(cats)}: {cat_name} ({cat_id})"
-                            )[:1950]
-                        )
+                        await ch.delete(reason="MWDataManagerBot fetchclear")
+                        deleted += 1
+                    except Exception as e:
+                        errors += 1
+                        log_warn(f"fetchclear delete failed (channel_id={getattr(ch,'id',None)}): {type(e).__name__}: {e}")
+                    # throttle edits
+                    try:
+                        now = float(_time.time())
                     except Exception:
-                        pass
-                # Small delay to be gentle
-                await asyncio.sleep(0.35)
+                        now = 0.0
+                    if now and (now - last_edit) >= 1.0:
+                        last_edit = now
+                        bar = _render_progress_bar(done_total, total)
+                        try:
+                            await progress.edit(
+                                content=(
+                                    "Fetchclear (DELETE)\n"
+                                    f"{bar}\n"
+                                    f"deleted={deleted} errors={errors} total={total} categories={len(cats)} delete_all={delete_all}\n"
+                                    f"category {cat_idx}/{len(cats)}: {cat_name} ({cat_id})"
+                                )[:1950]
+                            )
+                        except Exception:
+                            pass
+                    # Small delay to be gentle
+                    await asyncio.sleep(0.35)
+        finally:
+            if FETCHALL_MAINTENANCE_EVENT is not None:
+                try:
+                    FETCHALL_MAINTENANCE_EVENT.clear()
+                except Exception:
+                    pass
+            if FETCHALL_MAINTENANCE_LOCK is not None:
+                try:
+                    FETCHALL_MAINTENANCE_LOCK.release()
+                except Exception:
+                    pass
 
         await progress.edit(
             content=(

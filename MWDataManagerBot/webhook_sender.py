@@ -21,6 +21,27 @@ _WEBHOOK_MAP_PATH = _CONFIG_DIR / "channel_map.json"
 _LOCK = threading.RLock()
 _CACHE: Dict[int, str] = {}
 
+def _invalidate_webhook_for_channel(channel_id: int) -> None:
+    """Remove a cached/stored webhook URL for a destination channel (e.g. if Discord says Unknown Webhook)."""
+    try:
+        cid = int(channel_id or 0)
+    except Exception:
+        cid = 0
+    if cid <= 0:
+        return
+    try:
+        with _LOCK:
+            try:
+                _CACHE.pop(cid, None)
+            except Exception:
+                pass
+            m = _load_webhook_map()
+            if cid in m:
+                m.pop(cid, None)
+                _save_webhook_map(m)
+    except Exception:
+        return
+
 
 def _load_webhook_map() -> Dict[int, str]:
     try:
@@ -174,6 +195,11 @@ async def send_via_webhook_or_bot(
     if max_bytes < 0:
         max_bytes = 0
 
+    try:
+        cid = int(getattr(dest_channel, "id", 0) or 0)
+    except Exception:
+        cid = 0
+
     url = await _get_or_create_webhook_url(dest_channel=dest_channel, reason=reason)
     if url:
         # Webhook execute does not require bot token, but discord.py needs an aiohttp session.
@@ -205,8 +231,24 @@ async def send_via_webhook_or_bot(
             if files:
                 kwargs["files"] = files
             # wait=False keeps it fast (no message id needed).
-            await wh.send(wait=False, **kwargs)
-            return
+            try:
+                await wh.send(wait=False, **kwargs)
+                return
+            except discord.NotFound as e:
+                # 10015: Unknown Webhook (deleted/invalid). Self-heal by recreating once.
+                code = getattr(e, "code", None)
+                if int(code or 0) == 10015 or "Unknown Webhook" in str(e):
+                    if cid > 0:
+                        _invalidate_webhook_for_channel(cid)
+                    url2 = await _get_or_create_webhook_url(dest_channel=dest_channel, reason=reason or "recreate webhook")
+                    if url2:
+                        try:
+                            wh2 = discord.Webhook.from_url(url2, session=session)  # type: ignore[arg-type]
+                            await wh2.send(wait=False, **kwargs)
+                            return
+                        except Exception:
+                            pass
+                raise
 
     # Fallback: normal bot send
     files2: List[Any] = []
