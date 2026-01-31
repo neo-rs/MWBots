@@ -744,6 +744,17 @@ async def _fetch_channel_messages_page(
     return False, [], f"http_{status or 0}"
 
 
+async def fetch_channel_messages_page(
+    *,
+    source_channel_id: int,
+    user_token: str,
+    limit: int,
+    after: Optional[str] = None,
+) -> Tuple[bool, List[Dict[str, Any]], str]:
+    """Public wrapper for message preview/UI use."""
+    return await _fetch_channel_messages_page(source_channel_id=source_channel_id, user_token=user_token, limit=limit, after=after)
+
+
 def _select_source_text_channels_from_api(
     channels: List[Dict[str, Any]],
     *,
@@ -821,6 +832,39 @@ def _discord_jump_url(guild_id: int, channel_id: int) -> str:
     if gid <= 0 or cid <= 0:
         return ""
     return f"https://discord.com/channels/{gid}/{cid}"
+
+
+async def list_user_guilds(*, user_token: str) -> Dict[str, Any]:
+    """
+    List guilds visible to the configured user token.
+    Returns a dict suitable for UI/debug (no secrets).
+    """
+    token = str(user_token or "").strip()
+    if not token:
+        return {"ok": False, "reason": "missing_user_token"}
+    url = f"{_DISCORD_API_BASE}/users/@me/guilds"
+    status, data = await _discord_api_get_json(url=url, user_token=token, params={"with_counts": "true"})
+    if status != 200 or not isinstance(data, list):
+        return {"ok": False, "reason": "failed_to_list_user_guilds", "http_status": int(status or 0)}
+    out: List[Dict[str, Any]] = []
+    for g in data:
+        if not isinstance(g, dict):
+            continue
+        try:
+            gid = int(g.get("id") or 0)
+        except Exception:
+            gid = 0
+        if gid <= 0:
+            continue
+        name = str(g.get("name") or "").strip() or f"guild_{gid}"
+        try:
+            owner = bool(g.get("owner"))
+        except Exception:
+            owner = False
+        icon = str(g.get("icon") or "").strip()
+        out.append({"id": gid, "name": name, "owner": owner, "icon": icon})
+    out.sort(key=lambda x: (str(x.get("name") or "").lower(), int(x.get("id") or 0)))
+    return {"ok": True, "http_status": int(status or 0), "guilds": out}
 
 
 async def list_source_guild_channels(

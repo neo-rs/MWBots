@@ -275,6 +275,7 @@ except Exception:
 _CONFIG_DIR = os.path.join(_project_root, "config")
 _TOKENS_ENV_PATH = os.path.join(_CONFIG_DIR, "tokens.env")
 _SETTINGS_JSON_PATH = os.path.join(_CONFIG_DIR, "settings.json")
+_SETTINGS_RUNTIME_JSON_PATH = os.path.join(_CONFIG_DIR, "settings.runtime.json")
 
 _CONFIG_RAW: Dict[str, str] = {}
 
@@ -329,8 +330,38 @@ def _set_raw(key: str, value: Any) -> None:
 
 _load_env_file(_TOKENS_ENV_PATH)
 
-# Load settings (JSON only; single source of truth)
-_settings = _load_settings_json(_SETTINGS_JSON_PATH)
+# Load settings (JSON base + optional runtime overrides).
+# - settings.json is tracked (code/config defaults)
+# - settings.runtime.json is runtime-only (NOT tracked) so tools can add guild ids without losing them on update
+_settings = _load_settings_json(_SETTINGS_JSON_PATH) or {}
+_runtime_settings = _load_settings_json(_SETTINGS_RUNTIME_JSON_PATH) or {}
+try:
+    if isinstance(_runtime_settings, dict) and _runtime_settings:
+        # Merge: runtime overlays base.
+        merged = dict(_settings)
+        merged.update(_runtime_settings)
+        # For source guild ids, we union to avoid accidentally clobbering.
+        base_g = merged.get("source_guild_ids")
+        rt_g = _runtime_settings.get("source_guild_ids")
+        gids: List[str] = []
+        if isinstance(base_g, list):
+            gids += [str(x).strip() for x in base_g if str(x).strip()]
+        if isinstance(rt_g, list):
+            gids += [str(x).strip() for x in rt_g if str(x).strip()]
+        if gids:
+            # de-dupe preserving order
+            seen = set()
+            out_gids: List[str] = []
+            for x in gids:
+                if x in seen:
+                    continue
+                seen.add(x)
+                out_gids.append(x)
+            merged["source_guild_ids"] = out_gids
+        _settings = merged
+except Exception:
+    _settings = _settings or {}
+
 if _settings:
     _set_raw("GLOBAL_VERBOSE", "true" if _to_bool(_settings.get("verbose"), True) else "false")
     _set_raw("SOURCE_GUILD_IDS", _settings.get("source_guild_ids"))

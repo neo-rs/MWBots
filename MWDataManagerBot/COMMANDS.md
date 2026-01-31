@@ -69,7 +69,7 @@ Fetchsync filtering + live mode:
 
 Config knobs (`config/settings.json`):
 - `fetchsync_initial_backfill_limit` (default 20, max 50): how many recent messages to seed the cursor when a source channel has no cursor yet.
-- `fetchsync_min_content_chars` (default 25): minimum non-mention text length to mirror (messages with embeds/attachments/URLs are still mirrored).
+- `fetchsync_min_content_chars` (default 1): minimum non-mention text length to mirror (messages with embeds/attachments/URLs are still mirrored).
 - `fetchsync_auto_poll_seconds` (default 0; set to e.g. 60 to enable): background polling interval for live updates.
 
 #### `/fetchmap upsert`
@@ -90,6 +90,19 @@ Config knobs (`config/settings.json`):
 #### `/fetchmap ignore_remove`
 - **Description**: Remove an ignored source channel id from a mapping.
 - **Permissions**: `manage_guild`
+
+### `/discum`
+
+#### `/discum browse [source_guild_id]`
+- **Description**: Interactive browser for **MWDiscumBot** source servers/channels using the configured user token:
+  - pick a source guild (if no `source_guild_id`)
+  - browse categories/channels
+  - see a **preview** (latest message snippet + embed/file/link indicators)
+  - select channels and map them to a destination channel in Mirror World
+- **Permissions**: `manage_guild`
+- **Writes runtime config**:
+  - `MWDiscumBot/config/channel_map.json` (source_channel_id → destination webhook URL)
+  - `MWDiscumBot/config/settings.runtime.json` (adds `source_guild_ids` so DiscumBot can cache names; takes effect on DiscumBot restart)
 
 ### `/fetchsync`
 
@@ -142,4 +155,4 @@ Config knobs (`config/settings.json`):
 ## Command summary
 
 - **Prefix commands**: 0
-- **Slash commands**: 19
+- **Slash commands**: 20

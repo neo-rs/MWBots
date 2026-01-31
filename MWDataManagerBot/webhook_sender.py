@@ -82,7 +82,7 @@ def _is_webhook_url(url: str) -> bool:
     return "/webhooks/" in u and len(u) > 20
 
 
-async def _get_or_create_webhook_url(*, dest_channel, reason: str) -> str:
+async def _get_or_create_webhook_url(*, dest_channel, reason: str, force: bool = False, webhook_name: str = "MWDataManagerBot") -> str:
     """
     Return a webhook URL for a destination channel.
     Creates one if missing. Requires "Manage Webhooks" permission.
@@ -99,9 +99,9 @@ async def _get_or_create_webhook_url(*, dest_channel, reason: str) -> str:
     if cid <= 0:
         return ""
 
-    # Config gate (default False; must be enabled).
+    # Config gate (default False; must be enabled) unless force=True.
     enabled = bool(getattr(cfg, "USE_WEBHOOKS_FOR_FORWARDING", False))
-    if not enabled:
+    if not enabled and not bool(force):
         return ""
 
     # In-memory cache
@@ -124,7 +124,9 @@ async def _get_or_create_webhook_url(*, dest_channel, reason: str) -> str:
 
     # Create new webhook
     try:
-        wh = await dest_channel.create_webhook(name="MWDataManagerBot", reason=str(reason or "MWDataManagerBot webhook sender"))
+        nm = str(webhook_name or "MWDataManagerBot").strip() or "MWDataManagerBot"
+        nm = nm[:80]
+        wh = await dest_channel.create_webhook(name=nm, reason=str(reason or "MWDataManagerBot webhook sender"))
         url2 = str(getattr(wh, "url", "") or "").strip()
     except Exception as e:
         try:
@@ -200,7 +202,7 @@ async def send_via_webhook_or_bot(
     except Exception:
         cid = 0
 
-    url = await _get_or_create_webhook_url(dest_channel=dest_channel, reason=reason)
+    url = await _get_or_create_webhook_url(dest_channel=dest_channel, reason=reason, force=False, webhook_name="MWDataManagerBot")
     if url:
         # Webhook execute does not require bot token, but discord.py needs an aiohttp session.
         import aiohttp  # type: ignore

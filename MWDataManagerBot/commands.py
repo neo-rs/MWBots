@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import re
+import threading
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fetchall import (
     iter_fetchall_entries,
+    fetch_channel_messages_page,
+    list_user_guilds,
     list_source_guild_channels,
     load_fetchall_mappings,
     run_fetchall,
@@ -977,6 +983,7 @@ def register_commands(*, bot, forwarder) -> None:
     fetchsync = app_commands.Group(name="fetchsync", description="Pull+mirror messages from source servers")
     kw = app_commands.Group(name="keywords", description="Manage monitored keywords")
     kwchan = app_commands.Group(name="keywordchannel", description="Route monitored keyword matches to extra channels")
+    discum = app_commands.Group(name="discum", description="Configure MWDiscumBot mirroring (channel maps + previews)")
 
     async def _kw_autocomplete(interaction: discord.Interaction, current: str):
         try:
@@ -1497,6 +1504,589 @@ def register_commands(*, bot, forwarder) -> None:
             return
 
         await _fetchmap_browse_for_guild(interaction, sgid)
+
+    # ---------------------------------------------------------------------
+    # MWDiscumBot configuration helpers (runtime-only files, not tracked)
+    # ---------------------------------------------------------------------
+    _DISCUM_LOCK = threading.RLock()
+
+    def _discum_config_dir() -> Path:
+        # Deployed layout: <live_root>/MWDataManagerBot + <live_root>/MWDiscumBot
+        # Repo layout:     <repo>/MWBots/MWDataManagerBot + <repo>/MWBots/MWDiscumBot
+        return Path(__file__).resolve().parent.parent / "MWDiscumBot" / "config"
+
+    def _discum_channel_map_path() -> Path:
+        return _discum_config_dir() / "channel_map.json"
+
+    def _discum_settings_runtime_path() -> Path:
+        return _discum_config_dir() / "settings.runtime.json"
+
+    def _load_json_obj(path: Path) -> Dict[str, Any]:
+        try:
+            if not path.exists():
+                return {}
+            raw = path.read_text(encoding="utf-8-sig") or "{}"
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_json_obj(path: Path, data: Dict[str, Any]) -> None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = Path(str(path) + ".tmp")
+            tmp.write_text(json.dumps(data or {}, indent=2, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(path)
+        except Exception:
+            # Best-effort fallback
+            try:
+                path.write_text(json.dumps(data or {}, indent=2, ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                pass
+
+    def _load_discum_channel_map() -> Dict[int, str]:
+        with _DISCUM_LOCK:
+            data = _load_json_obj(_discum_channel_map_path())
+            out: Dict[int, str] = {}
+            for k, v in (data or {}).items():
+                try:
+                    cid = int(str(k).strip())
+                except Exception:
+                    continue
+                url = str(v or "").strip()
+                if cid > 0 and url:
+                    out[cid] = url
+            return out
+
+    def _save_discum_channel_map(m: Dict[int, str]) -> None:
+        with _DISCUM_LOCK:
+            raw: Dict[str, str] = {str(int(k)): str(v) for k, v in (m or {}).items() if int(k) > 0 and str(v or "").strip()}
+            _save_json_obj(_discum_channel_map_path(), raw)
+
+    def _ensure_discum_source_guild_id(guild_id: int) -> None:
+        gid = int(guild_id or 0)
+        if gid <= 0:
+            return
+        with _DISCUM_LOCK:
+            p = _discum_settings_runtime_path()
+            data = _load_json_obj(p)
+            raw = data.get("source_guild_ids") if isinstance(data.get("source_guild_ids"), list) else []
+            gids: List[str] = []
+            for x in raw:
+                s = str(x).strip()
+                if s:
+                    gids.append(s)
+            if str(gid) not in gids:
+                gids.append(str(gid))
+            data["source_guild_ids"] = gids
+            data["updated_at"] = __import__("time").strftime("%Y-%m-%dT%H:%M:%S")
+            _save_json_obj(p, data)
+
+    def _parse_channel_id(text: str) -> int:
+        s = str(text or "").strip()
+        if not s:
+            return 0
+        m = re.search(r"(\d{15,22})", s)
+        if not m:
+            return 0
+        try:
+            return int(m.group(1))
+        except Exception:
+            return 0
+
+    def _preview_line_from_message(msg: Dict[str, Any]) -> str:
+        try:
+            content = str(msg.get("content") or "").strip()
+        except Exception:
+            content = ""
+        content = re.sub(r"\s+", " ", content).strip()
+        try:
+            embeds = msg.get("embeds") if isinstance(msg.get("embeds"), list) else []
+        except Exception:
+            embeds = []
+        try:
+            atts = msg.get("attachments") if isinstance(msg.get("attachments"), list) else []
+        except Exception:
+            atts = []
+        tags: List[str] = []
+        if embeds:
+            tags.append("embeds")
+        if atts:
+            tags.append(f"files:{len(atts)}")
+        if re.search(r"https?://", content):
+            tags.append("link")
+        tag_txt = f" [{' '.join(tags)}]" if tags else ""
+        if not content:
+            # Try embed title/description hint
+            title = ""
+            try:
+                e0 = embeds[0] if embeds else {}
+                if isinstance(e0, dict):
+                    title = str(e0.get("title") or e0.get("description") or "").strip()
+            except Exception:
+                title = ""
+            title = re.sub(r"\s+", " ", title).strip()
+            if title:
+                content = title
+        if not content:
+            content = "(no text)"
+        return (content[:70] + ("…" if len(content) > 70 else "")) + tag_txt
+
+    async def _discum_browse_for_guild(interaction: discord.Interaction, *, source_guild_id: int) -> None:
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception:
+            pass
+        sgid = int(source_guild_id or 0)
+        token = _pick_fetchall_source_token()
+        if not token:
+            await interaction.followup.send(
+                embed=_ui_embed("Discum browse", "Missing FETCHALL_USER_TOKEN (needed for previews).", color=0xED4245),
+                ephemeral=True,
+            )
+            return
+        if sgid <= 0:
+            await interaction.followup.send(embed=_ui_embed("Discum browse", "Invalid source guild id.", color=0xED4245), ephemeral=True)
+            return
+
+        # Read channels/categories from source guild via user token.
+        info = await list_source_guild_channels(source_guild_id=sgid, user_token=token)
+        if not info.get("ok"):
+            await interaction.followup.send(
+                embed=_ui_embed(
+                    "Discum browse",
+                    f"Browse failed: reason={info.get('reason')} http={info.get('http_status')}",
+                    color=0xED4245,
+                ),
+                ephemeral=True,
+            )
+            return
+        categories = info.get("categories") if isinstance(info.get("categories"), list) else []
+        channels = info.get("channels") if isinstance(info.get("channels"), list) else []
+        if not categories:
+            await interaction.followup.send(embed=_ui_embed("Discum browse", "No categories found in source guild.", color=0xED4245), ephemeral=True)
+            return
+
+        # Build parent_id -> channels mapping
+        by_parent: Dict[int, List[Dict[str, Any]]] = {}
+        for ch in channels:
+            if not isinstance(ch, dict):
+                continue
+            try:
+                pid = int(ch.get("parent_id") or 0)
+            except Exception:
+                pid = 0
+            by_parent.setdefault(pid, []).append(ch)
+
+        # Current discum mappings (source_channel_id -> webhook_url)
+        mapped = _load_discum_channel_map()
+        mapped_ids = set(int(x) for x in mapped.keys() if int(x) > 0)
+
+        # Previews are fetched per page (small batch)
+        async def _fetch_preview(cid: int) -> str:
+            ok, msgs, reason = await fetch_channel_messages_page(source_channel_id=int(cid), user_token=token, limit=1, after=None)
+            if not ok:
+                if reason == "forbidden_or_unauthorized":
+                    return "(no access)"
+                if reason == "not_found":
+                    return "(not found)"
+                return f"({reason})"
+            if not msgs:
+                return "(no messages)"
+            m0 = msgs[0] if isinstance(msgs[0], dict) else {}
+            return _preview_line_from_message(m0)
+
+        def _build_embed(cat_idx: int, chan_page: int, previews: Dict[int, str]) -> discord.Embed:
+            cat = categories[cat_idx]
+            cid = int(cat.get("id") or 0)
+            cname = str(cat.get("name") or "").strip() or f"category_{cid}"
+            url = str(cat.get("url") or "").strip() or f"https://discord.com/channels/{sgid}/{cid}"
+
+            emb = discord.Embed(title=f"Discum browse: {sgid}", color=0x5865F2)
+            emb.add_field(name="Source category", value=f"**{cname}**\n`{cid}`\n[open]({url})", inline=False)
+            emb.add_field(name="Mapped channels", value=str(len(mapped_ids)), inline=True)
+            emb.add_field(name="Discum map file", value="`MWDiscumBot/config/channel_map.json`", inline=True)
+
+            chs = list(by_parent.get(cid, []) or [])
+            chs.sort(key=lambda x: (int(x.get("position", 0) or 0), int(x.get("id", 0) or 0)))
+            page_size = 10
+            start = max(0, int(chan_page) * page_size)
+            page = chs[start : start + page_size]
+            lines: List[str] = []
+            for ch in page:
+                try:
+                    chid = int(ch.get("id") or 0)
+                except Exception:
+                    continue
+                nm = str(ch.get("name") or f"channel_{chid}")
+                mark = "✅" if chid in mapped_ids else "⬜"
+                prev = previews.get(chid) or ""
+                link = str(ch.get("url") or "").strip() or f"https://discord.com/channels/{sgid}/{chid}"
+                line = f"{mark} [{nm}]({link}) `{chid}`"
+                if prev:
+                    line += f"\n- {prev}"
+                lines.append(line)
+            if not lines:
+                lines = ["(No messageable channels found in this category.)"]
+            emb.add_field(name=f"Channels (page {chan_page+1})", value="\n".join(lines)[:1024], inline=False)
+            emb.set_footer(text="Select channels, then Map → destination (creates/uses a webhook in the destination channel).")
+            return emb
+
+        class _DestModal(discord.ui.Modal):
+            def __init__(self, *, on_submit_cb):
+                super().__init__(title="Map to destination")
+                self._on_submit_cb = on_submit_cb
+                self.dest_input = discord.ui.TextInput(
+                    label="Destination channel (mention or id)",
+                    placeholder="Example: #deals or 1435066421133443174",
+                    required=True,
+                    max_length=80,
+                )
+                self.add_item(self.dest_input)
+
+            async def on_submit(self, i: discord.Interaction) -> None:
+                await self._on_submit_cb(i, str(self.dest_input.value or ""))
+
+        class _BrowseView(discord.ui.View):
+            def __init__(self):
+                super().__init__(timeout=60 * 20)
+                self.cat_idx = 0
+                self.chan_page = 0
+                self.selected_ids: List[int] = []
+                self._select: Optional[discord.ui.Select] = None
+                self._refresh_select(previews={})
+
+            def _current_cat_id(self) -> int:
+                try:
+                    return int(categories[self.cat_idx].get("id") or 0)
+                except Exception:
+                    return 0
+
+            def _current_page_channels(self) -> List[Dict[str, Any]]:
+                cid = self._current_cat_id()
+                chs = list(by_parent.get(cid, []) or [])
+                chs.sort(key=lambda x: (int(x.get("position", 0) or 0), int(x.get("id", 0) or 0)))
+                page_size = 10
+                start = max(0, int(self.chan_page) * page_size)
+                return chs[start : start + page_size]
+
+            def _refresh_select(self, *, previews: Dict[int, str]) -> None:
+                if self._select is not None:
+                    try:
+                        self.remove_item(self._select)
+                    except Exception:
+                        pass
+                page = self._current_page_channels()
+                opts: List[discord.SelectOption] = []
+                for ch in page:
+                    try:
+                        chid = int(ch.get("id") or 0)
+                    except Exception:
+                        continue
+                    if chid <= 0:
+                        continue
+                    nm = str(ch.get("name") or f"channel_{chid}")
+                    is_mapped = chid in mapped_ids
+                    desc = ("mapped" if is_mapped else "unmapped")
+                    prev = str(previews.get(chid) or "").strip()
+                    if prev:
+                        desc = (desc + f" • {prev}")[:100]
+                    opts.append(discord.SelectOption(label=nm[:100], value=str(chid), description=desc[:100] if desc else None))
+                if not opts:
+                    self._select = None
+                    return
+                sel = discord.ui.Select(
+                    placeholder="Select source channels (this page)",
+                    min_values=1,
+                    max_values=min(10, len(opts)),
+                    options=opts[:25],
+                )
+
+                async def _on_select(i: discord.Interaction) -> None:
+                    try:
+                        vals = list(sel.values or [])
+                    except Exception:
+                        vals = []
+                    picked: List[int] = []
+                    for v in vals:
+                        try:
+                            picked.append(int(v))
+                        except Exception:
+                            continue
+                    self.selected_ids = [int(x) for x in picked if int(x) > 0]
+                    await i.response.edit_message(content=None, embed=_build_embed(self.cat_idx, self.chan_page, previews), view=self)
+
+                sel.callback = _on_select  # type: ignore
+                self._select = sel
+                self.add_item(sel)
+
+            async def _refresh_and_render(self, i: discord.Interaction) -> None:
+                # Fetch previews for the current page.
+                page = self._current_page_channels()
+                previews: Dict[int, str] = {}
+                # Small concurrency limit to avoid rate-limit bursts
+                sem = asyncio.Semaphore(3)
+
+                async def _one(chid: int) -> None:
+                    async with sem:
+                        previews[chid] = await _fetch_preview(chid)
+
+                tasks = []
+                for ch in page:
+                    try:
+                        chid = int(ch.get("id") or 0)
+                    except Exception:
+                        continue
+                    if chid > 0:
+                        tasks.append(asyncio.create_task(_one(chid)))
+                if tasks:
+                    try:
+                        await asyncio.gather(*tasks)
+                    except Exception:
+                        pass
+                self._refresh_select(previews=previews)
+                await i.response.edit_message(content=None, embed=_build_embed(self.cat_idx, self.chan_page, previews), view=self)
+
+            async def _compute_previews(self) -> Dict[int, str]:
+                page = self._current_page_channels()
+                previews: Dict[int, str] = {}
+                sem = asyncio.Semaphore(3)
+
+                async def _one(chid: int) -> None:
+                    async with sem:
+                        previews[chid] = await _fetch_preview(chid)
+
+                tasks = []
+                for ch in page:
+                    try:
+                        chid = int(ch.get("id") or 0)
+                    except Exception:
+                        continue
+                    if chid > 0:
+                        tasks.append(asyncio.create_task(_one(chid)))
+                if tasks:
+                    try:
+                        await asyncio.gather(*tasks)
+                    except Exception:
+                        pass
+                return previews
+
+            @discord.ui.button(label="Prev category", style=discord.ButtonStyle.secondary)
+            async def prev_cat(self, i: discord.Interaction, _b: discord.ui.Button) -> None:
+                self.cat_idx = (self.cat_idx - 1) % len(categories)
+                self.chan_page = 0
+                self.selected_ids = []
+                await self._refresh_and_render(i)
+
+            @discord.ui.button(label="Next category", style=discord.ButtonStyle.secondary)
+            async def next_cat(self, i: discord.Interaction, _b: discord.ui.Button) -> None:
+                self.cat_idx = (self.cat_idx + 1) % len(categories)
+                self.chan_page = 0
+                self.selected_ids = []
+                await self._refresh_and_render(i)
+
+            @discord.ui.button(label="Prev channels", style=discord.ButtonStyle.secondary)
+            async def prev_ch(self, i: discord.Interaction, _b: discord.ui.Button) -> None:
+                self.chan_page = max(0, int(self.chan_page) - 1)
+                self.selected_ids = []
+                await self._refresh_and_render(i)
+
+            @discord.ui.button(label="Next channels", style=discord.ButtonStyle.secondary)
+            async def next_ch(self, i: discord.Interaction, _b: discord.ui.Button) -> None:
+                self.chan_page = int(self.chan_page) + 1
+                self.selected_ids = []
+                await self._refresh_and_render(i)
+
+            @discord.ui.button(label="Refresh previews", style=discord.ButtonStyle.primary)
+            async def refresh_btn(self, i: discord.Interaction, _b: discord.ui.Button) -> None:
+                await self._refresh_and_render(i)
+
+            @discord.ui.button(label="Map → destination", style=discord.ButtonStyle.success)
+            async def map_btn(self, i: discord.Interaction, _b: discord.ui.Button) -> None:
+                if not self.selected_ids:
+                    await i.response.send_message("No source channels selected.", ephemeral=True)
+                    return
+
+                async def _on_modal_submit(ii: discord.Interaction, dest_text: str) -> None:
+                    dest_id = _parse_channel_id(dest_text)
+                    if dest_id <= 0:
+                        await ii.response.send_message("Invalid destination channel (mention or numeric id).", ephemeral=True)
+                        return
+                    dest = ii.guild.get_channel(int(dest_id)) if ii.guild else None
+                    if dest is None:
+                        try:
+                            dest = await bot.fetch_channel(int(dest_id))  # type: ignore[attr-defined]
+                        except Exception:
+                            dest = None
+                    if dest is None or not hasattr(dest, "create_webhook"):
+                        await ii.response.send_message("Destination channel not found (or not a text channel).", ephemeral=True)
+                        return
+                    # Create/reuse webhook URL (force so this works even if forwarding webhooks are disabled).
+                    try:
+                        from webhook_sender import _get_or_create_webhook_url  # type: ignore
+                    except Exception:
+                        _get_or_create_webhook_url = None  # type: ignore
+                    if _get_or_create_webhook_url is None:
+                        await ii.response.send_message("Webhook helper unavailable in this runtime.", ephemeral=True)
+                        return
+                    wh_url = await _get_or_create_webhook_url(
+                        dest_channel=dest,
+                        reason="MWDiscumBot mapping via MWDataManagerBot",
+                        force=True,
+                        webhook_name="MWDiscumBot",
+                    )
+                    if not wh_url:
+                        await ii.response.send_message(
+                            "Failed to create/use a webhook for that destination channel. (Need `Manage Webhooks`.)",
+                            ephemeral=True,
+                        )
+                        return
+                    # Persist mappings
+                    m = _load_discum_channel_map()
+                    for src_cid in list(self.selected_ids):
+                        m[int(src_cid)] = str(wh_url)
+                        mapped_ids.add(int(src_cid))
+                    _save_discum_channel_map(m)
+                    _ensure_discum_source_guild_id(sgid)
+                    await ii.response.send_message(
+                        embed=_ui_embed(
+                            "Discum mapping saved",
+                            "\n".join(
+                                [
+                                    f"- source_guild_id: `{sgid}`",
+                                    f"- mapped_channels_added/updated: `{len(self.selected_ids)}`",
+                                    f"- destination: <#{int(dest_id)}>",
+                                    "- DiscumBot will reload `channel_map.json` within ~10s (no restart needed).",
+                                    "- Guild id was added to `MWDiscumBot/config/settings.runtime.json` (takes effect on next DiscumBot restart).",
+                                ]
+                            )[:3500],
+                            color=0x57F287,
+                        ),
+                        ephemeral=True,
+                    )
+
+                await i.response.send_modal(_DestModal(on_submit_cb=_on_modal_submit))
+
+            @discord.ui.button(label="Unmap selected", style=discord.ButtonStyle.danger)
+            async def unmap_btn(self, i: discord.Interaction, _b: discord.ui.Button) -> None:
+                if not self.selected_ids:
+                    await i.response.send_message("No source channels selected.", ephemeral=True)
+                    return
+                m = _load_discum_channel_map()
+                removed = 0
+                for src_cid in list(self.selected_ids):
+                    if int(src_cid) in m:
+                        m.pop(int(src_cid), None)
+                        removed += 1
+                    mapped_ids.discard(int(src_cid))
+                _save_discum_channel_map(m)
+                await i.response.send_message(
+                    embed=_ui_embed("Discum mapping updated", f"Unmapped `{removed}` channel(s).", color=0xFEE75C),
+                    ephemeral=True,
+                )
+
+        view = _BrowseView()
+        previews0 = await view._compute_previews()
+        view._refresh_select(previews=previews0)
+        await interaction.followup.send(embed=_build_embed(0, 0, previews0), view=view, ephemeral=True)
+
+    @discum.command(name="browse", description="Browse source channels (via user token) with previews, then map them for MWDiscumBot")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(source_guild_id="Optional: source guild/server ID (leave empty to pick from your user-token guild list)")
+    async def discum_browse(interaction: discord.Interaction, source_guild_id: int = 0) -> None:
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception:
+            pass
+        token = _pick_fetchall_source_token()
+        if not token:
+            await interaction.followup.send(
+                embed=_ui_embed("Discum browse", "Missing FETCHALL_USER_TOKEN (needed for previews).", color=0xED4245),
+                ephemeral=True,
+            )
+            return
+
+        sgid = int(source_guild_id or 0)
+        if sgid > 0:
+            await _discum_browse_for_guild(interaction, source_guild_id=sgid)
+            return
+
+        # Guild picker UI from user token
+        info = await list_user_guilds(user_token=token)
+        if not info.get("ok"):
+            await interaction.followup.send(
+                embed=_ui_embed(
+                    "Discum browse",
+                    f"Failed to list your guilds via token. reason={info.get('reason')} http={info.get('http_status')}",
+                    color=0xED4245,
+                ),
+                ephemeral=True,
+            )
+            return
+        guilds = info.get("guilds") if isinstance(info.get("guilds"), list) else []
+        if not guilds:
+            await interaction.followup.send(embed=_ui_embed("Discum browse", "No guilds found for this token.", color=0xED4245), ephemeral=True)
+            return
+
+        class _GuildPick(discord.ui.View):
+            def __init__(self, entries: List[Dict[str, Any]]):
+                super().__init__(timeout=60 * 10)
+                self.entries = entries
+                self.page = 0
+                self.sel: Optional[discord.ui.Select] = None
+                self._render_select()
+
+            def _render_select(self) -> None:
+                if self.sel is not None:
+                    try:
+                        self.remove_item(self.sel)
+                    except Exception:
+                        pass
+                page_size = 25
+                start = max(0, int(self.page) * page_size)
+                page = self.entries[start : start + page_size]
+                opts: List[discord.SelectOption] = []
+                for g in page:
+                    try:
+                        gid = int(g.get("id") or 0)
+                    except Exception:
+                        continue
+                    if gid <= 0:
+                        continue
+                    nm = str(g.get("name") or "").strip() or f"guild_{gid}"
+                    opts.append(discord.SelectOption(label=nm[:100], value=str(gid), description=str(gid)))
+                if not opts:
+                    self.sel = None
+                    return
+                sel = discord.ui.Select(placeholder="Select source guild...", min_values=1, max_values=1, options=opts[:25])
+
+                async def _on_select(i: discord.Interaction) -> None:
+                    try:
+                        chosen = int(str((sel.values or ["0"])[0]))
+                    except Exception:
+                        chosen = 0
+                    if chosen <= 0:
+                        await i.response.send_message("Invalid selection.", ephemeral=True)
+                        return
+                    await _discum_browse_for_guild(i, source_guild_id=int(chosen))
+
+                sel.callback = _on_select  # type: ignore
+                self.sel = sel
+                self.add_item(sel)
+
+            @discord.ui.button(label="Prev", style=discord.ButtonStyle.secondary)
+            async def prev_btn(self, i: discord.Interaction, _b: discord.ui.Button) -> None:
+                self.page = max(0, int(self.page) - 1)
+                self._render_select()
+                await i.response.edit_message(embed=_ui_embed("Discum browse", f"Pick a source guild (page {self.page+1})"), view=self)
+
+            @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary)
+            async def next_btn(self, i: discord.Interaction, _b: discord.ui.Button) -> None:
+                self.page = int(self.page) + 1
+                self._render_select()
+                await i.response.edit_message(embed=_ui_embed("Discum browse", f"Pick a source guild (page {self.page+1})"), view=self)
+
+        await interaction.followup.send(embed=_ui_embed("Discum browse", "Pick a source guild to browse:"), view=_GuildPick(guilds), ephemeral=True)
 
     @fetchmap.command(name="upsert", description="Add/update a fetchall mapping entry")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -2022,6 +2612,10 @@ def register_commands(*, bot, forwarder) -> None:
             bot.tree.add_command(kwchan, guild=g)
         except Exception as e:
             log_warn(f"Failed to add /keywordchannel to tree for guild={getattr(g,'id',None)}: {type(e).__name__}: {e}")
+        try:
+            bot.tree.add_command(discum, guild=g)
+        except Exception as e:
+            log_warn(f"Failed to add /discum to tree for guild={getattr(g,'id',None)}: {type(e).__name__}: {e}")
         try:
             bot.tree.add_command(fetchall_slash, guild=g)
         except Exception as e:
