@@ -171,6 +171,36 @@ def _store_domain_pattern() -> re.Pattern[str]:
 
 _STORE_DOMAIN_PATTERN = _store_domain_pattern()
 
+def _primary_store_label_from_blob(text_blob: str) -> str:
+    """
+    Best-effort "primary store" detector based on the earliest store-domain URL in the blob.
+    This prevents misrouting when embeds include multiple comp links (e.g. eBay/Amazon/Walmart)
+    but the main product link is a different store (e.g. homedepot.com).
+    """
+    lb = (text_blob or "").lower()
+    best_idx: Optional[int] = None
+    best_store = ""
+    for dom, store in (STORE_DOMAINS or {}).items():
+        try:
+            idx = lb.find(str(dom).lower())
+        except Exception:
+            idx = -1
+        if idx < 0:
+            continue
+        if best_idx is None or idx < best_idx:
+            best_idx = idx
+            best_store = str(store or "").strip().lower()
+    return best_store
+
+
+def _is_amazon_primary(text_blob: str) -> bool:
+    primary = _primary_store_label_from_blob(text_blob)
+    # If we can detect a primary store and it's not amazon, do NOT treat "Amazon" comp links as AMAZON.
+    if primary and primary != "amazon":
+        return False
+    # If no store-domain detected, fall back to existing amazon-match behavior.
+    return True
+
 
 def select_target_channel_id(
     text_to_check: str,
@@ -205,6 +235,13 @@ def select_target_channel_id(
     store_category = store_category_from_location(where_location)
     text_blob = text_to_check or ""
 
+    skip_amazon = bool(source_group == "clearance")
+    if trace is not None:
+        try:
+            trace.setdefault("classifier", {}).setdefault("matches", {})["skip_amazon_for_clearance"] = bool(skip_amazon)
+        except Exception:
+            pass
+
     if trace is not None:
         try:
             c = trace.setdefault("classifier", {})
@@ -223,10 +260,10 @@ def select_target_channel_id(
             pass
 
     # 1) AMAZON (strict)
-    amazon_match = AMAZON_LINK_PATTERN.search(text_blob)
+    amazon_match = AMAZON_LINK_PATTERN.search(text_blob) if not skip_amazon else None
     if amazon_match and cfg.SMARTFILTER_AMAZON_CHANNEL_ID:
         matched = amazon_match.group(0).lower()
-        if "amazon." in matched or "amzn.to" in matched or "a.co" in matched or matched.startswith("b0"):
+        if ("amazon." in matched or "amzn.to" in matched or "a.co" in matched or matched.startswith("b0")) and _is_amazon_primary(text_blob):
             if trace is not None:
                 try:
                     trace.setdefault("classifier", {}).setdefault("matches", {})["amazon"] = matched[:200]
@@ -373,9 +410,10 @@ def select_target_channel_id(
             return cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID, "AFFILIATED_LINKS"
 
     # 11) DEFAULT fallback
-    if AMAZON_ASIN_PATTERN.search(text_to_check or "") and cfg.SMARTFILTER_AMAZON_CHANNEL_ID:
+    if (not skip_amazon) and AMAZON_ASIN_PATTERN.search(text_to_check or "") and cfg.SMARTFILTER_AMAZON_CHANNEL_ID and _is_amazon_primary(text_blob):
         return cfg.SMARTFILTER_AMAZON_CHANNEL_ID, "AMAZON"
-    if cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID and ("amazon" in normalized_lower):
+    # Avoid false positives from text like "Links: Amazon" (must include an actual Amazon URL/ASIN).
+    if (not skip_amazon) and cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID and AMAZON_LINK_PATTERN.search(text_blob) and _is_amazon_primary(text_blob):
         return cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID, "AMAZON_FALLBACK"
     if cfg.SMARTFILTER_DEFAULT_CHANNEL_ID and bool(getattr(cfg, "ENABLE_DEFAULT_FALLBACK", False)):
         return cfg.SMARTFILTER_DEFAULT_CHANNEL_ID, "DEFAULT"
@@ -416,6 +454,13 @@ def detect_all_link_types(
     store_category = store_category_from_location(where_location)
     text_blob = text_to_check or ""
 
+    skip_amazon = bool(source_group == "clearance")
+    if trace is not None:
+        try:
+            trace.setdefault("classifier", {}).setdefault("matches", {})["skip_amazon_for_clearance"] = bool(skip_amazon)
+        except Exception:
+            pass
+
     if trace is not None:
         try:
             c = trace.setdefault("classifier", {})
@@ -434,11 +479,11 @@ def detect_all_link_types(
             pass
 
     amazon_detected = False
-    amazon_match = AMAZON_LINK_PATTERN.search(text_blob)
+    amazon_match = AMAZON_LINK_PATTERN.search(text_blob) if not skip_amazon else None
     if amazon_match and cfg.SMARTFILTER_AMAZON_CHANNEL_ID:
-        amazon_detected = True
         matched = amazon_match.group(0).lower()
-        if "amazon." in matched or "amzn.to" in matched or "a.co" in matched or matched.startswith("b0"):
+        if ("amazon." in matched or "amzn.to" in matched or "a.co" in matched or matched.startswith("b0")) and _is_amazon_primary(text_blob):
+            amazon_detected = True
             results.append((cfg.SMARTFILTER_AMAZON_CHANNEL_ID, "AMAZON"))
             if trace is not None:
                 try:
