@@ -138,7 +138,10 @@ def register_commands(*, bot, forwarder) -> None:
                     try:
                         await ctx.send(embed=_ui_embed("Fetchall", "No fetchall mappings found.", color=0xED4245))
                     except Exception:
-                        await ctx.send("No fetchall mappings found (MWDataManagerBot/config/fetchall_mappings.json).")
+                        await ctx.send(
+                            "No fetchall mappings found. "
+                            "Note: runtime UI edits are saved to MWDataManagerBot/config/fetchall_mappings.runtime.json."
+                        )
                 return
             total_maps = int(len(entries))
             try:
@@ -994,7 +997,7 @@ def register_commands(*, bot, forwarder) -> None:
         return out
 
     async def _fetchmap_guild_autocomplete(interaction: discord.Interaction, current: str):
-        """Autocomplete source_guild_id from fetchall_mappings.json (no manual typing)."""
+        """Autocomplete source_guild_id from fetchall mappings (no manual typing)."""
         try:
             cur = str(current or "").strip().lower()
         except Exception:

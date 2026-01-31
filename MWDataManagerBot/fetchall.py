@@ -16,6 +16,8 @@ from utils import append_image_attachments_as_embeds, chunk_text, format_embeds_
 _BOT_DIR = Path(__file__).resolve().parent
 _CONFIG_DIR = _BOT_DIR / "config"
 _FETCHALL_PATH = _CONFIG_DIR / "fetchall_mappings.json"
+# Runtime overrides saved by /fetchmap browse (NOT tracked by git; survives !mwupdate python-only updates).
+_FETCHALL_RUNTIME_PATH = _CONFIG_DIR / "fetchall_mappings.runtime.json"
 
 _FILE_LOCK = threading.RLock()
 _DISCORD_API_BASE = "https://discord.com/api/v9"
@@ -84,10 +86,56 @@ def _is_substantive_fetched_message(*, content: str, embeds: List[Dict[str, Any]
 
 def load_fetchall_mappings() -> Dict[str, Any]:
     try:
+        base: Dict[str, Any] = {"guilds": []}
+        runtime: Dict[str, Any] = {}
         if _FETCHALL_PATH.exists():
             with open(_FETCHALL_PATH, "r", encoding="utf-8-sig") as f:
-                data = json.load(f)
-            return data if isinstance(data, dict) else {"guilds": []}
+                d0 = json.load(f)
+            if isinstance(d0, dict):
+                base = d0
+        if _FETCHALL_RUNTIME_PATH.exists():
+            with open(_FETCHALL_RUNTIME_PATH, "r", encoding="utf-8-sig") as f:
+                d1 = json.load(f)
+            if isinstance(d1, dict):
+                runtime = d1
+
+        # Merge strategy (by source_guild_id):
+        # - Start from base (git-tracked)
+        # - Overlay runtime entries (saved from Discord UI) so ignores/categories persist across updates
+        out: Dict[str, Any] = dict(base or {})
+        base_guilds = base.get("guilds", [])
+        rt_guilds = runtime.get("guilds", [])
+        if not isinstance(base_guilds, list):
+            base_guilds = []
+        if not isinstance(rt_guilds, list):
+            rt_guilds = []
+        merged: Dict[int, Dict[str, Any]] = {}
+        order: List[int] = []
+        for e in base_guilds:
+            if not isinstance(e, dict):
+                continue
+            try:
+                sgid = int(e.get("source_guild_id", 0) or 0)
+            except Exception:
+                sgid = 0
+            if sgid <= 0:
+                continue
+            merged[sgid] = dict(e)
+            order.append(sgid)
+        for e in rt_guilds:
+            if not isinstance(e, dict):
+                continue
+            try:
+                sgid = int(e.get("source_guild_id", 0) or 0)
+            except Exception:
+                sgid = 0
+            if sgid <= 0:
+                continue
+            merged[sgid] = dict(e)
+            if sgid not in order:
+                order.append(sgid)
+        out["guilds"] = [merged[sgid] for sgid in order if sgid in merged]
+        return out if isinstance(out, dict) else {"guilds": []}
     except Exception as e:
         log_warn(f"[FETCHALL] Failed to load fetchall mappings: {e}")
     return {"guilds": []}
@@ -96,14 +144,14 @@ def load_fetchall_mappings() -> Dict[str, Any]:
 def save_fetchall_mappings(data: Dict[str, Any]) -> None:
     try:
         with _FILE_LOCK:
-            _FETCHALL_PATH.parent.mkdir(parents=True, exist_ok=True)
-            tmp = Path(str(_FETCHALL_PATH) + ".tmp")
+            _FETCHALL_RUNTIME_PATH.parent.mkdir(parents=True, exist_ok=True)
+            tmp = Path(str(_FETCHALL_RUNTIME_PATH) + ".tmp")
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
             try:
-                os.replace(str(tmp), str(_FETCHALL_PATH))
+                os.replace(str(tmp), str(_FETCHALL_RUNTIME_PATH))
             except Exception:
-                with open(_FETCHALL_PATH, "w", encoding="utf-8") as f:
+                with open(_FETCHALL_RUNTIME_PATH, "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=2, ensure_ascii=False)
     except Exception as e:
         log_warn(f"[FETCHALL] Failed to save fetchall mappings: {e}")
