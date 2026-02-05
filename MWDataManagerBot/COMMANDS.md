@@ -91,18 +91,10 @@ Config knobs (`config/settings.json`):
 - **Description**: Remove an ignored source channel id from a mapping.
 - **Permissions**: `manage_guild`
 
-### `/discum`
+### `/discum` (MWDiscumBot)
 
-#### `/discum browse [source_guild_id]`
-- **Description**: Interactive browser for **MWDiscumBot** source servers/channels using the configured user token:
-  - pick a source guild (if no `source_guild_id`)
-  - browse categories/channels
-  - see a **preview** (latest message snippet + embed/file/link indicators)
-  - select channels and map them to a destination channel in Mirror World
-- **Permissions**: `manage_guild`
-- **Writes runtime config**:
-  - `MWDiscumBot/config/channel_map.json` (source_channel_id → destination webhook URL)
-  - `MWDiscumBot/config/settings.runtime.json` (adds `source_guild_ids` so DiscumBot can cache names; takes effect on DiscumBot restart)
+- **Canonical owner**: **MWDiscumBot** (see `MWBots/MWDiscumBot/discum_command_bot.py`).
+- `/discum browse` is registered and handled by the Discum Command Bot (view mappings, browse source guilds/channels, map/unmap to webhooks). Run `discum_command_bot.py` in the MWDiscumBot folder to use it.
 
 ### `/fetchsync`
 
