@@ -4117,15 +4117,38 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
 if __name__ == "__main__":
     # Startup banners are printed above; avoid duplicate [START] lines here.
     try:
-
         write_discum_log({"event": "bridge_start", "bot_type": "discum"})
     except Exception:
         pass
 
+    # Start slash command bot in background so /discum browse is registered (same process)
+    _cmd_bot_started = False
+    try:
+        import discum_command_bot as _cmd_module
+        _cmd_token = getattr(_cmd_module, "BOT_TOKEN", None) or ""
+        if _cmd_token and not _cmd_bot_started:
+            import threading
+            import asyncio as _asyncio
+            def _run_cmd_bot():
+                try:
+                    _asyncio.run(_cmd_module.bot.start(_cmd_token))
+                except Exception as _e:
+                    if VERBOSE:
+                        print(f"[WARN] Slash command bot stopped: {_e}")
+            _cmd_thread = threading.Thread(target=_run_cmd_bot, daemon=True)
+            _cmd_thread.start()
+            _cmd_bot_started = True
+            print("[INFO] Slash command bot started (/discum browse will be available once synced).")
+        elif not _cmd_token and VERBOSE:
+            print("[INFO] No DISCORD_BOT_TOKEN/BOT_TOKEN in config - /discum browse not registered. Add a bot token to config/tokens.env to enable it.")
+    except Exception as _e:
+        if VERBOSE:
+            print(f"[WARN] Could not start slash command bot: {_e}")
+
     max_restarts = 999999  # Essentially unlimited restarts
     restart_count = 0
     restart_delay = 5
-    
+
     while restart_count < max_restarts:
         try:
             # discum gateway for USER ACCOUNT TOKEN (selfbot) - uses WebSocket similar to bots

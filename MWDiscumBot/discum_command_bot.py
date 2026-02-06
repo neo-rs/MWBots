@@ -103,10 +103,7 @@ USER_TOKEN = str(
     or ""
 ).strip()
 
-if not BOT_TOKEN:
-    print("[ERROR] Bot token not found. Please set DISCORD_BOT_TOKEN in config/tokens.env")
-    sys.exit(1)
-
+# Only exit when run as main; when imported (e.g. by discumbot.py) allow missing token
 if not MIRRORWORLD_SERVER_ID:
     print("[WARN] mirrorworld_server_id not set. Commands will be global (may take up to 1 hour to sync)")
 
@@ -1086,6 +1083,9 @@ async def main():
 
 if __name__ == "__main__":
     import asyncio
+    if not BOT_TOKEN:
+        print("[ERROR] Bot token not found. Set DISCORD_BOT_TOKEN or BOT_TOKEN in config/tokens.env")
+        sys.exit(1)
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
