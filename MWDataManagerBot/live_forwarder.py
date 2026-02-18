@@ -371,8 +371,18 @@ class MessageForwarder:
                     if wait > 0:
                         await asyncio.sleep(wait)
             if i == 0:
-                # Only use webhook for plain forwards (no reference/view/components).
-                if reference is None and view is None:
+                # Use channel.send if we need the message object (return_first_message) or have reference/view
+                if return_first_message or reference is not None or view is not None:
+                    # Reference/view/return_message path: use classic send to get message object
+                    first_msg = await channel.send(
+                        content=chunk,
+                        embeds=embed_objs[:10],
+                        allowed_mentions=allowed_mentions,
+                        reference=reference,
+                        view=view,
+                    )
+                else:
+                    # Plain forward: use webhook for cleaner identity
                     await send_via_webhook_or_bot(
                         dest_channel=channel,
                         content=chunk,
@@ -383,15 +393,6 @@ class MessageForwarder:
                         reason="MWDataManagerBot live forward",
                     )
                     first_msg = None
-                else:
-                    # Reference/view path: keep classic send. Attachments are not reuploaded here.
-                    first_msg = await channel.send(
-                        content=chunk,
-                        embeds=embed_objs[:10],
-                        allowed_mentions=allowed_mentions,
-                        reference=reference,
-                        view=view,
-                    )
             else:
                 # Only attach reference/view on the first chunk.
                 if reference is None and view is None:
@@ -748,6 +749,201 @@ class MessageForwarder:
 
         return True
 
+    async def _add_instore_classification_buttons(
+        self,
+        *,
+        message,
+        source_group: str,
+        formatted_content: str,
+        embeds_out: List[Dict[str, Any]],
+        source_message_id: int,
+        source_channel_id: int,
+        source_jump_url: str,
+        trace: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """
+        Add classification buttons below a message sent to INSTORE_LEADS channel.
+        Allows manual reclassification to: Seasonal, Major Retailers, Discounted, Sneaker, Theater, Cards
+        """
+        try:
+            import discord
+        except Exception:
+            return
+
+        # Map button labels to classification tags
+        instore_classifications = {
+            "INSTORE_SEASONAL": cfg.SMARTFILTER_INSTORE_SEASONAL_CHANNEL_ID,
+            "MAJOR_STORES": cfg.SMARTFILTER_MAJOR_STORES_CHANNEL_ID,
+            "DISCOUNTED_STORES": cfg.SMARTFILTER_DISCOUNTED_STORES_CHANNEL_ID,
+            "INSTORE_SNEAKERS": cfg.SMARTFILTER_INSTORE_SNEAKERS_CHANNEL_ID,
+            "INSTORE_THEATRE": cfg.SMARTFILTER_INSTORE_THEATRE_CHANNEL_ID,
+            "INSTORE_CARDS": cfg.SMARTFILTER_INSTORE_CARDS_CHANNEL_ID,
+        }
+
+        # Filter out classifications that aren't configured
+        available_tags = {tag: cid for tag, cid in instore_classifications.items() if int(cid or 0) > 0}
+        if not available_tags:
+            return
+
+        tag_to_channel: Dict[str, int] = {tag: int(cid) for tag, cid in available_tags.items()}
+
+        class _ReasonModal(discord.ui.Modal):
+            def __init__(self, *, parent_view, selected_tag: str):
+                super().__init__(title="Classification Reason")
+                self._parent_view = parent_view
+                self._selected_tag = str(selected_tag or "")
+                self.reason = discord.ui.TextInput(
+                    label="Why this classification?",
+                    placeholder="E.g. \"DD's is a discounted store\", \"Cinemark is a theater\"",
+                    required=False,
+                    max_length=200,
+                    style=discord.TextStyle.short,
+                )
+                self.add_item(self.reason)
+
+            async def on_submit(self, interaction: discord.Interaction) -> None:
+                await self._parent_view._complete(interaction, self._selected_tag, str(self.reason.value or "").strip())
+
+        class _InstoreClassificationView(discord.ui.View):
+            def __init__(self):
+                super().__init__(timeout=60 * 60 * 24 * 7)  # 7 days timeout
+                self.assigned: bool = False
+                self.assigned_by: str = ""
+                self.assigned_tag: str = ""
+                self.assigned_reason: str = ""
+
+                # Create buttons for each classification type
+                button_labels = {
+                    "INSTORE_SEASONAL": "🎄 Seasonal",
+                    "MAJOR_STORES": "🏬 Major Retailers",
+                    "DISCOUNTED_STORES": "🏪 Discounted",
+                    "INSTORE_SNEAKERS": "👟 Sneaker",
+                    "INSTORE_THEATRE": "🎞️ Theater",
+                    "INSTORE_CARDS": "🃏 Cards",
+                }
+
+                for tag, cid in available_tags.items():
+                    if int(cid or 0) > 0:
+                        label = button_labels.get(tag, tag.replace("_", " ").title())
+                        
+                        # Create button with proper closure for callback
+                        def make_callback(btn_tag: str):
+                            async def callback(interaction: discord.Interaction):
+                                await self._on_button_click(interaction, btn_tag)
+                            return callback
+                        
+                        btn = discord.ui.Button(
+                            label=label[:80],
+                            style=discord.ButtonStyle.secondary,
+                        )
+                        btn.callback = make_callback(tag)  # type: ignore
+                        self.add_item(btn)
+
+            async def _on_button_click(self, interaction: discord.Interaction, tag: str) -> None:
+                try:
+                    perms = getattr(getattr(interaction, "user", None), "guild_permissions", None)
+                    can = bool(getattr(perms, "manage_guild", False) or getattr(perms, "manage_messages", False))
+                except Exception:
+                    can = False
+                if not can:
+                    await interaction.response.send_message("Missing permission (manage guild/messages).", ephemeral=True)
+                    return
+                if self.assigned:
+                    await interaction.response.send_message("Already classified.", ephemeral=True)
+                    return
+                await interaction.response.send_modal(_ReasonModal(parent_view=self, selected_tag=tag))
+
+            async def _complete(self, interaction: discord.Interaction, selected_tag: str, reason: str) -> None:
+                if self.assigned:
+                    try:
+                        await interaction.response.send_message("Already classified.", ephemeral=True)
+                    except Exception:
+                        pass
+                    return
+                tag = str(selected_tag or "").strip()
+                dest_before = int(tag_to_channel.get(tag, 0) or 0)
+                dest_after = self_forwarder._apply_route_map(source_group=source_group, dest_channel_id=dest_before)
+                if dest_after <= 0:
+                    await interaction.response.send_message("Destination not configured.", ephemeral=True)
+                    return
+                try:
+                    await interaction.response.defer(ephemeral=True, thinking=True)
+                except Exception:
+                    pass
+                try:
+                    allowed_mentions = discord.AllowedMentions.none()
+                    await self_forwarder._send_to_destination(
+                        dest_channel_id=dest_after,
+                        content=formatted_content,
+                        embeds=embeds_out,
+                        allowed_mentions=allowed_mentions,
+                    )
+                except Exception as e:
+                    await interaction.followup.send(f"Send failed: {type(e).__name__}: {e}", ephemeral=True)
+                    return
+
+                self.assigned = True
+                try:
+                    u = getattr(interaction, "user", None)
+                    self.assigned_by = getattr(u, "display_name", None) or getattr(u, "name", None) or "unknown"
+                except Exception:
+                    self.assigned_by = "unknown"
+                self.assigned_tag = tag
+                self.assigned_reason = reason or "No reason provided"
+
+                # Disable all buttons
+                try:
+                    for item in self.children:
+                        if isinstance(item, discord.ui.Button):
+                            item.disabled = True
+                except Exception:
+                    pass
+
+                try:
+                    emb = discord.Embed(title="✅ Classified", color=0x2ECC71)
+                    emb.add_field(name="Classification", value=f"**{tag.replace('_', ' ').title()}**", inline=False)
+                    emb.add_field(name="By", value=str(self.assigned_by or "unknown"), inline=True)
+                    if self.assigned_reason and self.assigned_reason != "No reason provided":
+                        emb.add_field(name="Reason", value=str(self.assigned_reason)[:200], inline=False)
+                    if source_jump_url:
+                        emb.add_field(name="Source", value=f"[Jump to message]({source_jump_url})", inline=False)
+                    await interaction.message.edit(embed=emb, view=self)
+                except Exception:
+                    pass
+
+                # Trace log entry
+                try:
+                    if trace is not None:
+                        trace.setdefault("manual_classification", []).append(
+                            {
+                                "source_message_id": int(source_message_id or 0),
+                                "source_channel_id": int(source_channel_id or 0),
+                                "assigned_tag": tag,
+                                "dest_before": dest_before,
+                                "dest_after": dest_after,
+                                "reason": self.assigned_reason,
+                                "by": self.assigned_by,
+                            }
+                        )
+                        write_trace_log(trace)
+                except Exception:
+                    pass
+
+                await interaction.followup.send(f"✅ Reclassified to **{tag.replace('_', ' ').title()}**", ephemeral=True)
+
+        self_forwarder = self
+        view = _InstoreClassificationView()
+        
+        try:
+            emb = discord.Embed(title="Classification / Filter", color=0x3498DB)
+            emb.description = "Select the correct classification for this lead:"
+            if source_jump_url:
+                emb.add_field(name="Source", value=f"[Jump to message]({source_jump_url})", inline=False)
+            await message.reply(embed=emb, view=view)
+        except Exception as e:
+            if cfg.VERBOSE:
+                log_warn(f"Failed to add classification buttons: {type(e).__name__}: {e}")
+
     async def handle_message(self, message) -> None:
         # Gate
         try:
@@ -1073,13 +1269,14 @@ class MessageForwarder:
                 dest_traces.append(dest_trace)
                 continue
             try:
-                await self._send_to_destination(
+                sent_msg = await self._send_to_destination(
                     dest_channel_id=dest_channel_id,
                     content=formatted_content,
                     embeds=embeds_out,
                     attachments=attachments if use_files else None,
                     webhook_username=wh_username,
                     webhook_avatar_url=wh_avatar_url,
+                    return_first_message=(tag == "INSTORE_LEADS"),
                 )
                 self.sent_to_destinations[dest_key] = now
                 try:
@@ -1089,6 +1286,23 @@ class MessageForwarder:
                 forwarded += 1
                 dest_trace["decision"] = {"action": "sent"}
                 dest_traces.append(dest_trace)
+                
+                # Add classification buttons for INSTORE_LEADS channel
+                if tag == "INSTORE_LEADS" and sent_msg:
+                    try:
+                        await self._add_instore_classification_buttons(
+                            message=sent_msg,
+                            source_group=source_group,
+                            formatted_content=formatted_content,
+                            embeds_out=embeds_out,
+                            source_message_id=int(getattr(message, "id", 0) or 0),
+                            source_channel_id=int(channel_id or 0),
+                            source_jump_url=str(getattr(message, "jump_url", "") or ""),
+                            trace=trace,
+                        )
+                    except Exception as e:
+                        if cfg.VERBOSE:
+                            log_warn(f"Failed to add classification buttons (msg={message.id}): {type(e).__name__}: {e}")
                 why = ""
                 try:
                     matches = (trace.get("classifier") or {}).get("matches") or {}

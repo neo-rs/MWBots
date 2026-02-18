@@ -203,21 +203,25 @@ def detect_global_triggers(
     embed_text = " ".join(collect_embed_strings(embeds or []))
     embed_normalized = normalize_message(embed_text)
 
+    # Only these channels should be treated as instore for filtering purposes
+    INSTORE_ALLOWED_CHANNELS = {1434967990406873169, 1435277398886060073}
+    
     source_is_online = bool(source_channel_id and (int(source_channel_id) in cfg.SMART_SOURCE_CHANNELS_ONLINE))
-    source_is_instore = bool(source_channel_id and (int(source_channel_id) in cfg.SMART_SOURCE_CHANNELS_INSTORE))
+    source_is_instore = bool(source_channel_id and (int(source_channel_id) in INSTORE_ALLOWED_CHANNELS))
 
     sf_ctx: Dict[str, Any] = {
         "source_channel_id": int(source_channel_id or 0),
         "source_is_online": bool(source_is_online),
         "source_is_instore": bool(source_is_instore),
     }
-    # PRICE_ERROR (online-only intent; here we just require not instore channel list)
-    if cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID and (source_channel_id not in cfg.SMART_SOURCE_CHANNELS_INSTORE):
+    # PRICE_ERROR (online-only intent; exclude instore channels)
+    if cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID and not source_is_instore:
         if PRICE_ERROR_PATTERN.search(normalized_text):
             results.append((cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID, "PRICE_ERROR"))
 
-    # PROFITABLE_FLIP / LUNCHMONEY_FLIP (online only; explainable)
-    if (cfg.SMARTFILTER_FLIPS_PROFITABLE_CHANNEL_ID or cfg.SMARTFILTER_FLIPS_LUNCHMONEY_CHANNEL_ID) and source_is_online:
+    # PROFITABLE_FLIP / LUNCHMONEY_FLIP (online only; exclude instore channels)
+    # Only process if source is online AND not from instore channels
+    if (cfg.SMARTFILTER_FLIPS_PROFITABLE_CHANNEL_ID or cfg.SMARTFILTER_FLIPS_LUNCHMONEY_CHANNEL_ID) and source_is_online and not source_is_instore:
         # Amazon gating: never send Amazon content to flips profitable/lunchmoney.
         amazon_match_source = _match_compiled(AMAZON_LINK_PATTERN, text=text_to_check, embed=embed_text)
         amazon_hit = bool(amazon_match_source)

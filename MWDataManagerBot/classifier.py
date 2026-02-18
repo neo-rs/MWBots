@@ -71,6 +71,65 @@ def store_category_from_location(where_location: str) -> Optional[str]:
     return None
 
 
+def classify_instore_destination(
+    text_to_check: str,
+    where_location: str,
+    store_category: Optional[str],
+    is_instore_source: bool,
+    instore_required: bool,
+    instore_context: bool,
+    trace: Optional[Dict[str, Any]] = None,
+) -> Optional[Tuple[int, str]]:
+    """
+    Canonical instore classification logic (single source of truth).
+    Returns (channel_id, tag) for the first matching instore classification, or None.
+    Order: Seasonal -> Sneakers -> Cards -> Theatre -> Major Stores -> Discounted Stores -> INSTORE_LEADS
+    """
+    if not (is_instore_source and instore_required and instore_context):
+        return None
+    
+    # Check patterns once
+    seasonal_hit = bool(SEASONAL_PATTERN.search(text_to_check or ""))
+    sneakers_hit = bool(SNEAKERS_PATTERN.search(text_to_check or ""))
+    cards_hit = bool(CARDS_PATTERN.search(text_to_check or ""))
+    theatre_hit = bool(matches_instore_theatre(text_to_check or "", where_location))
+    major_hit = bool(MAJOR_STORE_PATTERN.search(text_to_check or "") or store_category == "major")
+    discounted_hit = bool(DISCOUNTED_STORE_PATTERN.search(text_to_check or "") or store_category == "discounted")
+    
+    if trace is not None:
+        try:
+            trace.setdefault("classifier", {}).setdefault("matches", {}).update(
+                {
+                    "instore_seasonal": seasonal_hit,
+                    "instore_sneakers": sneakers_hit,
+                    "instore_cards": cards_hit,
+                    "instore_theatre": theatre_hit,
+                    "major_store": major_hit,
+                    "discounted_store": discounted_hit,
+                }
+            )
+        except Exception:
+            pass
+    
+    # Classification order (priority-based)
+    if seasonal_hit and cfg.SMARTFILTER_INSTORE_SEASONAL_CHANNEL_ID:
+        return cfg.SMARTFILTER_INSTORE_SEASONAL_CHANNEL_ID, "INSTORE_SEASONAL"
+    if sneakers_hit and cfg.SMARTFILTER_INSTORE_SNEAKERS_CHANNEL_ID:
+        return cfg.SMARTFILTER_INSTORE_SNEAKERS_CHANNEL_ID, "INSTORE_SNEAKERS"
+    if cards_hit and cfg.SMARTFILTER_INSTORE_CARDS_CHANNEL_ID:
+        return cfg.SMARTFILTER_INSTORE_CARDS_CHANNEL_ID, "INSTORE_CARDS"
+    if theatre_hit and cfg.SMARTFILTER_INSTORE_THEATRE_CHANNEL_ID:
+        return cfg.SMARTFILTER_INSTORE_THEATRE_CHANNEL_ID, "INSTORE_THEATRE"
+    if major_hit and cfg.SMARTFILTER_MAJOR_STORES_CHANNEL_ID:
+        return cfg.SMARTFILTER_MAJOR_STORES_CHANNEL_ID, "MAJOR_STORES"
+    if discounted_hit and cfg.SMARTFILTER_DISCOUNTED_STORES_CHANNEL_ID:
+        return cfg.SMARTFILTER_DISCOUNTED_STORES_CHANNEL_ID, "DISCOUNTED_STORES"
+    if cfg.SMARTFILTER_INSTORE_LEADS_CHANNEL_ID:
+        return cfg.SMARTFILTER_INSTORE_LEADS_CHANNEL_ID, "INSTORE_LEADS"
+    
+    return None
+
+
 def is_truly_upcoming_explain(text: str) -> Dict[str, Any]:
     """
     Explainable UPCOMING validator (single source of truth).
@@ -210,12 +269,15 @@ def select_target_channel_id(
     trace: Optional[Dict[str, Any]] = None,
 ) -> Optional[Tuple[int, str]]:
     """Single-target classifier (used as fallback if multi-type detection returns nothing)."""
+    # Only allow instore classification for these specific source channels
+    INSTORE_ALLOWED_CHANNELS = {1434967990406873169, 1435277398886060073}
+    
     source_group = determine_source_group(source_channel_id)
     is_instore_source = source_group in {"instore", "clearance"}
     instore_required = has_instore_required_fields(text_to_check)
-    # Accept in-store formatted leads even if they arrive from an "online" channel.
-    instore_formatted_override = bool(instore_required and not is_instore_source)
-    is_instore_source = bool(is_instore_source or instore_formatted_override)
+    # Only treat as instore source if it's from an allowed instore channel
+    # Remove the override that allowed non-instore channels to be treated as instore
+    is_instore_source = bool(is_instore_source and source_channel_id and int(source_channel_id) in INSTORE_ALLOWED_CHANNELS)
     normalized_lower = (text_to_check or "").lower()
 
     instore_context = False
@@ -230,7 +292,8 @@ def select_target_channel_id(
     if not instore_required:
         instore_context = False
 
-    where_match = re.search(r"where\s*:\s*([^\n]+)", text_to_check or "", re.IGNORECASE)
+    # Extract location from either "Where:" or "Location:" fields
+    where_match = re.search(r"(?:where|location)\s*:\s*([^\n]+)", text_to_check or "", re.IGNORECASE)
     where_location = where_match.group(1).strip() if where_match else ""
     store_category = store_category_from_location(where_location)
     text_blob = text_to_check or ""
@@ -250,7 +313,6 @@ def select_target_channel_id(
                     "source_group": source_group,
                     "is_instore_source": bool(is_instore_source),
                     "instore_required_fields": bool(instore_required),
-                    "instore_formatted_override": bool(instore_formatted_override),
                     "instore_context": bool(instore_context),
                     "where_location": where_location,
                     "store_category": store_category,
@@ -317,50 +379,18 @@ def select_target_channel_id(
             return chosen, "MONITORED_KEYWORD"
         return cfg.SMARTFILTER_MONITORED_KEYWORD_CHANNEL_ID, "MONITORED_KEYWORD"
 
-    # 3-6) INSTORE categories (for instore/clearance channels OR in-store formatted leads)
-    if is_instore_source:
-        seasonal_hit = bool(SEASONAL_PATTERN.search(text_blob))
-        sneakers_hit = bool(SNEAKERS_PATTERN.search(text_blob))
-        cards_hit = bool(CARDS_PATTERN.search(text_blob))
-        theatre_hit = bool(matches_instore_theatre(text_blob, where_location)) if instore_context else False
-        major_hit = bool(MAJOR_STORE_PATTERN.search(text_blob) or store_category == "major")
-        discounted_hit = bool(DISCOUNTED_STORE_PATTERN.search(text_blob) or store_category == "discounted")
-        if trace is not None:
-            try:
-                trace.setdefault("classifier", {}).setdefault("matches", {}).update(
-                    {
-                        "instore_seasonal": seasonal_hit,
-                        "instore_sneakers": sneakers_hit,
-                        "instore_cards": cards_hit,
-                        "instore_theatre": theatre_hit,
-                        "major_store": major_hit,
-                        "discounted_store": discounted_hit,
-                    }
-                )
-            except Exception:
-                pass
-
-        if instore_required and seasonal_hit and cfg.SMARTFILTER_INSTORE_SEASONAL_CHANNEL_ID:
-            return cfg.SMARTFILTER_INSTORE_SEASONAL_CHANNEL_ID, "INSTORE_SEASONAL"
-        if instore_required and sneakers_hit and cfg.SMARTFILTER_INSTORE_SNEAKERS_CHANNEL_ID:
-            return cfg.SMARTFILTER_INSTORE_SNEAKERS_CHANNEL_ID, "INSTORE_SNEAKERS"
-        if instore_required and cards_hit and cfg.SMARTFILTER_INSTORE_CARDS_CHANNEL_ID:
-            return cfg.SMARTFILTER_INSTORE_CARDS_CHANNEL_ID, "INSTORE_CARDS"
-        if instore_required and instore_context and cfg.SMARTFILTER_INSTORE_THEATRE_CHANNEL_ID and theatre_hit:
-            return cfg.SMARTFILTER_INSTORE_THEATRE_CHANNEL_ID, "INSTORE_THEATRE"
-
-        # 7) MAJOR_STORES
-        if instore_required and major_hit and cfg.SMARTFILTER_MAJOR_STORES_CHANNEL_ID:
-            return cfg.SMARTFILTER_MAJOR_STORES_CHANNEL_ID, "MAJOR_STORES"
-
-        # 8) DISCOUNTED_STORES
-        if instore_required and discounted_hit and cfg.SMARTFILTER_DISCOUNTED_STORES_CHANNEL_ID:
-            return cfg.SMARTFILTER_DISCOUNTED_STORES_CHANNEL_ID, "DISCOUNTED_STORES"
-
-        # instore fallback
-        if instore_required and (instore_context or where_location):
-            if cfg.SMARTFILTER_INSTORE_LEADS_CHANNEL_ID:
-                return cfg.SMARTFILTER_INSTORE_LEADS_CHANNEL_ID, "INSTORE_LEADS"
+    # 3-6) INSTORE categories (canonical classification)
+    instore_result = classify_instore_destination(
+        text_to_check=text_blob,
+        where_location=where_location,
+        store_category=store_category,
+        is_instore_source=is_instore_source,
+        instore_required=instore_required,
+        instore_context=instore_context,
+        trace=trace,
+    )
+    if instore_result:
+        return instore_result
 
     # 9) UPCOMING (online only; explainable)
     if cfg.SMARTFILTER_UPCOMING_CHANNEL_ID and (source_group == "online") and TIMESTAMP_PATTERN.search(text_to_check or ""):
@@ -429,12 +459,16 @@ def detect_all_link_types(
     trace: Optional[Dict[str, Any]] = None,
 ) -> List[Tuple[int, str]]:
     """Multi-type classifier used by live forwarder for multi-destination routing."""
+    # Only allow instore classification for these specific source channels
+    INSTORE_ALLOWED_CHANNELS = {1434967990406873169, 1435277398886060073}
+    
     results: List[Tuple[int, str]] = []
     source_group = determine_source_group(source_channel_id)
     is_instore_source = source_group in {"instore", "clearance"}
     instore_required = has_instore_required_fields(text_to_check)
-    instore_formatted_override = bool(instore_required and not is_instore_source)
-    is_instore_source = bool(is_instore_source or instore_formatted_override)
+    # Only treat as instore source if it's from an allowed instore channel
+    # Remove the override that allowed non-instore channels to be treated as instore
+    is_instore_source = bool(is_instore_source and source_channel_id and int(source_channel_id) in INSTORE_ALLOWED_CHANNELS)
     normalized_lower = (text_to_check or "").lower()
 
     instore_context = False
@@ -449,7 +483,8 @@ def detect_all_link_types(
     if not instore_required:
         instore_context = False
 
-    where_match = re.search(r"where\s*:\s*([^\n]+)", text_to_check or "", re.IGNORECASE)
+    # Extract location from either "Where:" or "Location:" fields
+    where_match = re.search(r"(?:where|location)\s*:\s*([^\n]+)", text_to_check or "", re.IGNORECASE)
     where_location = where_match.group(1).strip() if where_match else ""
     store_category = store_category_from_location(where_location)
     text_blob = text_to_check or ""
@@ -469,7 +504,6 @@ def detect_all_link_types(
                     "source_group": source_group,
                     "is_instore_source": bool(is_instore_source),
                     "instore_required_fields": bool(instore_required),
-                    "instore_formatted_override": bool(instore_formatted_override),
                     "instore_context": bool(instore_context),
                     "where_location": where_location,
                     "store_category": store_category,
@@ -532,23 +566,16 @@ def detect_all_link_types(
             except Exception:
                 pass
 
-    instore_selection: Optional[Tuple[int, str]] = None
-    if is_instore_source and instore_required and instore_context:
-        if SEASONAL_PATTERN.search(text_to_check or "") and cfg.SMARTFILTER_INSTORE_SEASONAL_CHANNEL_ID:
-            instore_selection = (cfg.SMARTFILTER_INSTORE_SEASONAL_CHANNEL_ID, "INSTORE_SEASONAL")
-        elif SNEAKERS_PATTERN.search(text_to_check or "") and cfg.SMARTFILTER_INSTORE_SNEAKERS_CHANNEL_ID:
-            instore_selection = (cfg.SMARTFILTER_INSTORE_SNEAKERS_CHANNEL_ID, "INSTORE_SNEAKERS")
-        elif CARDS_PATTERN.search(text_to_check or "") and cfg.SMARTFILTER_INSTORE_CARDS_CHANNEL_ID:
-            instore_selection = (cfg.SMARTFILTER_INSTORE_CARDS_CHANNEL_ID, "INSTORE_CARDS")
-        elif cfg.SMARTFILTER_INSTORE_THEATRE_CHANNEL_ID and matches_instore_theatre(text_to_check or "", where_location):
-            instore_selection = (cfg.SMARTFILTER_INSTORE_THEATRE_CHANNEL_ID, "INSTORE_THEATRE")
-        elif (MAJOR_STORE_PATTERN.search(text_to_check or "") or store_category == "major") and cfg.SMARTFILTER_MAJOR_STORES_CHANNEL_ID:
-            instore_selection = (cfg.SMARTFILTER_MAJOR_STORES_CHANNEL_ID, "MAJOR_STORES")
-        elif (DISCOUNTED_STORE_PATTERN.search(text_to_check or "") or store_category == "discounted") and cfg.SMARTFILTER_DISCOUNTED_STORES_CHANNEL_ID:
-            instore_selection = (cfg.SMARTFILTER_DISCOUNTED_STORES_CHANNEL_ID, "DISCOUNTED_STORES")
-        elif cfg.SMARTFILTER_INSTORE_LEADS_CHANNEL_ID:
-            instore_selection = (cfg.SMARTFILTER_INSTORE_LEADS_CHANNEL_ID, "INSTORE_LEADS")
-
+    # INSTORE categories (canonical classification)
+    instore_selection = classify_instore_destination(
+        text_to_check=text_to_check or "",
+        where_location=where_location,
+        store_category=store_category,
+        is_instore_source=is_instore_source,
+        instore_required=instore_required,
+        instore_context=instore_context,
+        trace=trace,
+    )
     if instore_selection:
         results.append(instore_selection)
 
