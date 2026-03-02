@@ -14,7 +14,9 @@ Notes:
 ### `/fetchall`
 
 #### `/fetchall [source_guild_id]`
-- **Description**: Create/ensure Mirror World mirror channels for each configured mapping (channel setup).
+- **Description**: Create/ensure Mirror World mirror channels for each configured mapping (channel setup). Also **prunes** stale channels:
+  - **Orphaned mirrors**: deletes mirrors whose source channel no longer exists
+  - **Date-expired mirrors** (when `require_date: true`): deletes channels with past dates in name (e.g. `02-27 | ...` when today is March)
 - **Permissions**: `manage_channels`
 - **Usage**:
   - `/fetchall` (all mappings)
@@ -31,6 +33,7 @@ Notes:
   - Set `delete_all=true` to delete everything in the category
 - **Category selection**:
   - If `category_ids_csv` is omitted, the bot shows a **dropdown** so you can pick **one or more categories**.
+  - When you specify a base category (e.g. Daily Upcoming Drops), overflow categories (e.g. Daily Upcoming Drops-overflow-2) are **automatically included** so all mirror channels are cleaned.
 
 ### `/status`
 

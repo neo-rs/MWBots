@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 import threading
 import unicodedata
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
@@ -332,6 +334,40 @@ def _slugify_channel_name(name: str, fallback_prefix: str = "channel") -> str:
     return slug[:90]
 
 
+def _parse_date_from_channel_name(channel_name: str) -> Optional[date]:
+    """
+    Parse MM-DD or M-DD from channel name (e.g. "02-27 | union-x-fragment", "2-27-12pm-topps").
+    Returns date object or None if no parseable date.
+    """
+    if not channel_name or not isinstance(channel_name, str):
+        return None
+    m = re.search(r"(\d{1,2})-(\d{1,2})(?:\s*\||\s|$)", str(channel_name).strip())
+    if not m:
+        return None
+    try:
+        month = int(m.group(1))
+        day = int(m.group(2))
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            return date(date.today().year, month, day)
+    except (ValueError, IndexError):
+        pass
+    return None
+
+
+def _is_channel_date_stale(channel_name: str, *, days_grace: int = 1) -> bool:
+    """
+    True if channel name has a date (MM-DD) that has passed.
+
+    days_grace: keep channels for this many days after the date (default 1).
+    """
+    d = _parse_date_from_channel_name(channel_name)
+    if d is None:
+        return False
+    # Use today for cutoff; date is stale if it's before (today - grace)
+    cutoff = date.today() - timedelta(days=days_grace)
+    return d < cutoff
+
+
 # Cache for source guild branding (name + icon url) to avoid repeated REST calls during polling.
 _GUILD_BRAND_CACHE: Dict[int, Tuple[float, str, str]] = {}
 _GUILD_BRAND_TTL_SECONDS: int = 60 * 60
@@ -501,6 +537,38 @@ async def _get_or_create_overflow_category(destination_guild, *, base_category, 
         return created
     except Exception:
         return None
+
+
+def get_fetchall_clear_category_ids(destination_guild, *, base_category_ids: Set[int]) -> Set[int]:
+    """
+    Expand base category IDs to include overflow categories (e.g. Daily Upcoming Drops-overflow-2).
+    Used by startup clear and fetchclear so channels in overflow categories get cleaned.
+    """
+    out: Set[int] = set()
+    try:
+        cats = list(getattr(destination_guild, "categories", []) or [])
+    except Exception:
+        return base_category_ids
+    for c in cats:
+        try:
+            cid = int(getattr(c, "id", 0) or 0)
+        except Exception:
+            continue
+        if cid <= 0:
+            continue
+        if cid in base_category_ids:
+            out.add(cid)
+            continue
+        nm = str(getattr(c, "name", "") or "").strip()
+        for base_cid in base_category_ids:
+            base_cat = destination_guild.get_channel(int(base_cid))
+            if base_cat is None:
+                continue
+            base_name = str(getattr(base_cat, "name", "") or "").strip()
+            if base_name and nm.startswith(f"{base_name}-overflow-"):
+                out.add(cid)
+                break
+    return out if out else base_category_ids
 
 
 def _list_overflow_categories(destination_guild, *, base_category) -> List[Any]:
@@ -1435,8 +1503,37 @@ async def run_fetchall(
             except Exception:
                 pass
 
+    # Prune stale mirrors: orphaned (source channel gone) and date-expired (require_date mappings)
+    valid_src_ids = {int(sid) for sid, _ in (src_channels_to_mirror or []) if int(sid or 0) > 0}
+    require_date = bool(entry.get("require_date", False))
+    pruned = 0
+    if valid_src_ids:
+        for src_ch_id, mirror_ch in list(existing_by_source.items()):
+            if not hasattr(mirror_ch, "delete"):
+                continue
+            ch_name = str(getattr(mirror_ch, "name", "") or "")
+            # Never delete separators
+            if ch_name.startswith("📅---") or (getattr(mirror_ch, "topic", "") or "").startswith("separator for"):
+                continue
+            should_delete = False
+            if int(src_ch_id or 0) not in valid_src_ids:
+                should_delete = True
+            elif require_date and _is_channel_date_stale(ch_name):
+                should_delete = True
+            if should_delete:
+                try:
+                    await mirror_ch.delete(reason="MWDataManagerBot fetchall prune (orphaned or date-expired)")
+                    pruned += 1
+                    await asyncio.sleep(0.35)
+                except Exception as e:
+                    log_warn(f"[FETCHALL] prune failed channel_id={getattr(mirror_ch,'id',None)}: {type(e).__name__}: {e}")
+                    errors += 1
+
+        if pruned > 0:
+            log_fetchall(f"source={source_guild_id} pruned={pruned} (orphaned or date-expired)")
+
     log_fetchall(
-        f"source={source_guild_id} dest_category={dest_category_id} mode={mode} attempted={attempted} created={created} existing={kept}"
+        f"source={source_guild_id} dest_category={dest_category_id} mode={mode} attempted={attempted} created={created} existing={kept} pruned={pruned}"
     )
     if progress_cb is not None:
         try:
@@ -1452,6 +1549,7 @@ async def run_fetchall(
                     "created": int(created),
                     "existing": int(kept),
                     "errors": int(errors),
+                    "pruned": int(pruned),
                 }
             )
         except Exception:
@@ -1499,6 +1597,7 @@ async def run_fetchall(
         "created": created,
         "existing": kept,
         "errors": errors,
+        "pruned": pruned,
     }
 
 

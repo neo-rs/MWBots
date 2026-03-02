@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from fetchall import (
     iter_fetchall_entries,
     fetch_channel_messages_page,
+    get_fetchall_clear_category_ids,
     list_user_guilds,
     list_source_guild_channels,
     load_fetchall_mappings,
@@ -635,6 +636,15 @@ def register_commands(*, bot, forwarder) -> None:
                 await ctx.send("fetchclear: no categories selected (or timed out).")
                 return
             category_ids = picked
+
+        # Expand to include overflow categories (e.g. Daily Upcoming Drops-overflow-2)
+        if ctx.guild and category_ids:
+            try:
+                base_set = set(int(x) for x in category_ids if int(x) > 0)
+                expanded = get_fetchall_clear_category_ids(ctx.guild, base_category_ids=base_set)
+                category_ids = list(expanded)
+            except Exception:
+                pass
 
         # Resolve categories
         cats: List["discord.CategoryChannel"] = []

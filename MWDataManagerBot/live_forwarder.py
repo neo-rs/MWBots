@@ -24,7 +24,7 @@ from utils import (
     rewrite_affiliate_links_in_message,
 )
 
-from fetchall import iter_fetchall_entries, run_fetchsync
+from fetchall import iter_fetchall_entries, run_fetchsync, get_fetchall_clear_category_ids
 from fetchall import MIRROR_TOPIC_PREFIX
 
 
@@ -115,13 +115,16 @@ async def _startup_clear_fetchall_categories(*, bot) -> None:
             if guild is None:
                 continue
 
+            # Expand to include overflow categories (e.g. Daily Upcoming Drops-overflow-2)
+            clear_cat_ids = get_fetchall_clear_category_ids(guild, base_category_ids=cat_ids)
+
             # Build a stable list of candidate channels once (deletes mutate guild.channels).
             try:
                 all_channels = list(getattr(guild, "channels", []) or [])
             except Exception:
                 all_channels = []
 
-            for cat_id in sorted(cat_ids):
+            for cat_id in sorted(clear_cat_ids):
                 # Only clear channels that are actually in this guild & category.
                 candidates = []
                 for ch in all_channels:
