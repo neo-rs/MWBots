@@ -486,6 +486,8 @@ def load_channel_map(path: str) -> Dict[int, str]:
         # Some Windows editors save JSON with a UTF-8 BOM; utf-8-sig handles both.
         with open(path, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
+    except FileNotFoundError:
+        return {}
     except Exception:
         return {}
     if not isinstance(data, dict):
@@ -502,6 +504,22 @@ def load_channel_map(path: str) -> Dict[int, str]:
     return out
 
 CHANNEL_MAP: Dict[int, str] = load_channel_map(CHANNEL_MAP_PATH)
+
+# Startup: ensure channel_map.json exists and log mapping status
+if not os.path.exists(CHANNEL_MAP_PATH):
+    try:
+        os.makedirs(os.path.dirname(CHANNEL_MAP_PATH), exist_ok=True)
+        with open(CHANNEL_MAP_PATH, "w", encoding="utf-8") as f:
+            json.dump({}, f, indent=2)
+        if VERBOSE:
+            print(f"[INFO] Created empty {CHANNEL_MAP_PATH} (add mappings via /discum browse or edit the file)")
+    except Exception as e:
+        if VERBOSE:
+            print(f"[WARN] Could not create {CHANNEL_MAP_PATH}: {e}")
+if VERBOSE:
+    print(f"[INFO] Channel map: {CHANNEL_MAP_PATH} ({len(CHANNEL_MAP)} mapping(s))")
+if len(CHANNEL_MAP) == 0 and VERBOSE:
+    print("[INFO] No channel mappings yet. Use /discum browse (slash command bot) or edit channel_map.json to add mappings.")
 
 # Standalone log writers (compatible paths)
 _LOGS_DIR = os.path.join(_project_root, "logs")
@@ -2589,7 +2607,7 @@ def message_handler(resp):
             return
 
         # Reload CHANNEL_MAP dynamically (in case it was updated on disk)
-        # This allows adding channels without restarting discumbot
+        # This allows adding/removing channels without restarting discumbot
         # Only reload every 10 seconds to avoid excessive file I/O
         try:
             import time
@@ -2598,11 +2616,10 @@ def message_handler(resp):
             current_time = time.time()
             if current_time - message_handler._last_reload_time > 10:  # Reload every 10 seconds max
                 current_channel_map = load_channel_map(CHANNEL_MAP_PATH)
-                if current_channel_map:
-                    # Update the global CHANNEL_MAP reference
-                    global CHANNEL_MAP
-                    CHANNEL_MAP.update(current_channel_map)
-                    message_handler._last_reload_time = current_time
+                global CHANNEL_MAP
+                CHANNEL_MAP.clear()
+                CHANNEL_MAP.update(current_channel_map)
+                message_handler._last_reload_time = current_time
         except Exception as reload_err:
             if VERBOSE:
                 print(f"[WARN] Failed to reload CHANNEL_MAP: {reload_err}")
@@ -4138,7 +4155,8 @@ if __name__ == "__main__":
             _cmd_thread = threading.Thread(target=_run_cmd_bot, daemon=True)
             _cmd_thread.start()
             _cmd_bot_started = True
-            print("[INFO] Slash command bot started (/discum browse will be available once synced).")
+            _gid = getattr(_cmd_module, "MIRRORWORLD_SERVER_ID", None) or 0
+            print(f"[INFO] Slash command bot started; syncing /discum to guild {_gid} (channel mapping via /discum browse).")
         elif not _cmd_token and VERBOSE:
             print("[INFO] No DISCORD_BOT_TOKEN/BOT_TOKEN in config - /discum browse not registered. Add a bot token to config/tokens.env to enable it.")
     except Exception as _e:

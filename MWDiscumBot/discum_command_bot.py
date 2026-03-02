@@ -93,7 +93,14 @@ BOT_TOKEN = str(
     or ""
 ).strip()
 
-MIRRORWORLD_SERVER_ID = int(cfg_get("mirrorworld_server_id", "0") or 0)
+# Guild ID for command sync (same sources as main discumbot)
+MIRRORWORLD_SERVER_ID = int(
+    cfg_get("mirrorworld_server_id")
+    or cfg_get("MIRRORWORLD_SERVER")
+    or cfg_get("MIRRORWORLD_GUILD_ID")
+    or cfg_get("mirrorworld_server_id")
+    or "0"
+) or 0
 
 # User token for browsing source guilds/channels (same as main discumbot)
 USER_TOKEN = str(
@@ -957,15 +964,20 @@ class DiscumCommandBot(commands.Bot):
         self.tree = app_commands.CommandTree(self)
     
     async def setup_hook(self) -> None:
-        """Sync commands on startup."""
-        if MIRRORWORLD_SERVER_ID:
-            guild_obj = discord.Object(id=MIRRORWORLD_SERVER_ID)
-            self.tree.copy_global_to(guild=guild_obj)
-            await self.tree.sync(guild=guild_obj)
-            print(f"[INFO] Synced commands to guild {MIRRORWORLD_SERVER_ID}")
-        else:
-            await self.tree.sync()
-            print("[INFO] Synced commands globally (may take up to 1 hour)")
+        """Sync commands on startup so /discum browse is registered (with channel mapping)."""
+        try:
+            if MIRRORWORLD_SERVER_ID:
+                guild_obj = discord.Object(id=MIRRORWORLD_SERVER_ID)
+                self.tree.copy_global_to(guild=guild_obj)
+                synced = await self.tree.sync(guild=guild_obj)
+                print(f"[INFO] Synced {len(synced)} command(s) to guild {MIRRORWORLD_SERVER_ID} (/discum browse available)")
+            else:
+                synced = await self.tree.sync()
+                print(f"[INFO] Synced {len(synced)} command(s) globally (may take up to 1 hour to appear)")
+        except Exception as e:
+            print(f"[ERROR] Command sync failed: {e}")
+            import traceback
+            traceback.print_exc()
     
     async def on_ready(self) -> None:
         print(f"[INFO] Logged in as {self.user}")
