@@ -922,7 +922,7 @@ async def _discum_browse_for_guild(interaction: discord.Interaction, *, source_g
                     await ii.response.send_message("Destination channel not found or not a text channel.", ephemeral=True)
                     return
                 try:
-                    wh_list = [w async for w in dest.webhooks()]
+                    wh_list = await dest.webhooks()
                     wh_url = None
                     for w in wh_list:
                         if getattr(w, "name", None) == "MWDiscumBot":
