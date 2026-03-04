@@ -21,6 +21,8 @@ CHANNEL_MAP_PATH = str(_ROOT / "config" / "channel_map.json")
 TOKENS_ENV_PATH = str(_ROOT / "config" / "tokens.env")
 SETTINGS_JSON_PATH = str(_ROOT / "config" / "settings.json")
 SETTINGS_RUNTIME_PATH = str(_ROOT / "config" / "settings.runtime.json")
+# Alias for code that expects the old name
+SETTINGS_RUNTIME_JSON_PATH = SETTINGS_RUNTIME_PATH
 
 
 def load_env_file(path: str) -> Dict[str, str]:

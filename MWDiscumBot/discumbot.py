@@ -254,7 +254,7 @@ from discum_config import (
     CHANNEL_MAP_PATH,
     TOKENS_ENV_PATH,
     SETTINGS_JSON_PATH,
-    SETTINGS_RUNTIME_JSON_PATH,
+    SETTINGS_RUNTIME_PATH,
     load_env_file,
     load_channel_map,
 )
