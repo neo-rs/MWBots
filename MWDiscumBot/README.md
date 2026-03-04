@@ -16,7 +16,7 @@ All under `MWDiscumBot/config/`:
 - `settings.runtime.json` – runtime-only overrides (e.g. source_guild_ids added by `/discum browse`).
 - `channel_map.json` – source channel ID → webhook URL. Created empty if missing; edit or use `/discum browse` to add mappings.
 
-Config loading is centralized in `discum_config.py` (single source of truth for paths and parsing).
+Config loading is centralized in `discum_config.py` (single source of truth for paths and parsing). **discum_config.py is always required** when the bot runs (on Oracle or locally); a local backup (e.g. Oraclserver-files-mwbots snapshot) is just a copy of the server files—the running process still uses `discum_config.py` to resolve `config/` and load `channel_map.json` and tokens.
 
 ## Slash command
 
