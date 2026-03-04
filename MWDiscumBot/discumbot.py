@@ -2118,6 +2118,7 @@ def _fetch_and_cache_channels():
 _discum_user_info = {"username": None, "discriminator": None}
 _startup_banner_emitted = False
 _last_channel_cache_run_at = 0.0
+_slash_command_bot_started = False  # set True in __main__ when BOT_TOKEN present and thread started
 
 @bot.gateway.command
 def ready_handler(resp):
@@ -2309,6 +2310,10 @@ def bridge_listener(resp):
             banner_lines.append(f"{_F.YELLOW}⚠ No channel mappings configured!{_S.RESET_ALL}")
         
         banner_lines.append("")
+        if _slash_command_bot_started:
+            banner_lines.append("Slash /discum: enabled (Mirror World)")
+        else:
+            banner_lines.append(f"{_F.YELLOW}Slash /discum: disabled — add BOT_TOKEN (or DISCORD_BOT_TOKEN) to config/tokens.env to register /discum browse in Mirror World{_S.RESET_ALL}")
         banner_lines.append("Status: Ready and listening for messages")
         
         startup_banner("Discord2Discord Bridge v3.4 (Pure Forwarder)", banner_lines)
@@ -4072,6 +4077,7 @@ if __name__ == "__main__":
         pass
 
     # Start slash command bot in background so /discum browse is registered (same process)
+    global _slash_command_bot_started
     _cmd_bot_started = False
     try:
         import discum_command_bot as _cmd_module
@@ -4088,6 +4094,7 @@ if __name__ == "__main__":
             _cmd_thread = threading.Thread(target=_run_cmd_bot, daemon=True)
             _cmd_thread.start()
             _cmd_bot_started = True
+            _slash_command_bot_started = True
             _gid = getattr(_cmd_module, "MIRRORWORLD_SERVER_ID", None) or 0
             print(f"[INFO] Slash command bot started; syncing /discum to guild {_gid} (channel mapping via /discum browse).")
         elif not _cmd_token and VERBOSE:
