@@ -1060,6 +1060,40 @@ async def discum_command(interaction: discord.Interaction, action: app_commands.
     
     await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
+def _list_guild_commands_via_api(token: str, guild_id: int) -> None:
+    """List slash commands registered for the guild via Discord API (no bot run)."""
+    if not token or not guild_id:
+        print("[ERROR] Need BOT_TOKEN and guild ID to list commands.")
+        return
+    headers = {"Authorization": f"Bot {token}"}
+    try:
+        r = requests.get("https://discord.com/api/v10/users/@me", headers=headers, timeout=10)
+        if r.status_code != 200:
+            print(f"[ERROR] Token invalid or expired: HTTP {r.status_code}")
+            return
+        app_id = r.json().get("id")
+        if not app_id:
+            print("[ERROR] Could not get application ID")
+            return
+        url = f"https://discord.com/api/v10/applications/{app_id}/guilds/{guild_id}/commands"
+        r2 = requests.get(url, headers=headers, timeout=10)
+        if r2.status_code != 200:
+            print(f"[ERROR] Failed to fetch guild commands: HTTP {r2.status_code} - {r2.text[:200]}")
+            return
+        commands = r2.json()
+        print(f"Guild {guild_id} (Mirror World): {len(commands)} command(s) registered for this application")
+        for c in commands:
+            name = c.get("name", "?")
+            desc = (c.get("description") or "")[:60]
+            print(f"  /{name}  — {desc}")
+        if not commands:
+            print("  (none — start the discumbot with a bot token so it can sync /discum)")
+    except Exception as e:
+        print(f"[ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+
+
 async def main():
     """Main entry point."""
     print("=" * 50)
@@ -1069,10 +1103,29 @@ async def main():
     print(f"[INFO] Target guild: {MIRRORWORLD_SERVER_ID or 'Global'}")
     await bot.start(BOT_TOKEN)
 
+
 if __name__ == "__main__":
+    import argparse
+    ap = argparse.ArgumentParser(description="Discum slash command bot (/discum browse)")
+    ap.add_argument("--list-commands", action="store_true", help="List slash commands registered in Mirror World guild (then exit)")
+    ap.add_argument("--guild", type=int, default=None, help="Guild ID for --list-commands (default: mirrorworld_server_id from config)")
+    args = ap.parse_args()
+
+    if args.list_commands:
+        gid = args.guild or MIRRORWORLD_SERVER_ID
+        if not BOT_TOKEN:
+            print("[ERROR] No bot token. Set BOT_TOKEN in MWDiscumBot/config/tokens.env or ensure MWDataManagerBot/config/tokens.env has DATAMANAGER_BOT.")
+            sys.exit(1)
+        if not gid:
+            print("[ERROR] No guild ID. Set mirrorworld_server_id in config/settings.json or use --guild 1431314516364230689")
+            sys.exit(1)
+        print(f"[INFO] Using token from config (or DataManagerBot fallback); guild_id={gid}")
+        _list_guild_commands_via_api(BOT_TOKEN, gid)
+        sys.exit(0)
+
     import asyncio
     if not BOT_TOKEN:
-        print("[ERROR] Bot token not found. Set DISCORD_BOT_TOKEN or BOT_TOKEN in config/tokens.env")
+        print("[ERROR] Bot token not found. Set DISCORD_BOT_TOKEN or BOT_TOKEN in config/tokens.env (or use DataManagerBot token in MWDataManagerBot/config/tokens.env)")
         sys.exit(1)
     try:
         asyncio.run(main())
