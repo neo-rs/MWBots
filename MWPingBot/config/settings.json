@@ -1,5 +1,7 @@
 {
-  "ping_channel_ids": [],
-  "ping_delay_seconds": 60,
-  "mirrorworld_guild_id": 1431314516364230689
+  "verbose": true,
+  "mirrorworld_server_id": "1431314516364230689",
+  "cooldown_seconds": 30,
+  "dedupe_ttl_seconds": 30,
+  "ping_channel_ids": []
 }

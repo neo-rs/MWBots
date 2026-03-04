@@ -1,7 +1,8 @@
-"""PingBot slash command handler – manage ping channels and delay from Discord.
+"""PingBot slash command handler – manage ping channels and timings from Discord.
 
-Similar to /discum browse but for PingBot settings:
-- /ping settings: view/edit which channels get pings and the ping delay.
+Matches the live MWPingBot (mirror-world/MWPingBot/pingbot.py) settings.json schema:
+  mirrorworld_server_id, ping_channel_ids, cooldown_seconds, dedupe_ttl_seconds
+/ping settings: view and edit these in Discord.
 """
 
 import sys
@@ -25,7 +26,6 @@ from ping_config import (
     load_env_file,
     load_settings,
     save_settings,
-    DEFAULT_SETTINGS,
 )
 
 _CONFIG_RAW = load_env_file(TOKENS_ENV_PATH)
@@ -36,15 +36,16 @@ def _cfg_get(key: str, default: str = "") -> str:
     return v if v else default
 
 
-BOT_TOKEN = str(
-    _cfg_get("DISCORD_BOT_TOKEN") or _cfg_get("BOT_TOKEN") or ""
-).strip()
-_env_guild = int(_cfg_get("mirrorworld_server_id") or _cfg_get("MIRRORWORLD_SERVER") or _cfg_get("MIRRORWORLD_GUILD_ID") or "0") or 0
+BOT_TOKEN = str(_cfg_get("DISCORD_BOT_TOKEN") or _cfg_get("BOT_TOKEN") or _cfg_get("PING_BOT") or "").strip()
+_env_guild = int(_cfg_get("mirrorworld_server_id") or _cfg_get("MIRRORWORLD_SERVER") or "0") or 0
 if _env_guild:
     MIRRORWORLD_SERVER_ID = _env_guild
 else:
     _s = load_settings(SETTINGS_PATH)
-    MIRRORWORLD_SERVER_ID = int(_s.get("mirrorworld_guild_id") or 0)
+    try:
+        MIRRORWORLD_SERVER_ID = int(str(_s.get("mirrorworld_server_id") or "").strip() or "0")
+    except (TypeError, ValueError):
+        MIRRORWORLD_SERVER_ID = 0
 
 
 def _load_settings() -> Dict[str, Any]:
@@ -53,10 +54,6 @@ def _load_settings() -> Dict[str, Any]:
 
 def _save_settings(settings: Dict[str, Any]) -> bool:
     return save_settings(settings, SETTINGS_PATH)
-
-
-def _ui_embed(title: str, description: str, color: int = 0x5865F2) -> discord.Embed:
-    return discord.Embed(title=title, description=description, color=color)
 
 
 class PingCommandBot(commands.Bot):
@@ -85,7 +82,7 @@ class PingCommandBot(commands.Bot):
 bot = PingCommandBot()
 
 
-@bot.tree.command(name="ping", description="Manage PingBot: ping channels and delay")
+@bot.tree.command(name="ping", description="Manage PingBot: ping channels, cooldown, dedupe")
 @app_commands.describe(action="Action to perform")
 @app_commands.choices(action=[
     app_commands.Choice(name="settings", value="settings"),
@@ -97,7 +94,8 @@ async def ping_command(interaction: discord.Interaction, action: app_commands.Ch
     await interaction.response.defer(ephemeral=True)
     settings = _load_settings()
     channel_ids = settings.get("ping_channel_ids") or []
-    delay = settings.get("ping_delay_seconds", 60)
+    cooldown = settings.get("cooldown_seconds", 30)
+    dedupe = settings.get("dedupe_ttl_seconds", 30)
     owner_id = interaction.user.id
 
     class SettingsView(discord.ui.View):
@@ -123,22 +121,23 @@ async def ping_command(interaction: discord.Interaction, action: app_commands.Ch
                 lines.append(f"_... and {len(cids) - 25} more_")
             return "\n".join(lines)
 
-        @discord.ui.button(label="View channels & delay", style=discord.ButtonStyle.primary, emoji="📋", row=0)
-        async def view_btn(self, i: discord.Interaction, _b: discord.ui.Button):
-            s = _load_settings()
-            self.settings = s
+        def _embed(self, title_desc: str = "Current settings (same file as main PingBot).") -> discord.Embed:
+            s = self.settings
             cids = s.get("ping_channel_ids") or []
-            delay_s = s.get("ping_delay_seconds", 60)
-            embed = discord.Embed(
-                title="PingBot settings",
-                description="Current ping channels and delay.",
-                color=discord.Color.blurple(),
-            )
-            embed.add_field(name="Ping delay (seconds)", value=str(delay_s), inline=True)
-            embed.add_field(name="Ping channels", value=f"{len(cids)} channel(s)", inline=True)
-            embed.add_field(name="Channels", value=self._channels_text(), inline=False)
-            embed.set_footer(text="Use buttons below to add/remove channels or set delay.")
-            await i.response.edit_message(embed=embed, view=self)
+            coo = s.get("cooldown_seconds", 30)
+            ded = s.get("dedupe_ttl_seconds", 30)
+            emb = discord.Embed(title="PingBot settings", description=title_desc, color=discord.Color.blurple())
+            emb.add_field(name="Cooldown (s)", value=str(coo), inline=True)
+            emb.add_field(name="Dedupe TTL (s)", value=str(ded), inline=True)
+            emb.add_field(name="Ping channels", value=f"{len(cids)} channel(s)", inline=True)
+            emb.add_field(name="Channels", value=self._channels_text(), inline=False)
+            emb.set_footer(text="Add/remove channels or set cooldown/dedupe below. Main bot reloads settings on next check.")
+            return emb
+
+        @discord.ui.button(label="View channels & timings", style=discord.ButtonStyle.primary, emoji="📋", row=0)
+        async def view_btn(self, i: discord.Interaction, _b: discord.ui.Button):
+            self.settings = _load_settings()
+            await i.response.edit_message(embed=self._embed(), view=self)
 
         @discord.ui.button(label="Add channels", style=discord.ButtonStyle.secondary, emoji="➕", row=0)
         async def add_btn(self, i: discord.Interaction, _b: discord.ui.Button):
@@ -179,9 +178,7 @@ async def ping_command(interaction: discord.Interaction, action: app_commands.Ch
                 if _save_settings(s):
                     self.settings = s
                     await ii.response.send_message(f"✅ Added {added} channel(s). Total: {len(cids)}.", ephemeral=True)
-                    embed = discord.Embed(title="PingBot settings", description="Channels updated.", color=discord.Color.blurple())
-                    embed.add_field(name="Ping channels", value=self._channels_text(), inline=False)
-                    await ii.message.edit(embed=embed, view=self)
+                    await ii.message.edit(embed=self._embed("Channels updated."), view=self)
                 else:
                     await ii.response.send_message("❌ Failed to save.", ephemeral=True)
             select.callback = select_cb
@@ -217,9 +214,7 @@ async def ping_command(interaction: discord.Interaction, action: app_commands.Ch
                 if _save_settings(s):
                     self.settings = s
                     await ii.response.send_message("✅ Channel removed.", ephemeral=True)
-                    embed = discord.Embed(title="PingBot settings", description="Channel removed.", color=discord.Color.blurple())
-                    embed.add_field(name="Ping channels", value=self._channels_text(), inline=False)
-                    await ii.message.edit(embed=embed, view=self)
+                    await ii.message.edit(embed=self._embed("Channel removed."), view=self)
                 else:
                     await ii.response.send_message("❌ Failed to save.", ephemeral=True)
             select.callback = select_cb
@@ -227,13 +222,13 @@ async def ping_command(interaction: discord.Interaction, action: app_commands.Ch
             view.add_item(select)
             await i.response.send_message("Select channel to remove:", view=view, ephemeral=True)
 
-        @discord.ui.button(label="Set delay (seconds)", style=discord.ButtonStyle.secondary, emoji="⏱️", row=1)
-        async def delay_btn(self, i: discord.Interaction, _b: discord.ui.Button):
-            modal = discord.ui.Modal(title="Ping delay")
+        @discord.ui.button(label="Set cooldown (s)", style=discord.ButtonStyle.secondary, emoji="⏱️", row=1)
+        async def cooldown_btn(self, i: discord.Interaction, _b: discord.ui.Button):
+            modal = discord.ui.Modal(title="Cooldown (seconds)")
             inp = discord.ui.TextInput(
-                label="Delay (seconds)",
-                placeholder="e.g. 60",
-                default=str(self.settings.get("ping_delay_seconds", 60)),
+                label="Cooldown (seconds)",
+                placeholder="e.g. 30",
+                default=str(self.settings.get("cooldown_seconds", 30)),
                 required=True,
                 max_length=10,
             )
@@ -243,19 +238,45 @@ async def ping_command(interaction: discord.Interaction, action: app_commands.Ch
                     await ii.response.send_message("Not your modal.", ephemeral=True)
                     return
                 try:
-                    val = int(inp.value.strip())
-                    if val < 0:
-                        val = 0
-                    if val > 86400:
-                        val = 86400
+                    val = max(0, min(86400, int(inp.value.strip())))
                 except ValueError:
                     await ii.response.send_message("Enter a number (0–86400).", ephemeral=True)
                     return
                 s = _load_settings()
-                s["ping_delay_seconds"] = val
+                s["cooldown_seconds"] = val
                 if _save_settings(s):
                     self.settings = s
-                    await ii.response.send_message(f"✅ Ping delay set to **{val}** seconds.", ephemeral=True)
+                    await ii.response.send_message(f"✅ Cooldown set to **{val}** seconds.", ephemeral=True)
+                else:
+                    await ii.response.send_message("❌ Failed to save.", ephemeral=True)
+            modal.on_submit = on_submit
+            await i.response.send_modal(modal)
+
+        @discord.ui.button(label="Set dedupe TTL (s)", style=discord.ButtonStyle.secondary, emoji="🔄", row=1)
+        async def dedupe_btn(self, i: discord.Interaction, _b: discord.ui.Button):
+            modal = discord.ui.Modal(title="Dedupe TTL (seconds)")
+            inp = discord.ui.TextInput(
+                label="Dedupe TTL (seconds)",
+                placeholder="e.g. 30",
+                default=str(self.settings.get("dedupe_ttl_seconds", 30)),
+                required=True,
+                max_length=10,
+            )
+            modal.add_item(inp)
+            async def on_submit(ii: discord.Interaction):
+                if ii.user.id != self.owner_id:
+                    await ii.response.send_message("Not your modal.", ephemeral=True)
+                    return
+                try:
+                    val = max(0, min(86400, int(inp.value.strip())))
+                except ValueError:
+                    await ii.response.send_message("Enter a number (0–86400).", ephemeral=True)
+                    return
+                s = _load_settings()
+                s["dedupe_ttl_seconds"] = val
+                if _save_settings(s):
+                    self.settings = s
+                    await ii.response.send_message(f"✅ Dedupe TTL set to **{val}** seconds.", ephemeral=True)
                 else:
                     await ii.response.send_message("❌ Failed to save.", ephemeral=True)
             modal.on_submit = on_submit
@@ -264,13 +285,14 @@ async def ping_command(interaction: discord.Interaction, action: app_commands.Ch
     view = SettingsView(bot, settings, owner_id)
     embed = discord.Embed(
         title="PingBot settings",
-        description="Manage which channels get pings and the ping delay.",
+        description="Same config as live PingBot (config/settings.json).",
         color=discord.Color.blurple(),
     )
-    embed.add_field(name="Ping delay (seconds)", value=str(delay), inline=True)
+    embed.add_field(name="Cooldown (s)", value=str(cooldown), inline=True)
+    embed.add_field(name="Dedupe TTL (s)", value=str(dedupe), inline=True)
     embed.add_field(name="Ping channels", value=f"{len(channel_ids)} channel(s)", inline=True)
     embed.add_field(name="Channels", value=view._channels_text(), inline=False)
-    embed.set_footer(text="Use buttons to add/remove channels or set delay.")
+    embed.set_footer(text="Add/remove channels or set cooldown/dedupe. Main bot uses this file.")
     await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
 
@@ -280,7 +302,7 @@ async def main():
 
 if __name__ == "__main__":
     if not BOT_TOKEN:
-        print("[ERROR] Set BOT_TOKEN or DISCORD_BOT_TOKEN in MWPingBot/config/tokens.env")
+        print("[ERROR] Set BOT_TOKEN or PING_BOT in MWPingBot/config/tokens.env")
         sys.exit(1)
     import asyncio
     try:

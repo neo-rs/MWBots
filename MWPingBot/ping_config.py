@@ -1,9 +1,12 @@
-"""Canonical config for MWPingBot.
+"""Canonical config for MWPingBot – matches live pingbot.py schema.
 
-Paths and settings for ping channels and delay. Used by pingbot and ping_command_bot.
-Settings file: config/settings.json
-- ping_channel_ids: list of channel IDs where the bot sends pings
-- ping_delay_seconds: delay (seconds) between or before pings
+Live bot (mirror-world/MWPingBot/pingbot.py) reads config/settings.json with:
+  - mirrorworld_server_id: str (Mirror World guild ID)
+  - ping_channel_ids: list of channel IDs where the bot pings
+  - cooldown_seconds: per-channel cooldown before next ping
+  - dedupe_ttl_seconds: TTL for content dedupe
+  - verbose: bool (optional)
+This module uses the same keys so /ping settings and the main bot share one file.
 """
 
 from __future__ import annotations
@@ -18,10 +21,13 @@ CONFIG_DIR = str(_ROOT / "config")
 SETTINGS_PATH = str(_ROOT / "config" / "settings.json")
 TOKENS_ENV_PATH = str(_ROOT / "config" / "tokens.env")
 
+# Same schema as live pingbot.py
 DEFAULT_SETTINGS: Dict[str, Any] = {
+    "mirrorworld_server_id": "1431314516364230689",
     "ping_channel_ids": [],
-    "ping_delay_seconds": 60,
-    "mirrorworld_guild_id": 0,
+    "cooldown_seconds": 30,
+    "dedupe_ttl_seconds": 30,
+    "verbose": True,
 }
 
 
@@ -44,7 +50,7 @@ def load_env_file(path: str) -> Dict[str, str]:
 
 
 def load_settings(path: str | None = None) -> Dict[str, Any]:
-    """Load settings.json. Returns dict with ping_channel_ids, ping_delay_seconds, etc."""
+    """Load settings.json. Same format as live pingbot.py."""
     p = path or SETTINGS_PATH
     try:
         with open(p, "r", encoding="utf-8-sig") as f:
@@ -54,30 +60,40 @@ def load_settings(path: str | None = None) -> Dict[str, Any]:
     if not isinstance(data, dict):
         return dict(DEFAULT_SETTINGS)
     out = dict(DEFAULT_SETTINGS)
+    if "mirrorworld_server_id" in data:
+        out["mirrorworld_server_id"] = str(data["mirrorworld_server_id"] or "").strip()
     if "ping_channel_ids" in data:
         raw = data["ping_channel_ids"]
-        out["ping_channel_ids"] = [int(x) for x in raw if isinstance(x, (int, str)) and str(x).strip().isdigit()]
-    if "ping_delay_seconds" in data:
+        if isinstance(raw, list):
+            out["ping_channel_ids"] = [int(x) for x in raw if isinstance(x, (int, str)) and str(x).strip().isdigit()]
+        else:
+            out["ping_channel_ids"] = []
+    if "cooldown_seconds" in data:
         try:
-            out["ping_delay_seconds"] = int(data["ping_delay_seconds"])
+            out["cooldown_seconds"] = max(0, int(float(data["cooldown_seconds"])))
         except (TypeError, ValueError):
             pass
-    if "mirrorworld_guild_id" in data:
+    if "dedupe_ttl_seconds" in data:
         try:
-            out["mirrorworld_guild_id"] = int(data["mirrorworld_guild_id"])
+            out["dedupe_ttl_seconds"] = max(0, int(float(data["dedupe_ttl_seconds"])))
         except (TypeError, ValueError):
             pass
+    if "verbose" in data:
+        v = data["verbose"]
+        out["verbose"] = bool(v) if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on")
     return out
 
 
 def save_settings(settings: Dict[str, Any], path: str | None = None) -> bool:
-    """Write settings.json. Returns True on success."""
+    """Write settings.json. Preserves keys the main pingbot expects."""
     p = path or SETTINGS_PATH
     try:
         data = {
-            "ping_channel_ids": settings.get("ping_channel_ids", []),
-            "ping_delay_seconds": settings.get("ping_delay_seconds", 60),
-            "mirrorworld_guild_id": settings.get("mirrorworld_guild_id", 0),
+            "verbose": settings.get("verbose", True),
+            "mirrorworld_server_id": str(settings.get("mirrorworld_server_id") or "").strip() or "0",
+            "cooldown_seconds": max(0, int(settings.get("cooldown_seconds", 30))),
+            "dedupe_ttl_seconds": max(0, int(settings.get("dedupe_ttl_seconds", 30))),
+            "ping_channel_ids": list(settings.get("ping_channel_ids") or []),
         }
         os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
         with open(p, "w", encoding="utf-8") as f:

@@ -1,43 +1,52 @@
 # MWPingBot
 
-PingBot for Mirror World: pings in configured channels with a configurable delay.
+PingBot for Mirror World: pings in configured channels with cooldown and dedupe.  
+**Settings schema matches the live bot** at `mirror-world/MWPingBot/` on Oracle (same `config/settings.json`).
 
-## Slash commands (same idea as /discum for DiscumBot)
+## Live bot (pingbot.py)
 
-- **/ping settings** – Open the settings UI to:
-  - **View** current ping channels and delay
+- **Path on server:** `/home/rsadmin/bots/mirror-world/MWPingBot/`
+- **Config:** `config/settings.json`, `config/tokens.env`
+- **Keys in settings.json:**
+  - `mirrorworld_server_id` (string) – Mirror World guild ID
+  - `ping_channel_ids` (list) – channel IDs where the bot pings
+  - `cooldown_seconds` – per-channel cooldown before next ping
+  - `dedupe_ttl_seconds` – TTL for content dedupe
+  - `verbose` (optional bool)
+- **Token:** `PING_BOT` in `config/tokens.env`
+
+If `mirrorworld_server_id` is missing or `ping_channel_ids` is empty, the bot logs warnings and will not ping.
+
+## Slash commands (/ping settings)
+
+This repo adds **ping_command_bot.py** (and **ping_config.py**) so you can manage the same settings from Discord:
+
+- **/ping settings** – UI to view and edit:
+  - **View channels & timings** – current ping channels, cooldown, dedupe TTL
   - **Add channels** – select server channels to add for pinging
-  - **Remove channel** – remove a channel from the ping list
-  - **Set delay (seconds)** – set the ping delay (0–86400)
+  - **Remove channel** – remove one channel from the list
+  - **Set cooldown (s)** – cooldown_seconds (0–86400)
+  - **Set dedupe TTL (s)** – dedupe_ttl_seconds (0–86400)
 
-Settings are stored in `config/settings.json`:
-- `ping_channel_ids`: list of channel IDs that get pings
-- `ping_delay_seconds`: delay in seconds
-- `mirrorworld_guild_id`: target guild (Mirror World)
+Writes go to the same `config/settings.json` the main pingbot reads.
 
-## Running the command bot
+## Deployment
 
-1. **Bot token**  
-   Put `BOT_TOKEN` or `DISCORD_BOT_TOKEN` in `config/tokens.env` (same file as any other secrets).
+- **Live bot** runs from `mirror-world/MWPingBot/` (run_bot.sh pingbot → pingbot.py).
+- **This code** lives under `MWBots/MWPingBot/`. To use it on the server you can:
+  1. Copy `ping_config.py`, `ping_command_bot.py`, and `config/settings.json` (and optional `config/tokens.env.example`) into the live `MWPingBot/` folder so the main bot and slash command bot share one config dir; or
+  2. Deploy the whole `MWBots/MWPingBot/` tree and run the command bot from there (then both must point at the same `config/settings.json` path, or you sync that file).
 
-2. **Standalone**  
-   To only run the slash-command bot (no main pingbot):
-   ```bash
-   cd MWBots/MWPingBot
-   python -u ping_command_bot.py
-   ```
+Ensure **config/settings.json** on the server has at least:
 
-3. **With main pingbot**  
-   If you have a main `pingbot.py` that runs the pinging logic, start the command bot in a background thread (same pattern as DiscumBot):
-   ```python
-   import ping_command_bot as _ping_cmd
-   if getattr(_ping_cmd, "BOT_TOKEN", None):
-       import threading
-       threading.Thread(target=lambda: __import__("asyncio").run(_ping_cmd.bot.start(_ping_cmd.BOT_TOKEN)), daemon=True).start()
-   ```
-   The main pingbot should read `ping_config.load_settings()` to get `ping_channel_ids` and `ping_delay_seconds` and apply them.
+```json
+{
+  "verbose": true,
+  "mirrorworld_server_id": "1431314516364230689",
+  "cooldown_seconds": 30,
+  "dedupe_ttl_seconds": 30,
+  "ping_channel_ids": []
+}
+```
 
-## Config paths
-
-- `config/settings.json` – ping channels and delay (edited via /ping settings or manually).
-- `config/tokens.env` – `BOT_TOKEN`, optional `mirrorworld_server_id`.
+Then set `ping_channel_ids` via /ping settings or by editing the file. The main bot does not hot-reload; restart the service after editing if it only reads settings at startup.
