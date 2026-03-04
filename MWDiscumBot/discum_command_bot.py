@@ -964,24 +964,33 @@ class DiscumCommandBot(commands.Bot):
         self.tree = app_commands.CommandTree(self)
     
     async def setup_hook(self) -> None:
-        """Sync commands on startup so /discum browse is registered (with channel mapping)."""
+        """Sync slash commands to the Mirror World server so /discum is visible when typing slash."""
         try:
             if MIRRORWORLD_SERVER_ID:
                 guild_obj = discord.Object(id=MIRRORWORLD_SERVER_ID)
-                self.tree.copy_global_to(guild=guild_obj)
                 synced = await self.tree.sync(guild=guild_obj)
-                print(f"[INFO] Synced {len(synced)} command(s) to guild {MIRRORWORLD_SERVER_ID} (/discum browse available)")
+                print(f"[INFO] Slash commands synced to guild {MIRRORWORLD_SERVER_ID}: {len(synced)} command(s) (/discum should appear in server)")
             else:
                 synced = await self.tree.sync()
-                print(f"[INFO] Synced {len(synced)} command(s) globally (may take up to 1 hour to appear)")
+                print(f"[INFO] Slash commands synced globally: {len(synced)} command(s) (may take up to 1 hour to appear)")
         except Exception as e:
-            print(f"[ERROR] Command sync failed: {e}")
+            print(f"[ERROR] Slash command sync failed: {e}")
             import traceback
             traceback.print_exc()
-    
+
     async def on_ready(self) -> None:
         print(f"[INFO] Logged in as {self.user}")
-        print(f"[INFO] Ready to handle commands")
+        app_id = self.user.id if self.user else None
+        if app_id and MIRRORWORLD_SERVER_ID:
+            # If /discum doesn't show in Discord, re-invite the bot with applications.commands scope
+            invite_url = (
+                f"https://discord.com/api/oauth2/authorize?client_id={app_id}"
+                f"&permissions=0"
+                f"&scope=bot%20applications.commands"
+                f"&guild_id={MIRRORWORLD_SERVER_ID}"
+            )
+            print(f"[INFO] If /discum is not visible: ensure this bot is in the server with slash command scope. Re-invite: {invite_url}")
+        print(f"[INFO] Ready to handle /discum browse")
 
 # Create bot instance
 bot = DiscumCommandBot()
