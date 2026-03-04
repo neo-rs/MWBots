@@ -42,6 +42,63 @@ from discum_config import (
 )
 _CONFIG_RAW: Dict[str, str] = load_env_file(TOKENS_ENV_PATH)
 
+# Cache of source channel names (from discumbot-written source_channels.json) for "Server / #channel" display
+_SOURCE_CHANNEL_NAMES: Dict[int, Tuple[str, str]] = {}  # channel_id -> (guild_name, channel_name)
+_SOURCE_CHANNEL_FULL: Dict[int, Tuple[int, str, str]] = {}  # channel_id -> (guild_id, guild_name, channel_name)
+_SOURCE_GUILD_NAMES: Dict[int, str] = {}  # guild_id -> guild_name (for grouping when bot not in guild)
+_SOURCE_NAMES_LOADED = 0.0
+
+
+def _load_source_channel_names() -> Dict[int, Tuple[str, str]]:
+    """Load channel_id -> (guild_name, channel_name) from config/source_channels.json (written by discumbot)."""
+    global _SOURCE_CHANNEL_NAMES, _SOURCE_CHANNEL_FULL, _SOURCE_GUILD_NAMES, _SOURCE_NAMES_LOADED
+    path = str(Path(_CHANNEL_MAP_PATH).resolve().parent / "source_channels.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, Exception):
+        return _SOURCE_CHANNEL_NAMES
+    out = {}
+    full: Dict[int, Tuple[int, str, str]] = {}
+    guild_names: Dict[int, str] = {}
+    for guild in data.get("guilds", []) or []:
+        try:
+            gid = int(guild.get("guild_id", 0))
+        except (TypeError, ValueError):
+            continue
+        guild_name = (guild.get("guild_name") or f"Guild-{gid}").strip() or "Unknown"
+        guild_names[gid] = guild_name
+        for ch in guild.get("channels", []) or []:
+            try:
+                cid = int(ch.get("id", 0))
+                cname = (ch.get("name") or f"Channel-{cid}").strip() or str(cid)
+                out[cid] = (guild_name, cname)
+                full[cid] = (gid, guild_name, cname)
+            except (TypeError, ValueError):
+                continue
+    _SOURCE_CHANNEL_NAMES = out
+    _SOURCE_CHANNEL_FULL = full
+    _SOURCE_GUILD_NAMES = guild_names
+    _SOURCE_NAMES_LOADED = time.time()
+    return out
+
+
+def _get_channel_display_name(bot: commands.Bot, channel_id: int) -> str:
+    """Return 'ServerName / #channel-name' or fallback to 'Channel-XXXXXX' using bot cache or source_channels.json."""
+    try:
+        ch = bot.get_channel(channel_id)
+        if ch:
+            gname = getattr(ch.guild, "name", "Unknown") if hasattr(ch, "guild") and ch.guild else "Unknown"
+            cname = getattr(ch, "name", f"Channel-{channel_id}")
+            return f"{gname} / #{cname}"
+    except Exception:
+        pass
+    names = _load_source_channel_names()
+    if channel_id in names:
+        gname, cname = names[channel_id]
+        return f"{gname} / #{cname}"
+    return f"Channel-{str(channel_id)[-6:]}"
+
 # Path to DataManagerBot tokens (sibling of MWDiscumBot under repo root)
 # TOKENS_ENV_PATH = .../MWDiscumBot/config/tokens.env -> parent.parent.parent = repo root
 _repo_root = Path(TOKENS_ENV_PATH).resolve().parent.parent.parent
@@ -91,13 +148,34 @@ MIRRORWORLD_SERVER_ID = int(
     or "0"
 ) or 0
 
-# User token for browsing source guilds/channels (same as main discumbot)
+# User token for browsing source guilds/channels — must be the discumbot user token (same as main discumbot).
+# DataManager token is only for registering /discum; browse/mapping use this user token.
 USER_TOKEN = str(
     cfg_get("DISCUM_USER_DISCUMBOT")
     or cfg_get("DISCUM_BOT")
     or cfg_get("DISCORD_TOKEN")
     or ""
 ).strip()
+
+
+def _get_browse_user_token() -> str:
+    """Return the user token for browsing source guilds. Uses same source as main discumbot when in same process."""
+    token = (USER_TOKEN or "").strip()
+    if token:
+        return token
+    # When slash bot runs inside discumbot process (e.g. run_bot.sh discumbot → python discumbot.py), use the main discumbot's token
+    try:
+        mods = __import__("sys").modules
+        for name in ("discumbot", "__main__"):
+            m = mods.get(name)
+            if m and getattr(m, "__file__", "").endswith("discumbot.py"):
+                t = getattr(m, "DISCUM_BOT", None) or ""
+                if isinstance(t, str) and t.strip():
+                    return t.strip()
+    except Exception:
+        pass
+    return ""
+
 
 # Only exit when run as main; when imported (e.g. by discumbot.py) allow missing token
 if not MIRRORWORLD_SERVER_ID:
@@ -221,7 +299,8 @@ class MappingViewView(discord.ui.View):
         self.channel_map = channel_map
         self.owner_id = owner_id
         self.current_page = 0
-        self.guild_mappings: List[Tuple[discord.Guild, List[Tuple[int, str, Optional[str]]]]] = []
+        # (guild or None, mappings, guild_id) so we can show/sort by name when bot not in guild
+        self.guild_mappings: List[Tuple[Optional[discord.Guild], List[Tuple[int, str, Optional[str]]], int]] = []
         self._build_guild_mappings()
         self._rebuild_buttons()
     
@@ -229,39 +308,53 @@ class MappingViewView(discord.ui.View):
         """Build list of guilds and their channel mappings."""
         guild_dict: Dict[int, List[Tuple[int, str, Optional[str]]]] = {}
         
+        _load_source_channel_names()  # ensure cache for fallback
         for channel_id, webhook_url in self.channel_map.items():
+            dest_channel_id, dest_channel_name = resolve_webhook_destination(webhook_url, self.bot)
+            dest_display = dest_channel_name if dest_channel_name else "webhook"
             try:
                 channel = self.bot.get_channel(channel_id)
                 if channel and hasattr(channel, 'guild') and channel.guild:
                     guild_id = channel.guild.id
                     channel_name = getattr(channel, 'name', f'Channel-{str(channel_id)[-6:]}')
-                    # Resolve webhook destination
-                    dest_channel_id, dest_channel_name = resolve_webhook_destination(webhook_url, self.bot)
-                    dest_display = dest_channel_name if dest_channel_name else "webhook"
-                    
                     if guild_id not in guild_dict:
                         guild_dict[guild_id] = []
                     guild_dict[guild_id].append((channel_id, channel_name, dest_display))
+                else:
+                    # Bot not in source guild: use source_channels.json names
+                    info = _SOURCE_CHANNEL_FULL.get(channel_id)
+                    if info:
+                        gid, guild_name, channel_name = info
+                        if gid not in guild_dict:
+                            guild_dict[gid] = []
+                        guild_dict[gid].append((channel_id, channel_name, dest_display))
+                    else:
+                        if 0 not in guild_dict:
+                            guild_dict[0] = []
+                        guild_dict[0].append((channel_id, f"Channel-{str(channel_id)[-6:]}", dest_display))
             except Exception:
-                # Channel not found or error - still show it
                 if 0 not in guild_dict:
                     guild_dict[0] = []
-                dest_channel_id, dest_channel_name = resolve_webhook_destination(webhook_url, self.bot)
-                dest_display = dest_channel_name if dest_channel_name else "webhook"
                 guild_dict[0].append((channel_id, f"Channel-{str(channel_id)[-6:]}", dest_display))
         
-        # Sort by guild name
+        # Build list (guild or None, mappings, guild_id); use cached guild name when bot not in guild
         self.guild_mappings = []
         for guild_id, mappings in guild_dict.items():
             try:
                 guild = self.bot.get_guild(guild_id) if guild_id > 0 else None
-                guild_name = guild.name if guild else "Unknown Guild"
-                self.guild_mappings.append((guild, sorted(mappings, key=lambda x: x[1])))
+                self.guild_mappings.append((guild, sorted(mappings, key=lambda x: x[1]), guild_id))
             except Exception:
-                self.guild_mappings.append((None, sorted(mappings, key=lambda x: x[1])))
+                self.guild_mappings.append((None, sorted(mappings, key=lambda x: x[1]), guild_id))
         
-        # Sort by guild name
-        self.guild_mappings.sort(key=lambda x: x[0].name if x[0] else "ZZZ")
+        # Sort by guild name (cached name when guild object is None)
+        def _sort_key(item):
+            g, _, gid = item
+            return g.name if g else _SOURCE_GUILD_NAMES.get(gid, "ZZZ")
+        self.guild_mappings.sort(key=_sort_key)
+</think>
+Storing a display name with each group so we can sort and display when the guild object is None:
+<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>
+Read
     
     async def _guard(self, interaction: discord.Interaction) -> bool:
         """Check if user is authorized."""
@@ -281,12 +374,11 @@ class MappingViewView(discord.ui.View):
         max_page = max(0, len(self.guild_mappings) - 1)
         page = max(0, min(page, max_page))
         
-        guild, mappings = self.guild_mappings[page]
-        guild_name = guild.name if guild else "Unknown Guild"
+        guild, mappings, guild_id = self.guild_mappings[page]
+        guild_name = guild.name if guild else _SOURCE_GUILD_NAMES.get(guild_id, "Unknown Guild")
         
         lines = [f"**{guild_name}**"]
-        if guild:
-            lines.append(f"*Guild ID: {guild.id}*")
+        lines.append(f"*Guild ID: {guild.id if guild else guild_id}*")
         lines.append("")
         
         for channel_id, channel_name, dest_name in mappings:
@@ -402,21 +494,11 @@ class ManageMappingsView(discord.ui.View):
             # No mappings - show message
             return
         
-        # Build select menu with channels
+        # Build select menu with channels (Server / #channel-name for clarity)
         options: List[discord.SelectOption] = []
         for channel_id, webhook_url in list(self.channel_map.items())[:25]:  # Discord limit
-            try:
-                channel = self.bot.get_channel(channel_id)
-                if channel:
-                    channel_name = getattr(channel, 'name', f'Channel-{channel_id}')
-                    guild_name = getattr(channel.guild, 'name', 'Unknown') if hasattr(channel, 'guild') and channel.guild else 'Unknown'
-                    label = f"{guild_name} / {channel_name}"
-                else:
-                    label = f"Channel-{str(channel_id)[-6:]}"
-            except Exception:
-                label = f"Channel-{str(channel_id)[-6:]}"
-            
-            # Truncate label
+            label = _get_channel_display_name(self.bot, channel_id)
+            # Truncate label (Discord select limit 100)
             if len(label) > 100:
                 label = label[:97] + "..."
             
@@ -463,17 +545,8 @@ class ManageMappingsView(discord.ui.View):
         
         if self.selected_channel_id:
             webhook_url = self.channel_map.get(self.selected_channel_id, "")
-            try:
-                channel = self.bot.get_channel(self.selected_channel_id)
-                if channel:
-                    channel_name = getattr(channel, 'name', f'Channel-{self.selected_channel_id}')
-                    guild_name = getattr(channel.guild, 'name', 'Unknown') if hasattr(channel, 'guild') and channel.guild else 'Unknown'
-                    embed.add_field(name="Selected Channel", value=f"**{guild_name}** / #{channel_name}\n`{self.selected_channel_id}`", inline=False)
-                else:
-                    embed.add_field(name="Selected Channel", value=f"`{self.selected_channel_id}`", inline=False)
-            except Exception:
-                embed.add_field(name="Selected Channel", value=f"`{self.selected_channel_id}`", inline=False)
-            
+            display_name = _get_channel_display_name(self.bot, self.selected_channel_id)
+            embed.add_field(name="Selected Channel", value=f"**{display_name}**\n`{self.selected_channel_id}`", inline=False)
             embed.add_field(name="Current Webhook", value=f"`{webhook_url[:50]}...`" if len(webhook_url) > 50 else f"`{webhook_url}`", inline=False)
         
         embed.set_footer(text=f"{len(self.channel_map)} total mappings")
@@ -657,14 +730,15 @@ async def _discum_browse_for_guild(interaction: discord.Interaction, *, source_g
     except Exception:
         pass
     sgid = int(source_guild_id or 0)
-    if sgid <= 0 or not USER_TOKEN:
+    user_token = _get_browse_user_token()
+    if sgid <= 0 or not user_token:
         await interaction.followup.send(
             embed=_ui_embed("Discum browse", "Invalid source guild or missing user token.", color=0xED4245),
             ephemeral=True,
         )
         return
     from discord_user_api import list_source_guild_channels, fetch_channel_messages_page
-    info = await list_source_guild_channels(source_guild_id=sgid, user_token=USER_TOKEN)
+    info = await list_source_guild_channels(source_guild_id=sgid, user_token=user_token)
     if not info.get("ok"):
         await interaction.followup.send(
             embed=_ui_embed("Discum browse", f"Browse failed: {info.get('reason')} http={info.get('http_status')}", color=0xED4245),
@@ -689,7 +763,7 @@ async def _discum_browse_for_guild(interaction: discord.Interaction, *, source_g
     mapped_ids: Set[int] = set(mapped.keys())
 
     async def _fetch_preview(cid: int) -> str:
-        ok, msgs, reason = await fetch_channel_messages_page(source_channel_id=cid, user_token=USER_TOKEN, limit=1)
+        ok, msgs, reason = await fetch_channel_messages_page(source_channel_id=cid, user_token=user_token, limit=1)
         if not ok:
             if reason == "forbidden_or_unauthorized":
                 return "(no access)"
@@ -1015,15 +1089,16 @@ async def discum_command(interaction: discord.Interaction, action: app_commands.
 
         @discord.ui.button(label="Browse source & map", style=discord.ButtonStyle.secondary, emoji="🗺️", row=0)
         async def browse_source(self, interaction: discord.Interaction, button: discord.ui.Button):
-            if not USER_TOKEN:
+            browse_token = _get_browse_user_token()
+            if not browse_token:
                 await interaction.response.edit_message(
-                    content="**Missing user token.** Set DISCUM_BOT (or DISCUM_USER_DISCUMBOT) in config/tokens.env for browsing source guilds.",
+                    content="**Missing user token for browsing.** The DataManager token is only used to register /discum. Browsing and mapping use the **discumbot user token**: set DISCUM_BOT or DISCUM_USER_DISCUMBOT in MWDiscumBot/config/tokens.env (same as the main discumbot).",
                     embed=None,
                     view=None
                 )
                 return
             from discord_user_api import list_user_guilds
-            info = await list_user_guilds(user_token=USER_TOKEN)
+            info = await list_user_guilds(user_token=browse_token)
             if not info.get("ok"):
                 await interaction.response.edit_message(
                     content=f"**Could not list guilds.** {info.get('reason', 'unknown')}",
