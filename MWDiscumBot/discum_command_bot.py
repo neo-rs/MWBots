@@ -42,6 +42,9 @@ from discum_config import (
 )
 _CONFIG_RAW: Dict[str, str] = load_env_file(TOKENS_ENV_PATH)
 
+# Path to DataManagerBot tokens (sibling folder); used as fallback for slash-command bot token
+_DATAMANAGER_TOKENS_PATH = str(Path(TOKENS_ENV_PATH).resolve().parent.parent / "MWDataManagerBot" / "config" / "tokens.env")
+
 
 def cfg_get(key: str, default: str = "") -> str:
     """Get config value from env file, then os.environ, then settings.json."""
@@ -61,13 +64,21 @@ def cfg_get(key: str, default: str = "") -> str:
         pass
     return default
 
-# Get bot token (for slash commands, we need a bot token, not user account token)
+# Get bot token for slash commands. Discumbot is not a bot; use DataManagerBot token if no token in MWDiscumBot.
 BOT_TOKEN = str(
     cfg_get("DISCORD_BOT_TOKEN")
     or cfg_get("DISCORD_BOT_DISCUMBOT")
     or cfg_get("BOT_TOKEN")
     or ""
 ).strip()
+if not BOT_TOKEN and os.path.exists(_DATAMANAGER_TOKENS_PATH):
+    _dm_tokens = load_env_file(_DATAMANAGER_TOKENS_PATH)
+    BOT_TOKEN = str(_dm_tokens.get("DATAMANAGER_BOT") or _dm_tokens.get("DISCORD_BOT_DATAMANAGER") or "").strip()
+    if BOT_TOKEN:
+        try:
+            print("[INFO] Using DataManagerBot token for /discum slash commands (no token in MWDiscumBot/config/tokens.env)")
+        except Exception:
+            pass
 
 # Guild ID for command sync (same sources as main discumbot)
 MIRRORWORLD_SERVER_ID = int(

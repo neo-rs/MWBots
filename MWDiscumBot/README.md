@@ -20,7 +20,7 @@ Config loading is centralized in `discum_config.py` (single source of truth for 
 
 ## Slash command
 
-- **`/discum browse`** – View and manage channel mappings (requires bot token in `tokens.env` as `DISCORD_BOT_TOKEN` or `BOT_TOKEN`). Synced to the guild set in `settings.json` as `mirrorworld_server_id` (canonical Mirror World ID: `1431314516364230689`).
+- **`/discum browse`** – View and manage channel mappings. Uses a **bot** token: either set `DISCORD_BOT_TOKEN` or `BOT_TOKEN` in `MWDiscumBot/config/tokens.env`, or (if unset) the **DataManagerBot** token from `MWDataManagerBot/config/tokens.env` (`DATAMANAGER_BOT`) is used so you don’t need a separate bot. Synced to the guild in `settings.json` (`mirrorworld_server_id`; Mirror World: `1431314516364230689`).
 
 ## Guild IDs (from CANONICAL_RULES.md)
 

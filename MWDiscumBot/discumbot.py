@@ -4077,7 +4077,6 @@ if __name__ == "__main__":
         pass
 
     # Start slash command bot in background so /discum browse is registered (same process)
-    global _slash_command_bot_started
     _cmd_bot_started = False
     try:
         import discum_command_bot as _cmd_module
