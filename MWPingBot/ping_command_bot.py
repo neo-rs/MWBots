@@ -182,6 +182,64 @@ async def _ping_settings_impl(interaction: discord.Interaction, action: app_comm
             view.add_item(select)
             await i.response.send_message("Select channel(s) to add:", view=view, ephemeral=True)
 
+        @discord.ui.button(label="Add by name or ID", style=discord.ButtonStyle.secondary, emoji="🔍", row=0)
+        async def add_by_name_btn(self, i: discord.Interaction, _b: discord.ui.Button):
+            guild = i.guild
+            if not guild:
+                await i.response.send_message("Use this in a server.", ephemeral=True)
+                return
+            modal = discord.ui.Modal(title="Add channel by name or ID")
+            inp = discord.ui.TextInput(
+                label="Channel name or ID",
+                placeholder="e.g. my-channel or 1434971502817706035",
+                required=True,
+                max_length=100,
+            )
+            modal.add_item(inp)
+            async def on_submit(ii: discord.Interaction):
+                if ii.user.id != self.owner_id:
+                    await ii.response.send_message("Not your modal.", ephemeral=True)
+                    return
+                raw = inp.value.strip().strip("#")
+                if not raw:
+                    await ii.response.send_message("Enter a channel name or numeric ID.", ephemeral=True)
+                    return
+                # Try as ID first
+                try:
+                    cid = int(raw)
+                    ch = guild.get_channel(cid)
+                    if ch and isinstance(ch, discord.TextChannel):
+                        channels_to_add = [ch]
+                    else:
+                        await ii.response.send_message(f"Channel ID `{cid}` not found or not a text channel in this server.", ephemeral=True)
+                        return
+                except ValueError:
+                    # Search by name (case-insensitive; exact then partial)
+                    raw_lower = raw.lower()
+                    text_chans = [c for c in guild.text_channels if isinstance(c, discord.TextChannel)]
+                    exact = [c for c in text_chans if c.name.lower() == raw_lower]
+                    partial = [c for c in text_chans if raw_lower in c.name.lower()] if not exact else []
+                    channels_to_add = exact or partial[:1]
+                    if not channels_to_add:
+                        await ii.response.send_message(f"No text channel named like **{raw}** in this server.", ephemeral=True)
+                        return
+                s = _load_settings()
+                cids = list(s.get("ping_channel_ids") or [])
+                added = 0
+                for ch in channels_to_add:
+                    if ch.id not in cids:
+                        cids.append(ch.id)
+                        added += 1
+                s["ping_channel_ids"] = cids
+                if _save_settings(s):
+                    self.settings = s
+                    name = f"#{channels_to_add[0].name}" if channels_to_add else "?"
+                    await ii.response.send_message(f"✅ Added **{name}**. Total ping channels: **{len(cids)}**. Click «View channels & timings» to refresh.", ephemeral=True)
+                else:
+                    await ii.response.send_message("❌ Failed to save.", ephemeral=True)
+            modal.on_submit = on_submit
+            await i.response.send_modal(modal)
+
         @discord.ui.button(label="Remove channel", style=discord.ButtonStyle.danger, emoji="➖", row=1)
         async def remove_btn(self, i: discord.Interaction, _b: discord.ui.Button):
             cids = self.settings.get("ping_channel_ids") or []
