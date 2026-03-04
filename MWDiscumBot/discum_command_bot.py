@@ -25,55 +25,34 @@ if sys.platform == 'win32':
     except Exception:
         pass
 
-# Standalone root = MWDiscumBot folder
-try:
-    _project_root = str(Path(__file__).resolve().parent)
-except Exception:
-    _project_root = os.path.dirname(os.path.abspath(__file__))
-
 import discord
 from discord import app_commands
 from discord.ext import commands
 import requests
 
-# Config paths
-_CONFIG_DIR = os.path.join(_project_root, "config")
-_CHANNEL_MAP_PATH = os.path.join(_CONFIG_DIR, "channel_map.json")
-_SETTINGS_RUNTIME_PATH = os.path.join(_CONFIG_DIR, "settings.runtime.json")
-_TOKENS_ENV_PATH = os.path.join(_CONFIG_DIR, "tokens.env")
-_SETTINGS_JSON_PATH = os.path.join(_CONFIG_DIR, "settings.json")
+# Canonical config (single source of truth)
+from discum_config import (
+    CHANNEL_MAP_PATH as _CHANNEL_MAP_PATH,
+    TOKENS_ENV_PATH,
+    SETTINGS_JSON_PATH,
+    SETTINGS_RUNTIME_PATH,
+    load_env_file,
+    load_channel_map,
+    save_channel_map,
+)
+_CONFIG_RAW: Dict[str, str] = load_env_file(TOKENS_ENV_PATH)
 
-# Load config
-_CONFIG_RAW: Dict[str, str] = {}
-
-def _load_env_file(path: str) -> None:
-    """Minimal .env reader."""
-    try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or line.startswith("-"):
-                    continue
-                if "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                key = key.strip()
-                value = value.strip().strip('"').strip("'")
-                if not key:
-                    continue
-                _CONFIG_RAW[key] = value
-    except FileNotFoundError:
-        return
-    except Exception:
-        pass
 
 def cfg_get(key: str, default: str = "") -> str:
-    """Get config value from env or settings.json."""
+    """Get config value from env file, then os.environ, then settings.json."""
     env_val = _CONFIG_RAW.get(key, "").strip()
     if env_val:
         return env_val
+    env_val = os.environ.get(key, "").strip() or os.environ.get(key.upper(), "").strip()
+    if env_val:
+        return env_val
     try:
-        with open(_SETTINGS_JSON_PATH, "r", encoding="utf-8-sig") as f:
+        with open(SETTINGS_JSON_PATH, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
             if isinstance(data, dict):
                 val = data.get(key, default)
@@ -81,9 +60,6 @@ def cfg_get(key: str, default: str = "") -> str:
     except Exception:
         pass
     return default
-
-# Load config
-_load_env_file(_TOKENS_ENV_PATH)
 
 # Get bot token (for slash commands, we need a bot token, not user account token)
 BOT_TOKEN = str(
@@ -114,38 +90,17 @@ USER_TOKEN = str(
 if not MIRRORWORLD_SERVER_ID:
     print("[WARN] mirrorworld_server_id not set. Commands will be global (may take up to 1 hour to sync)")
 
-def load_channel_map() -> Dict[int, str]:
-    """Load channel map JSON ({source_channel_id: webhook_url})."""
-    try:
-        with open(_CHANNEL_MAP_PATH, "r", encoding="utf-8-sig") as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        return {}
-    except Exception:
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    out: Dict[int, str] = {}
-    for k, v in data.items():
-        try:
-            cid = int(str(k).strip())
-        except Exception:
-            continue
-        url = str(v or "").strip()
-        if url:
-            out[cid] = url
-    return out
+def _load_channel_map() -> Dict[int, str]:
+    """Load channel map from canonical path."""
+    return load_channel_map(_CHANNEL_MAP_PATH)
 
-def save_channel_map(channel_map: Dict[int, str]) -> bool:
-    """Save channel map JSON."""
-    try:
-        data = {str(k): v for k, v in channel_map.items()}
-        with open(_CHANNEL_MAP_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        return True
-    except Exception as e:
-        print(f"[ERROR] Failed to save channel map: {e}")
-        return False
+
+def _save_channel_map(channel_map: Dict[int, str]) -> bool:
+    """Save channel map to canonical path."""
+    ok = save_channel_map(_CHANNEL_MAP_PATH, channel_map)
+    if not ok:
+        print("[ERROR] Failed to save channel map.")
+    return ok
 
 
 def ensure_discum_source_guild_id(guild_id: int) -> None:
@@ -155,8 +110,8 @@ def ensure_discum_source_guild_id(guild_id: int) -> None:
         return
     try:
         data: Dict[str, Any] = {}
-        if os.path.exists(_SETTINGS_RUNTIME_PATH):
-            with open(_SETTINGS_RUNTIME_PATH, "r", encoding="utf-8-sig") as f:
+        if os.path.exists(SETTINGS_RUNTIME_PATH):
+            with open(SETTINGS_RUNTIME_PATH, "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
         if not isinstance(data, dict):
             data = {}
@@ -166,7 +121,7 @@ def ensure_discum_source_guild_id(guild_id: int) -> None:
             gids.append(str(gid))
         data["source_guild_ids"] = gids
         data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-        with open(_SETTINGS_RUNTIME_PATH, "w", encoding="utf-8") as f:
+        with open(SETTINGS_RUNTIME_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
     except Exception:
         pass
@@ -392,7 +347,7 @@ class MappingViewView(discord.ui.View):
         if not await self._guard(interaction):
             return
         # Reload channel map
-        self.channel_map = load_channel_map()
+        self.channel_map = _load_channel_map()
         self._build_guild_mappings()
         self.current_page = 0
         await self._update_message(interaction)
@@ -533,7 +488,7 @@ class ManageMappingsView(discord.ui.View):
         if self.selected_channel_id in self.channel_map:
             del self.channel_map[self.selected_channel_id]
             # Save to file
-            if save_channel_map(self.channel_map):
+            if _save_channel_map(self.channel_map):
                 await interaction.response.send_message(f"✅ Removed mapping for channel `{self.selected_channel_id}`", ephemeral=True)
                 # Reload main view
                 self.selected_channel_id = None
@@ -560,7 +515,7 @@ class ManageMappingsView(discord.ui.View):
         if not await self._guard(interaction):
             return
         # Go back to view mappings
-        channel_map = load_channel_map()
+        channel_map = _load_channel_map()
         view = MappingViewView(self.bot, channel_map, self.owner_id)
         content, _ = view._get_page_content(0)
         embed = discord.Embed(
@@ -604,7 +559,7 @@ class WebhookUpdateModal(discord.ui.Modal, title="Update Webhook URL"):
             
             # Update mapping
             self.channel_map[self.channel_id] = new_url
-            if save_channel_map(self.channel_map):
+            if _save_channel_map(self.channel_map):
                 await interaction.response.send_message(f"✅ Updated webhook URL for channel `{self.channel_id}`", ephemeral=True)
             else:
                 await interaction.response.send_message("❌ Failed to save changes.", ephemeral=True)
@@ -717,7 +672,7 @@ async def _discum_browse_for_guild(interaction: discord.Interaction, *, source_g
             continue
         pid = int(ch.get("parent_id") or 0)
         by_parent.setdefault(pid, []).append(ch)
-    mapped = load_channel_map()
+    mapped = _load_channel_map()
     mapped_ids: Set[int] = set(mapped.keys())
 
     async def _fetch_preview(cid: int) -> str:
@@ -911,11 +866,11 @@ async def _discum_browse_for_guild(interaction: discord.Interaction, *, source_g
                     if not wh_url:
                         await ii.response.send_message("Failed to create/use webhook (need Manage Webhooks).", ephemeral=True)
                         return
-                    m = load_channel_map()
+                    m = _load_channel_map()
                     for src_cid in self.selected_ids:
                         m[int(src_cid)] = str(wh_url)
                         mapped_ids.add(int(src_cid))
-                    save_channel_map(m)
+                    _save_channel_map(m)
                     ensure_discum_source_guild_id(sgid)
                     await ii.response.send_message(
                         embed=_ui_embed(
@@ -934,14 +889,14 @@ async def _discum_browse_for_guild(interaction: discord.Interaction, *, source_g
             if not self.selected_ids:
                 await i.response.send_message("No source channels selected.", ephemeral=True)
                 return
-            m = load_channel_map()
+            m = _load_channel_map()
             removed = 0
             for src_cid in self.selected_ids:
                 if int(src_cid) in m:
                     m.pop(int(src_cid), None)
                     removed += 1
                 mapped_ids.discard(int(src_cid))
-            save_channel_map(m)
+            _save_channel_map(m)
             await i.response.send_message(
                 embed=_ui_embed("Discum mapping updated", f"Unmapped `{removed}` channel(s).", color=0xFEE75C),
                 ephemeral=True,
@@ -961,7 +916,8 @@ class DiscumCommandBot(commands.Bot):
         intents.guilds = True
         intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
-        self.tree = app_commands.CommandTree(self)
+        # Do not create a new CommandTree - Bot already has self.tree; a second one raises
+        # "This client already has an associated command tree"
     
     async def setup_hook(self) -> None:
         """Sync slash commands to the Mirror World server so /discum is visible when typing slash."""
@@ -1009,7 +965,7 @@ async def discum_command(interaction: discord.Interaction, action: app_commands.
     await interaction.response.defer(ephemeral=True)
     
     # Load channel map (always show the first screen with the button so the button is visible)
-    channel_map = load_channel_map()
+    channel_map = _load_channel_map()
     owner_id = int(interaction.user.id)
     
     class BrowseView(discord.ui.View):
@@ -1024,7 +980,7 @@ async def discum_command(interaction: discord.Interaction, action: app_commands.
         
         @discord.ui.button(label="View Current Mappings", style=discord.ButtonStyle.primary, emoji="📋", row=0)
         async def view_mappings(self, interaction: discord.Interaction, button: discord.ui.Button):
-            channel_map = load_channel_map()
+            channel_map = _load_channel_map()
             if not channel_map:
                 await interaction.response.edit_message(
                     content="**No channel mappings configured.** Use « Browse source & map » or the main discum bot to add mappings.",

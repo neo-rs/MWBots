@@ -148,9 +148,6 @@ def _fmt_user(name: str) -> str:
     label = name if name.startswith("@") else f"@{name}"
     return _c(label or "@unknown", _F.MAGENTA)
 
-def _fmt_arrow() -> str:
-    return _c(" > ", _F.WHITE)
-
 def log_info(msg: str, context: dict = None) -> None:
     """Log info message using unified logger."""
     try:
@@ -241,23 +238,6 @@ def startup_banner(bot_name: str, lines: list[str]) -> None:
             print(f"{_F.WHITE}{line}{_S.RESET_ALL}")
         print(_F.WHITE + bar + _S.RESET_ALL + "\n")
 
-def uname(user) -> str:
-    try:
-        return getattr(user, "name", None) or getattr(user, "display_name", None) or str(user)
-    except Exception:
-        return "unknown"
-
-def gname(guild) -> str:
-    try:
-        return getattr(guild, "name", None) or "unknown"
-    except Exception:
-        return "unknown"
-
-def cname(channel) -> str:
-    try:
-        return getattr(channel, "name", None) or "unknown"
-    except Exception:
-        return "unknown"
 # --- end helpers ---
 
 # Ensure default Windows console color so ANSI colors show properly
@@ -268,37 +248,17 @@ try:
 except Exception:
     pass
 
-# ================= Standalone config (no neonxt.* deps) =================
-# This file is intended to run standalone (as a single Python script) without importing
-# other bot modules or central "runner" systems.
-
-_CONFIG_DIR = os.path.join(_project_root, "config")
-_TOKENS_ENV_PATH = os.path.join(_CONFIG_DIR, "tokens.env")
-_SETTINGS_JSON_PATH = os.path.join(_CONFIG_DIR, "settings.json")
-_SETTINGS_RUNTIME_JSON_PATH = os.path.join(_CONFIG_DIR, "settings.runtime.json")
-
-_CONFIG_RAW: Dict[str, str] = {}
-
-def _load_env_file(path: str) -> None:
-    """Minimal .env reader (no python-dotenv dependency)."""
-    try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or line.startswith("-"):
-                    continue
-                if "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                key = key.strip()
-                value = value.strip().strip('"').strip("'")
-                if not key:
-                    continue
-                _CONFIG_RAW[key] = value
-    except FileNotFoundError:
-        return
-    except Exception:
-        return
+# ================= Standalone config (canonical: discum_config) =================
+from discum_config import (
+    CONFIG_DIR as _CONFIG_DIR,
+    CHANNEL_MAP_PATH,
+    TOKENS_ENV_PATH,
+    SETTINGS_JSON_PATH,
+    SETTINGS_RUNTIME_JSON_PATH,
+    load_env_file,
+    load_channel_map,
+)
+_CONFIG_RAW: Dict[str, str] = load_env_file(TOKENS_ENV_PATH)
 
 def _load_settings_json(path: str) -> Dict[str, Any]:
     try:
@@ -328,13 +288,11 @@ def _set_raw(key: str, value: Any) -> None:
     except Exception:
         return
 
-_load_env_file(_TOKENS_ENV_PATH)
-
 # Load settings (JSON base + optional runtime overrides).
 # - settings.json is tracked (code/config defaults)
 # - settings.runtime.json is runtime-only (NOT tracked) so tools can add guild ids without losing them on update
-_settings = _load_settings_json(_SETTINGS_JSON_PATH) or {}
-_runtime_settings = _load_settings_json(_SETTINGS_RUNTIME_JSON_PATH) or {}
+_settings = _load_settings_json(SETTINGS_JSON_PATH) or {}
+_runtime_settings = _load_settings_json(SETTINGS_RUNTIME_PATH) or {}
 try:
     if isinstance(_runtime_settings, dict) and _runtime_settings:
         # Merge: runtime overlays base.
@@ -477,32 +435,7 @@ MIRRORWORLD_SERVER = MIRRORWORLD_SERVERS[0] if MIRRORWORLD_SERVERS else MIRRORWO
 # Legacy/back-compat: DISCORD_GUILD_ID maps to source guild id
 DISCORD_GUILD_ID: str = SOURCE_GUILD_ID or str(cfg_get("RS_SERVER_GUILD_ID") or "").strip()
 
-# Channel map (source channel -> webhook url)
-CHANNEL_MAP_PATH = os.path.join(_CONFIG_DIR, "channel_map.json")
-
-def load_channel_map(path: str) -> Dict[int, str]:
-    """Load channel map JSON ({source_channel_id: webhook_url})."""
-    try:
-        # Some Windows editors save JSON with a UTF-8 BOM; utf-8-sig handles both.
-        with open(path, "r", encoding="utf-8-sig") as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        return {}
-    except Exception:
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    out: Dict[int, str] = {}
-    for k, v in data.items():
-        try:
-            cid = int(str(k).strip())
-        except Exception:
-            continue
-        url = str(v or "").strip()
-        if url:
-            out[cid] = url
-    return out
-
+# Channel map (source channel -> webhook url); path and loader from discum_config
 CHANNEL_MAP: Dict[int, str] = load_channel_map(CHANNEL_MAP_PATH)
 
 # Startup: ensure channel_map.json exists and log mapping status
