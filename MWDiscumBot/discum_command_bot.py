@@ -42,8 +42,10 @@ from discum_config import (
 )
 _CONFIG_RAW: Dict[str, str] = load_env_file(TOKENS_ENV_PATH)
 
-# Path to DataManagerBot tokens (sibling folder); used as fallback for slash-command bot token
-_DATAMANAGER_TOKENS_PATH = str(Path(TOKENS_ENV_PATH).resolve().parent.parent / "MWDataManagerBot" / "config" / "tokens.env")
+# Path to DataManagerBot tokens (sibling of MWDiscumBot under repo root)
+# TOKENS_ENV_PATH = .../MWDiscumBot/config/tokens.env -> parent.parent.parent = repo root
+_repo_root = Path(TOKENS_ENV_PATH).resolve().parent.parent.parent
+_DATAMANAGER_TOKENS_PATH = str(_repo_root / "MWDataManagerBot" / "config" / "tokens.env")
 
 
 def cfg_get(key: str, default: str = "") -> str:
@@ -935,6 +937,8 @@ class DiscumCommandBot(commands.Bot):
         try:
             if MIRRORWORLD_SERVER_ID:
                 guild_obj = discord.Object(id=MIRRORWORLD_SERVER_ID)
+                # Commands are registered globally on the tree; copy to guild then sync so they appear in the server
+                self.tree.copy_global_to(guild=guild_obj)
                 synced = await self.tree.sync(guild=guild_obj)
                 print(f"[INFO] Slash commands synced to guild {MIRRORWORLD_SERVER_ID}: {len(synced)} command(s) (/discum should appear in server)")
             else:
