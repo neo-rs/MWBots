@@ -82,12 +82,8 @@ class PingCommandBot(commands.Bot):
 bot = PingCommandBot()
 
 
-@bot.tree.command(name="ping", description="Manage PingBot: ping channels, cooldown, dedupe")
-@app_commands.describe(action="Action to perform")
-@app_commands.choices(action=[
-    app_commands.Choice(name="settings", value="settings"),
-])
-async def ping_command(interaction: discord.Interaction, action: app_commands.Choice[str]):
+async def _ping_settings_impl(interaction: discord.Interaction, action: app_commands.Choice[str], bot_obj: commands.Bot):
+    """Shared handler for /ping settings (used by standalone bot or when registered on main pingbot)."""
     if action.value != "settings":
         await interaction.response.send_message("❌ Unknown action.", ephemeral=True)
         return
@@ -282,7 +278,7 @@ async def ping_command(interaction: discord.Interaction, action: app_commands.Ch
             modal.on_submit = on_submit
             await i.response.send_modal(modal)
 
-    view = SettingsView(bot, settings, owner_id)
+    view = SettingsView(bot_obj, settings, owner_id)
     embed = discord.Embed(
         title="PingBot settings",
         description="Same config as live PingBot (config/settings.json).",
@@ -294,6 +290,39 @@ async def ping_command(interaction: discord.Interaction, action: app_commands.Ch
     embed.add_field(name="Channels", value=view._channels_text(), inline=False)
     embed.set_footer(text="Add/remove channels or set cooldown/dedupe. Main bot uses this file.")
     await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+
+def register_ping_commands_to_bot(bot_instance: commands.Bot) -> None:
+    """Register /ping slash command on an existing bot (e.g. main pingbot). Call before bot.run()."""
+    @bot_instance.tree.command(name="ping", description="Manage PingBot: ping channels, cooldown, dedupe")
+    @app_commands.describe(action="Action to perform")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="settings", value="settings"),
+    ])
+    async def _ping_cmd(interaction: discord.Interaction, action: app_commands.Choice[str]):
+        await _ping_settings_impl(interaction, action, bot_instance)
+    # command is registered by decorator
+    pass
+
+
+async def sync_ping_commands(bot_instance: commands.Bot, guild_id: int) -> None:
+    """Sync /ping to guild. Call from main bot's setup_hook."""
+    if guild_id:
+        guild_obj = discord.Object(id=guild_id)
+        bot_instance.tree.copy_global_to(guild=guild_obj)
+        await bot_instance.tree.sync(guild=guild_obj)
+    else:
+        await bot_instance.tree.sync()
+
+
+# Standalone: register on our own bot for running ping_command_bot.py alone
+@bot.tree.command(name="ping", description="Manage PingBot: ping channels, cooldown, dedupe")
+@app_commands.describe(action="Action to perform")
+@app_commands.choices(action=[
+    app_commands.Choice(name="settings", value="settings"),
+])
+async def ping_command(interaction: discord.Interaction, action: app_commands.Choice[str]):
+    await _ping_settings_impl(interaction, action, bot)
 
 
 async def main():

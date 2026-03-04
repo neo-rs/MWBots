@@ -5,6 +5,7 @@ Single responsibility:
   - Listen in the MirrorWorld destination server
   - If a message is posted in configured ping channels, send @everyone
   - Enforce per-channel cooldown + content dedupe to prevent spam
+  - Register /ping slash command (same process) to manage settings in Discord
 
 Config (standalone, local-only):
   - config/tokens.env     (secrets only)
@@ -536,9 +537,29 @@ def _main() -> None:
     if not PING_CHANNEL_IDS:
         log_warn(f"ping_channel_ids is empty in {str(_SETTINGS_JSON_PATH)} (bot will run but never ping)")
 
+    # Register /ping slash command (same bot, same token) and sync to guild
+    try:
+        import ping_command_bot as _ping_cmd
+        _ping_cmd.register_ping_commands_to_bot(bot)
+        _gid = int(MIRRORWORLD_SERVER_ID or "0") or 0
+        _orig_setup = getattr(bot, "setup_hook", None)
+
+        async def _setup_hook():
+            if _orig_setup and asyncio.iscoroutinefunction(_orig_setup):
+                await _orig_setup()
+            if _gid:
+                try:
+                    await _ping_cmd.sync_ping_commands(bot, _gid)
+                    log_info("Slash /ping: synced to guild (use /ping settings in Discord)")
+                except Exception as e:
+                    log_error("Slash /ping sync failed", error=e)
+
+        bot.setup_hook = _setup_hook
+    except Exception as e:
+        log_warn(f"Could not register /ping slash command: {e}")
+
     bot.run(PING_BOT_TOKEN)
 
 
 if __name__ == "__main__":
     _main()
-
