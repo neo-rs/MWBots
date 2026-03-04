@@ -99,12 +99,6 @@ def _get_channel_display_name(bot: commands.Bot, channel_id: int) -> str:
         return f"{gname} / #{cname}"
     return f"Channel-{str(channel_id)[-6:]}"
 
-# Path to DataManagerBot tokens (sibling of MWDiscumBot under repo root)
-# TOKENS_ENV_PATH = .../MWDiscumBot/config/tokens.env -> parent.parent.parent = repo root
-_repo_root = Path(TOKENS_ENV_PATH).resolve().parent.parent.parent
-_DATAMANAGER_TOKENS_PATH = str(_repo_root / "MWDataManagerBot" / "config" / "tokens.env")
-
-
 def cfg_get(key: str, default: str = "") -> str:
     """Get config value from env file, then os.environ, then settings.json."""
     env_val = _CONFIG_RAW.get(key, "").strip()
@@ -123,21 +117,13 @@ def cfg_get(key: str, default: str = "") -> str:
         pass
     return default
 
-# Get bot token for slash commands. Discumbot is not a bot; use DataManagerBot token if no token in MWDiscumBot.
+# Bot token for slash command registration (add to MWDiscumBot/config/tokens.env — same file as user token)
 BOT_TOKEN = str(
     cfg_get("DISCORD_BOT_TOKEN")
     or cfg_get("DISCORD_BOT_DISCUMBOT")
     or cfg_get("BOT_TOKEN")
     or ""
 ).strip()
-if not BOT_TOKEN and os.path.exists(_DATAMANAGER_TOKENS_PATH):
-    _dm_tokens = load_env_file(_DATAMANAGER_TOKENS_PATH)
-    BOT_TOKEN = str(_dm_tokens.get("DATAMANAGER_BOT") or _dm_tokens.get("DISCORD_BOT_DATAMANAGER") or "").strip()
-    if BOT_TOKEN:
-        try:
-            print("[INFO] Using DataManagerBot token for /discum slash commands (no token in MWDiscumBot/config/tokens.env)")
-        except Exception:
-            pass
 
 # Guild ID for command sync (same sources as main discumbot)
 MIRRORWORLD_SERVER_ID = int(
@@ -148,8 +134,7 @@ MIRRORWORLD_SERVER_ID = int(
     or "0"
 ) or 0
 
-# User token for browsing source guilds/channels — must be the discumbot user token (same as main discumbot).
-# DataManager token is only for registering /discum; browse/mapping use this user token.
+# User token for browsing source guilds/channels (same as main discumbot; set in config/tokens.env).
 USER_TOKEN = str(
     cfg_get("DISCUM_USER_DISCUMBOT")
     or cfg_get("DISCUM_BOT")
@@ -351,11 +336,7 @@ class MappingViewView(discord.ui.View):
             g, _, gid = item
             return g.name if g else _SOURCE_GUILD_NAMES.get(gid, "ZZZ")
         self.guild_mappings.sort(key=_sort_key)
-</think>
-Storing a display name with each group so we can sort and display when the guild object is None:
-<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>
-Read
-    
+
     async def _guard(self, interaction: discord.Interaction) -> bool:
         """Check if user is authorized."""
         try:
@@ -1092,7 +1073,7 @@ async def discum_command(interaction: discord.Interaction, action: app_commands.
             browse_token = _get_browse_user_token()
             if not browse_token:
                 await interaction.response.edit_message(
-                    content="**Missing user token for browsing.** The DataManager token is only used to register /discum. Browsing and mapping use the **discumbot user token**: set DISCUM_BOT or DISCUM_USER_DISCUMBOT in MWDiscumBot/config/tokens.env (same as the main discumbot).",
+                    content="**Missing user token for browsing.** Set DISCUM_BOT or DISCUM_USER_DISCUMBOT in config/tokens.env (same as the main discumbot).",
                     embed=None,
                     view=None
                 )
@@ -1193,18 +1174,18 @@ if __name__ == "__main__":
     if args.list_commands:
         gid = args.guild or MIRRORWORLD_SERVER_ID
         if not BOT_TOKEN:
-            print("[ERROR] No bot token. Set BOT_TOKEN in MWDiscumBot/config/tokens.env or ensure MWDataManagerBot/config/tokens.env has DATAMANAGER_BOT.")
+            print("[ERROR] No bot token. Set BOT_TOKEN (or DISCORD_BOT_TOKEN) in MWDiscumBot/config/tokens.env to register /discum.")
             sys.exit(1)
         if not gid:
             print("[ERROR] No guild ID. Set mirrorworld_server_id in config/settings.json or use --guild 1431314516364230689")
             sys.exit(1)
-        print(f"[INFO] Using token from config (or DataManagerBot fallback); guild_id={gid}")
+        print(f"[INFO] guild_id={gid}")
         _list_guild_commands_via_api(BOT_TOKEN, gid)
         sys.exit(0)
 
     import asyncio
     if not BOT_TOKEN:
-        print("[ERROR] Bot token not found. Set DISCORD_BOT_TOKEN or BOT_TOKEN in config/tokens.env (or use DataManagerBot token in MWDataManagerBot/config/tokens.env)")
+        print("[ERROR] Bot token not found. Set BOT_TOKEN or DISCORD_BOT_TOKEN in MWDiscumBot/config/tokens.env to register /discum.")
         sys.exit(1)
     try:
         asyncio.run(main())
