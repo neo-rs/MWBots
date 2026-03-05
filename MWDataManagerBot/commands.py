@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fetchall import (
+    delete_empty_overflow_categories,
     iter_fetchall_entries,
     fetch_channel_messages_page,
     get_fetchall_clear_category_ids,
@@ -841,6 +842,8 @@ def register_commands(*, bot, forwarder) -> None:
             )
             deleted = 0
             errors = 0
+            deleted_empty_cats = 0
+            errors_empty_cats = 0
             last_edit = 0.0
             done_total = 0
             for cat_idx, (cat, targets) in enumerate(targets_by_cat, start=1):
@@ -875,6 +878,11 @@ def register_commands(*, bot, forwarder) -> None:
                             pass
                     # Small delay to be gentle
                     await asyncio.sleep(0.35)
+            # Delete empty overflow categories (e.g. Daily Upcoming Drops -overflow-2)
+            try:
+                deleted_empty_cats, errors_empty_cats = await delete_empty_overflow_categories(ctx.guild, cats)
+            except Exception as e:
+                log_warn(f"fetchclear delete_empty_overflow_categories failed: {type(e).__name__}: {e}")
         finally:
             if FETCHALL_MAINTENANCE_EVENT is not None:
                 try:
@@ -892,12 +900,14 @@ def register_commands(*, bot, forwarder) -> None:
                 "Fetchclear (DONE)\n"
                 f"{_render_progress_bar(int(total), int(total))}\n"
                 f"deleted={deleted}/{total} errors={errors} categories={len(cats)} delete_all={delete_all}"
+                + (f" | empty overflow categories deleted={deleted_empty_cats} errors={errors_empty_cats}" if (deleted_empty_cats or errors_empty_cats) else "")
             )[:1950]
         )
 
         try:
             log_info(
-                f"[fetchclear] delete done deleted={deleted}/{total} errors={errors} categories={len(cats)} delete_all={delete_all}",
+                f"[fetchclear] delete done deleted={deleted}/{total} errors={errors} categories={len(cats)} delete_all={delete_all}"
+                + (f" empty_overflow_deleted={deleted_empty_cats} empty_overflow_errors={errors_empty_cats}" if (deleted_empty_cats or errors_empty_cats) else ""),
                 event="fetchclear_delete_done",
                 deleted=int(deleted),
                 total=int(total),
@@ -905,6 +915,8 @@ def register_commands(*, bot, forwarder) -> None:
                 categories=int(len(cats)),
                 delete_all=bool(delete_all),
                 category_ids_csv=str(ids_csv),
+                empty_overflow_deleted=int(deleted_empty_cats),
+                empty_overflow_errors=int(errors_empty_cats),
             )
         except Exception:
             pass

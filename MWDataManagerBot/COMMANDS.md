@@ -34,6 +34,7 @@ Notes:
 - **Category selection**:
   - If `category_ids_csv` is omitted, the bot shows a **dropdown** so you can pick **one or more categories**.
   - When you specify a base category (e.g. Daily Upcoming Drops), overflow categories (e.g. Daily Upcoming Drops-overflow-2) are **automatically included** so all mirror channels are cleaned.
+- **Cleanup**: After deleting channels, any **empty overflow categories** (e.g. `Daily Upcoming Drops -overflow-2` with zero channels) are deleted automatically.
 
 ### `/status`
 

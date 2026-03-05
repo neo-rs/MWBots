@@ -374,6 +374,37 @@ _channel_locks: Dict[int, asyncio.Lock] = {}
 _recent_ping_hashes: Dict[str, float] = {}  # key: "channel_id:md5", value: ts
 
 
+_last_ping_channels_mtime: float = 0.0
+
+
+def _reload_ping_channels_from_file() -> None:
+    """Re-read settings.json and update PING_CHANNEL_IDS and _PING_CHANNEL_SET so /ping settings changes apply without restart."""
+    global PING_CHANNEL_IDS, _PING_CHANNEL_SET, _last_ping_channels_mtime
+    try:
+        mtime = _SETTINGS_JSON_PATH.stat().st_mtime if _SETTINGS_JSON_PATH.exists() else 0.0
+        if mtime <= _last_ping_channels_mtime:
+            return
+        _last_ping_channels_mtime = mtime
+        data = _load_settings_json(_SETTINGS_JSON_PATH)
+        raw = data.get("ping_channel_ids") or []
+        if isinstance(raw, str):
+            raw_list = [x.strip() for x in raw.split(",") if x.strip()]
+        elif isinstance(raw, list):
+            raw_list = raw
+        else:
+            raw_list = []
+        new_ids: List[int] = []
+        for x in raw_list:
+            try:
+                new_ids.append(int(str(x).strip()))
+            except Exception:
+                continue
+        PING_CHANNEL_IDS = new_ids
+        _PING_CHANNEL_SET = set(PING_CHANNEL_IDS)
+    except Exception:
+        pass
+
+
 def _hash_message_for_ping(message: discord.Message) -> str:
     """Deterministic content hash for ping dedupe."""
     content = (getattr(message, "content", "") or "")[:500]
@@ -482,6 +513,8 @@ async def on_message(message: discord.Message) -> None:
 
     if MIRRORWORLD_SERVER_ID and str(message.guild.id) != str(MIRRORWORLD_SERVER_ID):
         return
+
+    _reload_ping_channels_from_file()
 
     try:
         channel_id = int(message.channel.id)

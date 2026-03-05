@@ -571,6 +571,49 @@ def get_fetchall_clear_category_ids(destination_guild, *, base_category_ids: Set
     return out if out else base_category_ids
 
 
+def _is_overflow_category_name(name: str) -> bool:
+    """True if name matches ...-overflow-N (our overflow category naming)."""
+    if not name or not isinstance(name, str):
+        return False
+    nm = name.strip()
+    if "-overflow-" not in nm:
+        return False
+    try:
+        tail = nm.split("-overflow-", 1)[1]
+        return bool(tail and tail.isdigit())
+    except Exception:
+        return False
+
+
+async def delete_empty_overflow_categories(guild, category_objects: List[Any]) -> Tuple[int, int]:
+    """
+    Delete any category in category_objects that is an overflow category and has zero channels.
+    Called after fetchclear so empty overflow categories (e.g. Daily Upcoming Drops -overflow-2) are removed.
+    Returns (deleted_count, error_count).
+    """
+    deleted = 0
+    errors = 0
+    for cat in list(category_objects or []):
+        try:
+            name = str(getattr(cat, "name", "") or "").strip()
+            if not _is_overflow_category_name(name):
+                continue
+            chans = list(getattr(cat, "channels", []) or [])
+            if len(chans) > 0:
+                continue
+            if not hasattr(cat, "delete"):
+                continue
+            await cat.delete(reason="MWDataManagerBot fetchclear: delete empty overflow category")
+            deleted += 1
+            await asyncio.sleep(0.35)
+        except Exception as e:
+            log_warn(
+                f"fetchclear delete empty overflow category failed (category_id={getattr(cat, 'id', None)}): {type(e).__name__}: {e}"
+            )
+            errors += 1
+    return deleted, errors
+
+
 def _list_overflow_categories(destination_guild, *, base_category) -> List[Any]:
     """Return overflow categories in numeric order."""
     base_name = str(getattr(base_category, "name", "") or "").strip()
