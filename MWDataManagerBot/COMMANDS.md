@@ -17,6 +17,8 @@ Notes:
 - **Description**: Create/ensure Mirror World mirror channels for each configured mapping (channel setup). Also **prunes** stale channels:
   - **Orphaned mirrors**: deletes mirrors whose source channel no longer exists
   - **Date-expired mirrors** (when `require_date: true`): deletes channels with past dates in name (e.g. `02-27 | ...` when today is March)
+  - **Inactive mirrors**: deletes mirror channels that have had no new message in the last **2 days** (avoids channel buildup)
+  - **Empty separators**: removes divider/separator channels (e.g. `📅---flipfluence---`) when no mirror channels remain for that source guild
 - **Permissions**: `manage_channels`
 - **Usage**:
   - `/fetchall` (all mappings)

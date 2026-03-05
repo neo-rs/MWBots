@@ -7,7 +7,7 @@ import re
 import time
 import threading
 import unicodedata
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
@@ -24,6 +24,8 @@ _FETCHALL_RUNTIME_PATH = _CONFIG_DIR / "fetchall_mappings.runtime.json"
 _FILE_LOCK = threading.RLock()
 _DISCORD_API_BASE = "https://discord.com/api/v9"
 _CATEGORY_CHANNEL_LIMIT = 50
+# Prune mirror channels that have no message in the last N days (avoids channels piling up).
+_INACTIVE_PRUNE_DAYS = 2
 
 # Maintenance coordination:
 # - fetchclear / startup clear will SET the event while deleting channels
@@ -366,6 +368,67 @@ def _is_channel_date_stale(channel_name: str, *, days_grace: int = 1) -> bool:
     # Use today for cutoff; date is stale if it's before (today - grace)
     cutoff = date.today() - timedelta(days=days_grace)
     return d < cutoff
+
+
+async def _is_mirror_channel_inactive(mirror_ch, *, days: float = 2.0) -> bool:
+    """
+    True if the mirror channel has no message in the last `days` days (or is empty).
+    Used to prune channels that have gone inactive and avoid channel buildup.
+    """
+    try:
+        last_msg = None
+        async for msg in mirror_ch.history(limit=1):
+            last_msg = msg
+            break
+        if last_msg is None:
+            return True
+        now = datetime.now(timezone.utc)
+        created = getattr(last_msg, "created_at", None)
+        if created is None:
+            return False
+        if getattr(created, "tzinfo", None) is None:
+            created = created.replace(tzinfo=timezone.utc)
+        delta_seconds = (now - created).total_seconds()
+        return delta_seconds > (days * 86400)
+    except Exception:
+        return False
+
+
+async def _prune_separators_with_no_mirrors(destination_guild, *, source_guild_id: int) -> int:
+    """
+    Delete separator channels for this source_guild_id if there are no mirror channels left.
+    Returns number of separators deleted.
+    """
+    try:
+        import discord
+    except Exception:
+        return 0
+    sgid = int(source_guild_id or 0)
+    if sgid <= 0:
+        return 0
+    # Count mirror channels for this source guild (scan all destination text channels)
+    mirror_count = 0
+    for ch in list(getattr(destination_guild, "text_channels", []) or []):
+        info = _parse_mirror_topic(getattr(ch, "topic", None))
+        if info and info[0] == sgid:
+            mirror_count += 1
+    if mirror_count > 0:
+        return 0
+    # Find and delete separator(s) for this source guild (match by topic: "separator for ... (sgid)")
+    deleted = 0
+    for ch in list(getattr(destination_guild, "text_channels", []) or []):
+        topic = str(getattr(ch, "topic", "") or "")
+        if not topic.startswith("separator for") or str(sgid) not in topic:
+            continue
+        if not hasattr(ch, "delete"):
+            continue
+        try:
+            await ch.delete(reason="MWDataManagerBot fetchall: remove separator (no mirror channels left)")
+            deleted += 1
+            await asyncio.sleep(0.35)
+        except Exception as e:
+            log_warn(f"[FETCHALL] prune separator failed channel_id={getattr(ch, 'id', None)}: {type(e).__name__}: {e}")
+    return deleted
 
 
 # Cache for source guild branding (name + icon url) to avoid repeated REST calls during polling.
@@ -1546,7 +1609,7 @@ async def run_fetchall(
             except Exception:
                 pass
 
-    # Prune stale mirrors: orphaned (source channel gone) and date-expired (require_date mappings)
+    # Prune stale mirrors: orphaned (source channel gone), date-expired (require_date), or inactive (no message in 2 days)
     valid_src_ids = {int(sid) for sid, _ in (src_channels_to_mirror or []) if int(sid or 0) > 0}
     require_date = bool(entry.get("require_date", False))
     pruned = 0
@@ -1563,20 +1626,36 @@ async def run_fetchall(
                 should_delete = True
             elif require_date and _is_channel_date_stale(ch_name):
                 should_delete = True
+            elif await _is_mirror_channel_inactive(mirror_ch, days=float(_INACTIVE_PRUNE_DAYS)):
+                should_delete = True
             if should_delete:
                 try:
-                    await mirror_ch.delete(reason="MWDataManagerBot fetchall prune (orphaned or date-expired)")
+                    await mirror_ch.delete(
+                        reason="MWDataManagerBot fetchall prune (orphaned, date-expired, or inactive 2d)"
+                    )
                     pruned += 1
                     await asyncio.sleep(0.35)
                 except Exception as e:
                     log_warn(f"[FETCHALL] prune failed channel_id={getattr(mirror_ch,'id',None)}: {type(e).__name__}: {e}")
                     errors += 1
+                continue
+            await asyncio.sleep(0.15)
 
         if pruned > 0:
-            log_fetchall(f"source={source_guild_id} pruned={pruned} (orphaned or date-expired)")
+            log_fetchall(f"source={source_guild_id} pruned={pruned} (orphaned, date-expired, or inactive 2d)")
+
+    # Remove separator(s) for this source guild if no mirror channels remain
+    separators_pruned = 0
+    if destination_guild is not None:
+        try:
+            separators_pruned = await _prune_separators_with_no_mirrors(destination_guild, source_guild_id=source_guild_id)
+        except Exception as e:
+            log_warn(f"[FETCHALL] prune separators failed: {type(e).__name__}: {e}")
+        if separators_pruned > 0:
+            log_fetchall(f"source={source_guild_id} separators_pruned={separators_pruned} (no mirrors left)")
 
     log_fetchall(
-        f"source={source_guild_id} dest_category={dest_category_id} mode={mode} attempted={attempted} created={created} existing={kept} pruned={pruned}"
+        f"source={source_guild_id} dest_category={dest_category_id} mode={mode} attempted={attempted} created={created} existing={kept} pruned={pruned} separators_pruned={separators_pruned}"
     )
     if progress_cb is not None:
         try:
@@ -1593,6 +1672,7 @@ async def run_fetchall(
                     "existing": int(kept),
                     "errors": int(errors),
                     "pruned": int(pruned),
+                    "separators_pruned": int(separators_pruned),
                 }
             )
         except Exception:
@@ -1641,6 +1721,7 @@ async def run_fetchall(
         "existing": kept,
         "errors": errors,
         "pruned": pruned,
+        "separators_pruned": separators_pruned,
     }
 
 
