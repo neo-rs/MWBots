@@ -157,6 +157,13 @@ def is_truly_upcoming_explain(text: str) -> Dict[str, Any]:
         r"released\s+on\s+\d",
         r"dropped\s+to",
         r"lowest\s+ever\s+drop",
+        # Restock/monitor alerts: not "upcoming" (future drop), so exclude from UPCOMING channel
+        r"item\s+restocked",
+        r"item\s+restock\b",
+        r"\brestocked\b",
+        r"restock\s+alert",
+        r"back\s+in\s+stock",
+        r"in\s+stock\s+now",
     ]
     for pat in hard_exclusion_patterns:
         try:
