@@ -878,7 +878,12 @@ def register_commands(*, bot, forwarder) -> None:
                             pass
                     # Small delay to be gentle
                     await asyncio.sleep(0.35)
-            # Delete empty overflow categories (e.g. Daily Upcoming Drops -overflow-2)
+            # Delete empty overflow categories (e.g. Daily Upcoming Drops 🗓️ -overflow-2); refresh guild so channel counts are current
+            try:
+                if ctx.guild and hasattr(ctx.guild, "fetch_channels") and callable(getattr(ctx.guild, "fetch_channels")):
+                    await ctx.guild.fetch_channels()
+            except Exception:
+                pass
             try:
                 deleted_empty_cats, errors_empty_cats = await delete_empty_overflow_categories(ctx.guild, cats)
             except Exception as e:

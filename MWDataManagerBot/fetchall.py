@@ -635,14 +635,14 @@ def get_fetchall_clear_category_ids(destination_guild, *, base_category_ids: Set
 
 
 def _is_overflow_category_name(name: str) -> bool:
-    """True if name matches ...-overflow-N (our overflow category naming)."""
+    """True if name matches ...-overflow-N (our overflow category naming). Handles emoji and spaces (e.g. 'Daily Upcoming Drops 🗓️ -overflow-2')."""
     if not name or not isinstance(name, str):
         return False
     nm = name.strip()
     if "-overflow-" not in nm:
         return False
     try:
-        tail = nm.split("-overflow-", 1)[1]
+        tail = nm.split("-overflow-", 1)[1].strip()
         return bool(tail and tail.isdigit())
     except Exception:
         return False
@@ -651,16 +651,29 @@ def _is_overflow_category_name(name: str) -> bool:
 async def delete_empty_overflow_categories(guild, category_objects: List[Any]) -> Tuple[int, int]:
     """
     Delete any category in category_objects that is an overflow category and has zero channels.
-    Called after fetchclear so empty overflow categories (e.g. Daily Upcoming Drops -overflow-2) are removed.
+    Called after fetchclear so empty overflow categories (e.g. Daily Upcoming Drops 🗓️ -overflow-2) are removed.
     Returns (deleted_count, error_count).
     """
     deleted = 0
     errors = 0
+    # Refresh guild channel cache so category.channels is up to date after channel deletes
+    try:
+        if hasattr(guild, "fetch_channels") and callable(getattr(guild, "fetch_channels")):
+            await guild.fetch_channels()
+    except Exception:
+        pass
     for cat in list(category_objects or []):
         try:
             name = str(getattr(cat, "name", "") or "").strip()
             if not _is_overflow_category_name(name):
                 continue
+            # Re-resolve category from guild after refresh so .channels is current
+            try:
+                cat_id = int(getattr(cat, "id", 0) or 0)
+                if cat_id > 0:
+                    cat = guild.get_channel(cat_id) or cat
+            except Exception:
+                pass
             chans = list(getattr(cat, "channels", []) or [])
             if len(chans) > 0:
                 continue
