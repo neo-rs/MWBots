@@ -309,7 +309,11 @@ async def _safe_edit(i: discord.Interaction, **kwargs) -> None:
         try:
             await i.edit_original_response(**kwargs)
         except Exception:
-            return
+            try:
+                if getattr(i, "message", None) is not None and hasattr(i, "followup"):
+                    await i.followup.edit_message(i.message.id, **kwargs)
+            except Exception:
+                return
 
 
 async def _safe_send_ephemeral(i: discord.Interaction, content: str) -> None:
@@ -411,7 +415,7 @@ class MappingViewView(discord.ui.View):
         
         for channel_id, channel_name, dest_name in mappings:
             dest_display = dest_name if dest_name else "webhook"
-            lines.append(f"💥・{channel_name} `{channel_id}` → {dest_display}")
+            lines.append(f"💥・{channel_name} → {dest_display}")
         
         content = "\n".join(lines)
         return content, max_page
@@ -545,7 +549,13 @@ class ManageMappingsView(discord.ui.View):
 
             if dest_id:
                 key = f"dest:{int(dest_id)}"
-                disp = f"<#{int(dest_id)}>"
+                try:
+                    ch = self.bot.get_channel(int(dest_id))
+                    disp = (ch.name if ch else None) or dest_name or f"#channel-{int(dest_id)}"
+                except Exception:
+                    disp = dest_name or f"#channel-{int(dest_id)}"
+                if not (disp or "").strip():
+                    disp = f"#channel-{int(dest_id)}"
             else:
                 name = dest_name or "Unknown destination"
                 key = f"name:{name}"
