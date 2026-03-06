@@ -275,6 +275,53 @@ def resolve_webhook_destination(webhook_url: str, bot: commands.Bot) -> Tuple[Op
         pass
     return None, None
 
+
+# ---- Interaction helpers (used across ALL Views) ----
+
+def _resp_done(i: discord.Interaction) -> bool:
+    try:
+        return bool(i.response.is_done())
+    except Exception:
+        return False
+
+
+async def _safe_defer_ephemeral(i: discord.Interaction) -> None:
+    """Acknowledge interaction if not yet acknowledged (prevents 'This interaction failed')."""
+    if _resp_done(i):
+        return
+    try:
+        await i.response.defer(ephemeral=True)
+    except Exception:
+        return
+
+
+async def _safe_edit(i: discord.Interaction, **kwargs) -> None:
+    """
+    Edit the original interaction message safely whether or not we've deferred already.
+    Works for both slash-command responses and component interactions.
+    """
+    try:
+        if _resp_done(i):
+            await i.edit_original_response(**kwargs)
+        else:
+            await i.response.edit_message(**kwargs)
+    except Exception:
+        try:
+            await i.edit_original_response(**kwargs)
+        except Exception:
+            return
+
+
+async def _safe_send_ephemeral(i: discord.Interaction, content: str) -> None:
+    """Send an ephemeral message safely whether or not we've responded already."""
+    try:
+        if _resp_done(i):
+            await i.followup.send(content=content, ephemeral=True)
+        else:
+            await i.response.send_message(content=content, ephemeral=True)
+    except Exception:
+        return
+
 class MappingViewView(discord.ui.View):
     """View for displaying channel mappings organized by guild."""
     
@@ -341,7 +388,7 @@ class MappingViewView(discord.ui.View):
         """Check if user is authorized."""
         try:
             if int(interaction.user.id) != self.owner_id:
-                await interaction.response.send_message("❌ This view is not for you.", ephemeral=True)
+                await _safe_send_ephemeral(interaction, "❌ This view is not for you.")
                 return False
         except Exception:
             return False
@@ -395,6 +442,7 @@ class MappingViewView(discord.ui.View):
     
     async def _update_message(self, interaction: discord.Interaction) -> None:
         """Update the message with current page."""
+        await _safe_defer_ephemeral(interaction)
         content, max_page = self._get_page_content(self.current_page)
         
         embed = discord.Embed(
@@ -405,18 +453,12 @@ class MappingViewView(discord.ui.View):
         embed.set_footer(text=f"Page {self.current_page + 1} of {max_page + 1} ({len(self.channel_map)} total mappings)")
         
         self._rebuild_buttons()
-        
-        try:
-            await interaction.response.edit_message(embed=embed, view=self)
-        except Exception:
-            try:
-                await interaction.followup.edit_message(interaction.message.id, embed=embed, view=self)
-            except Exception:
-                pass
+        await _safe_edit(interaction, embed=embed, view=self)
     
     async def _prev_page(self, interaction: discord.Interaction) -> None:
         if not await self._guard(interaction):
             return
+        await _safe_defer_ephemeral(interaction)
         if self.current_page > 0:
             self.current_page -= 1
         await self._update_message(interaction)
@@ -424,6 +466,7 @@ class MappingViewView(discord.ui.View):
     async def _next_page(self, interaction: discord.Interaction) -> None:
         if not await self._guard(interaction):
             return
+        await _safe_defer_ephemeral(interaction)
         max_page = max(0, len(self.guild_mappings) - 1)
         if self.current_page < max_page:
             self.current_page += 1
@@ -432,6 +475,7 @@ class MappingViewView(discord.ui.View):
     async def _refresh(self, interaction: discord.Interaction) -> None:
         if not await self._guard(interaction):
             return
+        await _safe_defer_ephemeral(interaction)
         # Reload channel map
         self.channel_map = _load_channel_map()
         self._build_guild_mappings()
@@ -441,146 +485,320 @@ class MappingViewView(discord.ui.View):
     async def _manage_mappings(self, interaction: discord.Interaction) -> None:
         if not await self._guard(interaction):
             return
+        await _safe_defer_ephemeral(interaction)
         # Open manage view
         view = ManageMappingsView(self.bot, self.channel_map, self.owner_id)
         embed = await view._build_embed()
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        try:
+            if _resp_done(interaction):
+                await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+            else:
+                await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        except Exception:
+            pass
 
 class ManageMappingsView(discord.ui.View):
-    """View for managing (removing/updating) channel mappings."""
+    """View for managing (removing/updating) channel mappings, grouped by destination channel."""
     
     def __init__(self, bot_obj: commands.Bot, channel_map: Dict[int, str], owner_id: int):
         super().__init__(timeout=600)
         self.bot = bot_obj
         self.channel_map = channel_map.copy()
         self.owner_id = owner_id
-        self.selected_channel_id: Optional[int] = None
+        self._destinations: List[Tuple[str, Optional[int], str]] = []  # (key, channel_id, display)
+        self._dest_groups: Dict[str, List[int]] = {}  # key -> [source_channel_id...]
+        self.dest_page = 0
+        self.selected_dest_key: Optional[str] = None
+        self.selected_source_channel_id: Optional[int] = None
         self._rebuild()
     
     async def _guard(self, interaction: discord.Interaction) -> bool:
         """Check if user is authorized."""
         try:
             if int(interaction.user.id) != self.owner_id:
-                await interaction.response.send_message("❌ This view is not for you.", ephemeral=True)
+                await _safe_send_ephemeral(interaction, "❌ This view is not for you.")
                 return False
         except Exception:
             return False
         return True
+
+    def _build_destination_groups(self) -> None:
+        """
+        Group mappings by destination channel (resolved from webhook).
+        Key is 'dest:<id>' when channel id is known, otherwise 'name:<name>'.
+        """
+        cache: Dict[str, Tuple[Optional[int], str]] = {}
+        groups: Dict[str, List[int]] = {}
+        destinations: Dict[str, Tuple[Optional[int], str]] = {}
+
+        for src_channel_id, webhook_url in (self.channel_map or {}).items():
+            wh = str(webhook_url or "").strip()
+            if not wh:
+                continue
+            if wh in cache:
+                dest_id, dest_name = cache[wh]
+            else:
+                dest_id, dest_name = resolve_webhook_destination(wh, self.bot)
+                dest_name = (dest_name or "").strip()
+                cache[wh] = (dest_id, dest_name)
+
+            if dest_id:
+                key = f"dest:{int(dest_id)}"
+                disp = f"<#{int(dest_id)}>"
+            else:
+                name = dest_name or "Unknown destination"
+                key = f"name:{name}"
+                disp = name
+
+            groups.setdefault(key, []).append(int(src_channel_id))
+            if key not in destinations:
+                destinations[key] = (int(dest_id) if dest_id else None, disp)
+
+        # Sort destination groups by display name
+        items = []
+        for key, (did, disp) in destinations.items():
+            items.append((key, did, disp))
+        items.sort(key=lambda x: str(x[2]).lower())
+        self._destinations = items
+        # Sort sources within each dest group by source display name
+        for key, srcs in groups.items():
+            srcs_sorted = sorted(srcs, key=lambda cid: _get_channel_display_name(self.bot, cid).lower())
+            groups[key] = srcs_sorted
+        self._dest_groups = groups
     
     def _rebuild(self) -> None:
         """Rebuild the view UI."""
         self.clear_items()
         
         if not self.channel_map:
-            # No mappings - show message
             return
-        
-        # Build select menu with channels (Server / #channel-name for clarity)
-        options: List[discord.SelectOption] = []
-        for channel_id, webhook_url in list(self.channel_map.items())[:25]:  # Discord limit
-            label = _get_channel_display_name(self.bot, channel_id)
-            # Truncate label (Discord select limit 100)
+
+        if not self._destinations or not self._dest_groups:
+            self._build_destination_groups()
+
+        # Step 1: pick destination group (paged select)
+        if not self.selected_dest_key:
+            per_page = 25
+            total = len(self._destinations)
+            max_page = max(0, (total - 1) // per_page) if total else 0
+            self.dest_page = max(0, min(self.dest_page, max_page))
+            start = self.dest_page * per_page
+            page_items = self._destinations[start : start + per_page]
+
+            opts: List[discord.SelectOption] = []
+            for key, did, disp in page_items:
+                count = len(self._dest_groups.get(key) or [])
+                label = str(disp)
+                if len(label) > 100:
+                    label = label[:97] + "..."
+                desc = f"{count} mapping(s)"
+                opts.append(discord.SelectOption(label=label, value=key, description=desc[:100]))
+
+            if opts:
+                select = discord.ui.Select(
+                    placeholder="Pick a destination (grouped)…",
+                    min_values=1,
+                    max_values=1,
+                    options=opts,
+                    row=0,
+                )
+                select.callback = self._select_destination
+                self.add_item(select)
+
+            # Page nav (if needed)
+            if max_page > 0:
+                prev_btn = discord.ui.Button(label="◀ Prev", style=discord.ButtonStyle.secondary, disabled=(self.dest_page <= 0), row=1)
+                next_btn = discord.ui.Button(label="Next ▶", style=discord.ButtonStyle.secondary, disabled=(self.dest_page >= max_page), row=1)
+                prev_btn.callback = self._prev_dest_page
+                next_btn.callback = self._next_dest_page
+                self.add_item(prev_btn)
+                self.add_item(next_btn)
+
+            back_btn = discord.ui.Button(label="← Back", style=discord.ButtonStyle.secondary, row=2)
+            back_btn.callback = self._back
+            self.add_item(back_btn)
+            return
+
+        # Step 2: within a destination group, pick source mapping to manage (paged by 25 via select)
+        src_ids = list(self._dest_groups.get(self.selected_dest_key) or [])
+        opts2: List[discord.SelectOption] = []
+        for cid in src_ids[:25]:
+            label = _get_channel_display_name(self.bot, cid)
             if len(label) > 100:
                 label = label[:97] + "..."
-            
-            webhook_preview = webhook_url[:30] + "..." if len(webhook_url) > 30 else webhook_url
-            description = f"→ {webhook_preview}"[:100]
-            
-            options.append(discord.SelectOption(
-                label=label,
-                value=str(channel_id),
-                description=description
-            ))
-        
-        if options:
-            select = discord.ui.Select(
-                placeholder="Select a mapping to manage...",
+            opts2.append(discord.SelectOption(label=label, value=str(cid)))
+
+        if opts2:
+            select2 = discord.ui.Select(
+                placeholder="Select a source mapping to manage…",
                 min_values=1,
                 max_values=1,
-                options=options,
-                row=0
+                options=opts2,
+                row=0,
             )
-            select.callback = self._select_channel
-            self.add_item(select)
-        
-        # Action buttons (disabled until channel selected)
-        remove_btn = discord.ui.Button(label="🗑️ Remove", style=discord.ButtonStyle.danger, row=1, disabled=(self.selected_channel_id is None))
+            select2.callback = self._select_source
+            self.add_item(select2)
+
+        remove_btn = discord.ui.Button(
+            label="🗑️ Remove",
+            style=discord.ButtonStyle.danger,
+            row=1,
+            disabled=(self.selected_source_channel_id is None),
+        )
         remove_btn.callback = self._remove_mapping
         self.add_item(remove_btn)
-        
-        update_btn = discord.ui.Button(label="✏️ Update Webhook", style=discord.ButtonStyle.primary, row=1, disabled=(self.selected_channel_id is None))
+
+        update_btn = discord.ui.Button(
+            label="✏️ Update Webhook",
+            style=discord.ButtonStyle.primary,
+            row=1,
+            disabled=(self.selected_source_channel_id is None),
+        )
         update_btn.callback = self._update_webhook
         self.add_item(update_btn)
-        
-        back_btn = discord.ui.Button(label="← Back", style=discord.ButtonStyle.secondary, row=2)
-        back_btn.callback = self._back
-        self.add_item(back_btn)
+
+        back_dest = discord.ui.Button(label="← Destinations", style=discord.ButtonStyle.secondary, row=2)
+        back_dest.callback = self._back_to_destinations
+        self.add_item(back_dest)
     
     async def _build_embed(self) -> discord.Embed:
         """Build the embed for this view."""
-        embed = discord.Embed(
-            title="Manage Channel Mappings",
-            description="Select a channel mapping to remove or update.",
-            color=discord.Color.orange()
-        )
-        
-        if self.selected_channel_id:
-            webhook_url = self.channel_map.get(self.selected_channel_id, "")
-            display_name = _get_channel_display_name(self.bot, self.selected_channel_id)
-            embed.add_field(name="Selected Channel", value=f"**{display_name}**\n`{self.selected_channel_id}`", inline=False)
-            embed.add_field(name="Current Webhook", value=f"`{webhook_url[:50]}...`" if len(webhook_url) > 50 else f"`{webhook_url}`", inline=False)
-        
-        embed.set_footer(text=f"{len(self.channel_map)} total mappings")
+        if not self._destinations or not self._dest_groups:
+            self._build_destination_groups()
+
+        embed = discord.Embed(title="Manage Channel Mappings", color=discord.Color.orange())
+        total = len(self.channel_map)
+
+        if not self.selected_dest_key:
+            embed.description = "Pick a **destination** to manage its source mappings (grouped by destination channel)."
+            embed.set_footer(text=f"{total} total mappings")
+            return embed
+
+        dest_disp = ""
+        for key, did, disp in self._destinations:
+            if key == self.selected_dest_key:
+                dest_disp = str(disp)
+                break
+        embed.description = f"Destination: {dest_disp}\n\nSelect a **source mapping** below to remove/update."
+
+        # Show a preview list (first ~20 sources) so user can browse without opening dropdown
+        src_ids = list(self._dest_groups.get(self.selected_dest_key) or [])
+        preview = []
+        for cid in src_ids[:20]:
+            preview.append(f"💥・{_get_channel_display_name(self.bot, cid)} `{cid}`")
+        if preview:
+            embed.add_field(name="Sources (preview)", value="\n".join(preview), inline=False)
+        if len(src_ids) > 20:
+            embed.add_field(name="More", value=f"…and {len(src_ids) - 20} more", inline=False)
+
+        if self.selected_source_channel_id:
+            wh = self.channel_map.get(self.selected_source_channel_id, "")
+            embed.add_field(
+                name="Selected",
+                value=f"`{self.selected_source_channel_id}`\n{_get_channel_display_name(self.bot, self.selected_source_channel_id)}",
+                inline=False,
+            )
+            embed.add_field(
+                name="Webhook",
+                value=f"`{wh[:80]}…`" if len(wh) > 80 else f"`{wh}`",
+                inline=False,
+            )
+        embed.set_footer(text=f"{total} total mappings")
         return embed
     
-    async def _select_channel(self, interaction: discord.Interaction) -> None:
+    async def _select_destination(self, interaction: discord.Interaction) -> None:
         if not await self._guard(interaction):
             return
+        await _safe_defer_ephemeral(interaction)
         try:
-            self.selected_channel_id = int(interaction.data['values'][0])
+            key = str(interaction.data["values"][0])
+            self.selected_dest_key = key
+            self.selected_source_channel_id = None
             self._rebuild()
             embed = await self._build_embed()
-            await interaction.response.edit_message(embed=embed, view=self)
+            await _safe_edit(interaction, embed=embed, view=self)
         except Exception as e:
-            await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
+            await _safe_send_ephemeral(interaction, f"❌ Error: {e}")
+
+    async def _prev_dest_page(self, interaction: discord.Interaction) -> None:
+        if not await self._guard(interaction):
+            return
+        await _safe_defer_ephemeral(interaction)
+        self.dest_page = max(0, int(self.dest_page) - 1)
+        self._rebuild()
+        embed = await self._build_embed()
+        await _safe_edit(interaction, embed=embed, view=self)
+
+    async def _next_dest_page(self, interaction: discord.Interaction) -> None:
+        if not await self._guard(interaction):
+            return
+        await _safe_defer_ephemeral(interaction)
+        self.dest_page = int(self.dest_page) + 1
+        self._rebuild()
+        embed = await self._build_embed()
+        await _safe_edit(interaction, embed=embed, view=self)
+
+    async def _back_to_destinations(self, interaction: discord.Interaction) -> None:
+        if not await self._guard(interaction):
+            return
+        await _safe_defer_ephemeral(interaction)
+        self.selected_dest_key = None
+        self.selected_source_channel_id = None
+        self._rebuild()
+        embed = await self._build_embed()
+        await _safe_edit(interaction, embed=embed, view=self)
+
+    async def _select_source(self, interaction: discord.Interaction) -> None:
+        if not await self._guard(interaction):
+            return
+        await _safe_defer_ephemeral(interaction)
+        try:
+            self.selected_source_channel_id = int(interaction.data["values"][0])
+            self._rebuild()
+            embed = await self._build_embed()
+            await _safe_edit(interaction, embed=embed, view=self)
+        except Exception as e:
+            await _safe_send_ephemeral(interaction, f"❌ Error: {e}")
     
     async def _remove_mapping(self, interaction: discord.Interaction) -> None:
         if not await self._guard(interaction):
             return
-        if self.selected_channel_id is None:
-            await interaction.response.send_message("❌ Please select a channel first.", ephemeral=True)
+        if self.selected_source_channel_id is None:
+            await _safe_send_ephemeral(interaction, "❌ Please select a mapping first.")
             return
         
         # Remove from local copy
-        if self.selected_channel_id in self.channel_map:
-            del self.channel_map[self.selected_channel_id]
+        if self.selected_source_channel_id in self.channel_map:
+            del self.channel_map[self.selected_source_channel_id]
             # Save to file
             if _save_channel_map(self.channel_map):
-                await interaction.response.send_message(f"✅ Removed mapping for channel `{self.selected_channel_id}`", ephemeral=True)
-                # Reload main view
-                self.selected_channel_id = None
+                await _safe_send_ephemeral(interaction, f"✅ Removed mapping for channel `{self.selected_source_channel_id}`")
+                # Reload view
+                self.selected_source_channel_id = None
+                self._build_destination_groups()
                 self._rebuild()
                 embed = await self._build_embed()
-                await interaction.followup.edit_message(interaction.message.id, embed=embed, view=self)
+                await _safe_edit(interaction, embed=embed, view=self)
             else:
-                await interaction.response.send_message("❌ Failed to save changes.", ephemeral=True)
+                await _safe_send_ephemeral(interaction, "❌ Failed to save changes.")
         else:
-            await interaction.response.send_message("❌ Mapping not found.", ephemeral=True)
+            await _safe_send_ephemeral(interaction, "❌ Mapping not found.")
     
     async def _update_webhook(self, interaction: discord.Interaction) -> None:
         if not await self._guard(interaction):
             return
-        if self.selected_channel_id is None:
-            await interaction.response.send_message("❌ Please select a channel first.", ephemeral=True)
+        if self.selected_source_channel_id is None:
+            await _safe_send_ephemeral(interaction, "❌ Please select a mapping first.")
             return
         
         # Prompt for new webhook URL
-        modal = WebhookUpdateModal(self.bot, self.channel_map, self.selected_channel_id, self.owner_id)
+        modal = WebhookUpdateModal(self.bot, self.channel_map, self.selected_source_channel_id, self.owner_id)
         await interaction.response.send_modal(modal)
     
     async def _back(self, interaction: discord.Interaction) -> None:
         if not await self._guard(interaction):
             return
+        await _safe_defer_ephemeral(interaction)
         # Go back to view mappings
         channel_map = _load_channel_map()
         view = MappingViewView(self.bot, channel_map, self.owner_id)
@@ -591,7 +809,7 @@ class ManageMappingsView(discord.ui.View):
             color=discord.Color.blurple()
         )
         embed.set_footer(text=f"Page 1 of {max(1, len(view.guild_mappings))} ({len(channel_map)} total mappings)")
-        await interaction.response.edit_message(embed=embed, view=view)
+        await _safe_edit(interaction, embed=embed, view=view)
 
 class WebhookUpdateModal(discord.ui.Modal, title="Update Webhook URL"):
     """Modal for updating webhook URL."""
@@ -616,22 +834,22 @@ class WebhookUpdateModal(discord.ui.Modal, title="Update Webhook URL"):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         try:
             if int(interaction.user.id) != self.owner_id:
-                await interaction.response.send_message("❌ This modal is not for you.", ephemeral=True)
+                await _safe_send_ephemeral(interaction, "❌ This modal is not for you.")
                 return
             
             new_url = str(self.webhook_url_input.value).strip()
             if not new_url.startswith("https://discord.com/api/webhooks/"):
-                await interaction.response.send_message("❌ Invalid webhook URL format.", ephemeral=True)
+                await _safe_send_ephemeral(interaction, "❌ Invalid webhook URL format.")
                 return
             
             # Update mapping
             self.channel_map[self.channel_id] = new_url
             if _save_channel_map(self.channel_map):
-                await interaction.response.send_message(f"✅ Updated webhook URL for channel `{self.channel_id}`", ephemeral=True)
+                await _safe_send_ephemeral(interaction, f"✅ Updated webhook URL for channel `{self.channel_id}`")
             else:
-                await interaction.response.send_message("❌ Failed to save changes.", ephemeral=True)
+                await _safe_send_ephemeral(interaction, "❌ Failed to save changes.")
         except Exception as e:
-            await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
+            await _safe_send_ephemeral(interaction, f"❌ Error: {e}")
 
 def _ui_embed(title: str, description: str = "", *, color: int = 0x5865F2) -> discord.Embed:
     return discord.Embed(title=str(title or "Discum"), description=(str(description) or None), color=int(color))
@@ -1020,53 +1238,6 @@ class DiscumCommandBot(commands.Bot):
 
 # Create bot instance
 bot = DiscumCommandBot()
-
-def _resp_done(i: discord.Interaction) -> bool:
-    try:
-        return bool(i.response.is_done())
-    except Exception:
-        return False
-
-
-async def _safe_defer_ephemeral(i: discord.Interaction) -> None:
-    """Acknowledge interaction if not yet acknowledged (prevents 'This interaction failed')."""
-    if _resp_done(i):
-        return
-    try:
-        await i.response.defer(ephemeral=True)
-    except Exception:
-        # If Discord already got an ack, or defer is not allowed here, ignore.
-        return
-
-
-async def _safe_edit(i: discord.Interaction, **kwargs) -> None:
-    """
-    Edit the original interaction message safely whether or not we've deferred already.
-    Works for both slash-command responses and component interactions.
-    """
-    try:
-        if _resp_done(i):
-            await i.edit_original_response(**kwargs)
-        else:
-            await i.response.edit_message(**kwargs)
-    except Exception:
-        # Best-effort fallback if the response state changed mid-flight.
-        try:
-            await i.edit_original_response(**kwargs)
-        except Exception:
-            return
-
-
-async def _safe_send_ephemeral(i: discord.Interaction, content: str) -> None:
-    """Send an ephemeral message safely whether or not we've responded already."""
-    try:
-        if _resp_done(i):
-            await i.followup.send(content=content, ephemeral=True)
-        else:
-            await i.response.send_message(content=content, ephemeral=True)
-    except Exception:
-        return
-
 
 async def _discum_browse_impl(
     interaction: discord.Interaction,
