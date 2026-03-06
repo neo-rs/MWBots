@@ -1445,9 +1445,15 @@ def run_bot(*, settings: Dict[str, Any], token: str) -> Optional[int]:
             _dcm.register_discum_commands_to_bot(bot)
             log_info("Registered /discum on this bot (single sync will include /discum).")
         elif _dcm is None:
-            log_warn("Could not register /discum: MWDiscumBot/discum_command_bot.py not found (tried parent/MWDiscumBot and parent/MWBots/MWDiscumBot).")
+            _tried = [str(p) for p in _candidates]
+            log_warn("Could not register /discum: MWDiscumBot/discum_command_bot.py not found. Tried: " + "; ".join(_tried))
     except Exception as e:
-        log_warn(f"Could not register /discum on this bot (run discum_command_bot separately if needed): {e}")
+        import traceback
+        log_warn(f"Could not register /discum on this bot: {e}")
+        try:
+            log_warn("Traceback: " + "".join(traceback.format_exception(type(e), e, e.__traceback__)).replace("\n", " | ")[:500])
+        except Exception:
+            pass
 
     @bot.event
     async def on_ready() -> None:
