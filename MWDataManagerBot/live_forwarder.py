@@ -1511,22 +1511,9 @@ def run_bot(*, settings: Dict[str, Any], token: str) -> Optional[int]:
         except Exception:
             pass
 
-        # Ensure we keep slash commands guild-scoped only:
-        # clear any previously-registered GLOBAL app commands for this application.
-        try:
-            bot.tree.clear_commands(guild=None)
-            cleared = await bot.tree.sync()
-            try:
-                log_info(f"Global slash commands cleared (count={len(cleared)})")
-            except Exception:
-                pass
-        except Exception as e:
-            try:
-                log_warn(f"Global slash clear failed ({type(e).__name__}: {e})")
-            except Exception:
-                pass
-
-        # Slash commands: copy global (e.g. /discum) into each guild, then sync to destination guild(s).
+        # Slash commands: copy global (e.g. /discum) into each guild and sync first, then clear global scope.
+        # Order matters: copy_global_to + sync(guild=...) must run before clear_commands(guild=None), otherwise
+        # /discum is removed from the tree before it is copied to the guild.
         try:
             dest_guild_ids = sorted(int(x) for x in (cfg.DESTINATION_GUILD_IDS or set()) if int(x) > 0)
         except Exception:
@@ -1558,6 +1545,20 @@ def run_bot(*, settings: Dict[str, Any], token: str) -> Optional[int]:
                         continue
                 if synced:
                     log_info(f"Slash commands synced to {synced} destination guild(s).")
+            except Exception:
+                pass
+
+        # After guild sync: clear global scope so commands only appear in destination guild(s).
+        try:
+            bot.tree.clear_commands(guild=None)
+            cleared = await bot.tree.sync()
+            try:
+                log_info(f"Global slash commands cleared (count={len(cleared)})")
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                log_warn(f"Global slash clear failed ({type(e).__name__}: {e})")
             except Exception:
                 pass
 
