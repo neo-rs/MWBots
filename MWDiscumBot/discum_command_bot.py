@@ -510,6 +510,7 @@ class ManageMappingsView(discord.ui.View):
         self.dest_page = 0
         self.selected_dest_key: Optional[str] = None
         self.selected_source_channel_id: Optional[int] = None
+        self.source_page = 0
         self._rebuild()
     
     async def _guard(self, interaction: discord.Interaction) -> bool:
@@ -621,8 +622,13 @@ class ManageMappingsView(discord.ui.View):
 
         # Step 2: within a destination group, pick source mapping to manage (paged by 25 via select)
         src_ids = list(self._dest_groups.get(self.selected_dest_key) or [])
+        per_page2 = 25
+        max_page2 = max(0, (len(src_ids) - 1) // per_page2) if src_ids else 0
+        self.source_page = max(0, min(int(self.source_page), max_page2))
+        start2 = int(self.source_page) * per_page2
+        page_srcs = src_ids[start2 : start2 + per_page2]
         opts2: List[discord.SelectOption] = []
-        for cid in src_ids[:25]:
+        for cid in page_srcs:
             label = _get_channel_display_name(self.bot, cid)
             if len(label) > 100:
                 label = label[:97] + "..."
@@ -638,6 +644,14 @@ class ManageMappingsView(discord.ui.View):
             )
             select2.callback = self._select_source
             self.add_item(select2)
+
+        if max_page2 > 0:
+            prev_s = discord.ui.Button(label="◀ Prev", style=discord.ButtonStyle.secondary, disabled=(self.source_page <= 0), row=2)
+            next_s = discord.ui.Button(label="Next ▶", style=discord.ButtonStyle.secondary, disabled=(self.source_page >= max_page2), row=2)
+            prev_s.callback = self._prev_source_page
+            next_s.callback = self._next_source_page
+            self.add_item(prev_s)
+            self.add_item(next_s)
 
         remove_btn = discord.ui.Button(
             label="🗑️ Remove",
@@ -657,7 +671,7 @@ class ManageMappingsView(discord.ui.View):
         update_btn.callback = self._update_webhook
         self.add_item(update_btn)
 
-        back_dest = discord.ui.Button(label="← Destinations", style=discord.ButtonStyle.secondary, row=2)
+        back_dest = discord.ui.Button(label="← Destinations", style=discord.ButtonStyle.secondary, row=3)
         back_dest.callback = self._back_to_destinations
         self.add_item(back_dest)
     
@@ -714,6 +728,7 @@ class ManageMappingsView(discord.ui.View):
             key = str(interaction.data["values"][0])
             self.selected_dest_key = key
             self.selected_source_channel_id = None
+            self.source_page = 0
             self._rebuild()
             embed = await self._build_embed()
             await _safe_edit(interaction, embed=embed, view=self)
@@ -744,6 +759,25 @@ class ManageMappingsView(discord.ui.View):
         await _safe_defer_ephemeral(interaction)
         self.selected_dest_key = None
         self.selected_source_channel_id = None
+        self.source_page = 0
+        self._rebuild()
+        embed = await self._build_embed()
+        await _safe_edit(interaction, embed=embed, view=self)
+
+    async def _prev_source_page(self, interaction: discord.Interaction) -> None:
+        if not await self._guard(interaction):
+            return
+        await _safe_defer_ephemeral(interaction)
+        self.source_page = max(0, int(self.source_page) - 1)
+        self._rebuild()
+        embed = await self._build_embed()
+        await _safe_edit(interaction, embed=embed, view=self)
+
+    async def _next_source_page(self, interaction: discord.Interaction) -> None:
+        if not await self._guard(interaction):
+            return
+        await _safe_defer_ephemeral(interaction)
+        self.source_page = int(self.source_page) + 1
         self._rebuild()
         embed = await self._build_embed()
         await _safe_edit(interaction, embed=embed, view=self)
