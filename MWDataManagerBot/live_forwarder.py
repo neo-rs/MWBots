@@ -1539,8 +1539,11 @@ def run_bot(*, settings: Dict[str, Any], token: str) -> Optional[int]:
                         gobj = discord.Object(id=int(gid))
                         try:
                             bot.tree.copy_global_to(guild=gobj)
-                        except Exception:
-                            pass
+                        except Exception as copy_err:
+                            try:
+                                log_warn(f"copy_global_to failed for guild={gid}: {type(copy_err).__name__}: {copy_err}")
+                            except Exception:
+                                pass
                         cmds = await bot.tree.sync(guild=gobj)
                         try:
                             log_info(f"Slash commands sync ok: guild={int(gid)} count={len(cmds)}")
