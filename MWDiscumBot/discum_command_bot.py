@@ -1094,6 +1094,16 @@ async def _discum_browse_impl(
         @discord.ui.button(label="View Current Mappings", style=discord.ButtonStyle.primary, emoji="📋", row=0)
         async def view_mappings(self, interaction: discord.Interaction, button: discord.ui.Button):
             await _safe_defer_ephemeral(interaction)
+            try:
+                self.disable_all_items()
+            except Exception:
+                pass
+            await _safe_edit(
+                interaction,
+                content="Loading current mappings…",
+                embed=None,
+                view=self,
+            )
             channel_map = _load_channel_map()
             if not channel_map:
                 await _safe_edit(
@@ -1111,11 +1121,21 @@ async def _discum_browse_impl(
                 color=discord.Color.blurple(),
             )
             embed.set_footer(text=f"Page 1 of {max(1, len(view.guild_mappings))} ({len(channel_map)} total mappings)")
-            await _safe_edit(interaction, embed=embed, view=view)
+            await _safe_edit(interaction, content=None, embed=embed, view=view)
 
         @discord.ui.button(label="Browse source & map", style=discord.ButtonStyle.secondary, emoji="🗺️", row=0)
         async def browse_source(self, interaction: discord.Interaction, button: discord.ui.Button):
             await _safe_defer_ephemeral(interaction)
+            try:
+                self.disable_all_items()
+            except Exception:
+                pass
+            await _safe_edit(
+                interaction,
+                content="Loading servers/channels…",
+                embed=None,
+                view=self,
+            )
             browse_token = _get_browse_user_token()
             if not browse_token:
                 await _safe_edit(
@@ -1150,7 +1170,7 @@ async def _discum_browse_impl(
                 description="Pick a source guild to browse:",
                 color=discord.Color.blurple(),
             )
-            await interaction.response.edit_message(embed=embed, view=view_guild_pick)
+            await _safe_edit(interaction, content=None, embed=embed, view=view_guild_pick)
 
     view = BrowseView(bot_obj, channel_map, owner_id)
     if not channel_map:
