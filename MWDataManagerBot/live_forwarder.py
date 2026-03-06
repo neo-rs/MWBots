@@ -1416,15 +1416,36 @@ def run_bot(*, settings: Dict[str, Any], token: str) -> Optional[int]:
     # (DiscumBot is a user-account; only this bot token can register slash commands. Single sync avoids overwriting.)
     try:
         import sys
+        import importlib.util
         from pathlib import Path as _Path
         _live_dir = _Path(__file__).resolve().parent
-        _mw_discum_dir = _live_dir.parent / "MWDiscumBot"
-        if _mw_discum_dir.is_dir():
+        # Server: ROOT/MWDataManagerBot, ROOT/MWDiscumBot. Local: ROOT/MWBots/MWDataManagerBot, ROOT/MWBots/MWDiscumBot.
+        _candidates = [
+            _live_dir.parent / "MWDiscumBot",
+            _live_dir.parent.parent / "MWBots" / "MWDiscumBot",
+        ]
+        _dcm = None
+        for _mw_discum_dir in _candidates:
+            if not _mw_discum_dir.is_dir():
+                continue
+            _py_file = _mw_discum_dir / "discum_command_bot.py"
+            if not _py_file.exists():
+                continue
             if str(_mw_discum_dir) not in sys.path:
                 sys.path.insert(0, str(_mw_discum_dir))
-            import discum_command_bot as _dcm
+            _spec = importlib.util.spec_from_file_location("discum_command_bot", _py_file)
+            if _spec is None or _spec.loader is None:
+                continue
+            _mod = importlib.util.module_from_spec(_spec)
+            sys.modules["discum_command_bot"] = _mod
+            _spec.loader.exec_module(_mod)
+            _dcm = _mod
+            break
+        if _dcm is not None and hasattr(_dcm, "register_discum_commands_to_bot"):
             _dcm.register_discum_commands_to_bot(bot)
             log_info("Registered /discum on this bot (single sync will include /discum).")
+        elif _dcm is None:
+            log_warn("Could not register /discum: MWDiscumBot/discum_command_bot.py not found (tried parent/MWDiscumBot and parent/MWBots/MWDiscumBot).")
     except Exception as e:
         log_warn(f"Could not register /discum on this bot (run discum_command_bot separately if needed): {e}")
 
