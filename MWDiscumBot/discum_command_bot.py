@@ -1021,6 +1021,53 @@ class DiscumCommandBot(commands.Bot):
 # Create bot instance
 bot = DiscumCommandBot()
 
+def _resp_done(i: discord.Interaction) -> bool:
+    try:
+        return bool(i.response.is_done())
+    except Exception:
+        return False
+
+
+async def _safe_defer_ephemeral(i: discord.Interaction) -> None:
+    """Acknowledge interaction if not yet acknowledged (prevents 'This interaction failed')."""
+    if _resp_done(i):
+        return
+    try:
+        await i.response.defer(ephemeral=True)
+    except Exception:
+        # If Discord already got an ack, or defer is not allowed here, ignore.
+        return
+
+
+async def _safe_edit(i: discord.Interaction, **kwargs) -> None:
+    """
+    Edit the original interaction message safely whether or not we've deferred already.
+    Works for both slash-command responses and component interactions.
+    """
+    try:
+        if _resp_done(i):
+            await i.edit_original_response(**kwargs)
+        else:
+            await i.response.edit_message(**kwargs)
+    except Exception:
+        # Best-effort fallback if the response state changed mid-flight.
+        try:
+            await i.edit_original_response(**kwargs)
+        except Exception:
+            return
+
+
+async def _safe_send_ephemeral(i: discord.Interaction, content: str) -> None:
+    """Send an ephemeral message safely whether or not we've responded already."""
+    try:
+        if _resp_done(i):
+            await i.followup.send(content=content, ephemeral=True)
+        else:
+            await i.response.send_message(content=content, ephemeral=True)
+    except Exception:
+        return
+
+
 async def _discum_browse_impl(
     interaction: discord.Interaction,
     action: app_commands.Choice[str],
@@ -1028,9 +1075,9 @@ async def _discum_browse_impl(
 ) -> None:
     """Shared /discum browse handler (used by standalone bot or when registered on DataManagerBot)."""
     if action.value != "browse":
-        await interaction.response.send_message("❌ Unknown action.", ephemeral=True)
+        await _safe_send_ephemeral(interaction, "❌ Unknown action.")
         return
-    await interaction.response.defer(ephemeral=True)
+    await _safe_defer_ephemeral(interaction)
     channel_map = _load_channel_map()
     owner_id = int(interaction.user.id)
 
@@ -1046,9 +1093,11 @@ async def _discum_browse_impl(
 
         @discord.ui.button(label="View Current Mappings", style=discord.ButtonStyle.primary, emoji="📋", row=0)
         async def view_mappings(self, interaction: discord.Interaction, button: discord.ui.Button):
+            await _safe_defer_ephemeral(interaction)
             channel_map = _load_channel_map()
             if not channel_map:
-                await interaction.response.edit_message(
+                await _safe_edit(
+                    interaction,
                     content="**No channel mappings configured.** Use « Browse source & map » or the main discum bot to add mappings.",
                     embed=None,
                     view=None,
@@ -1062,13 +1111,15 @@ async def _discum_browse_impl(
                 color=discord.Color.blurple(),
             )
             embed.set_footer(text=f"Page 1 of {max(1, len(view.guild_mappings))} ({len(channel_map)} total mappings)")
-            await interaction.response.edit_message(embed=embed, view=view)
+            await _safe_edit(interaction, embed=embed, view=view)
 
         @discord.ui.button(label="Browse source & map", style=discord.ButtonStyle.secondary, emoji="🗺️", row=0)
         async def browse_source(self, interaction: discord.Interaction, button: discord.ui.Button):
+            await _safe_defer_ephemeral(interaction)
             browse_token = _get_browse_user_token()
             if not browse_token:
-                await interaction.response.edit_message(
+                await _safe_edit(
+                    interaction,
                     content="**Missing user token for browsing.** Set DISCUM_BOT or DISCUM_USER_DISCUMBOT in config/tokens.env (same as the main discumbot).",
                     embed=None,
                     view=None,
@@ -1077,7 +1128,8 @@ async def _discum_browse_impl(
             from discord_user_api import list_user_guilds
             info = await list_user_guilds(user_token=browse_token)
             if not info.get("ok"):
-                await interaction.response.edit_message(
+                await _safe_edit(
+                    interaction,
                     content=f"**Could not list guilds.** {info.get('reason', 'unknown')}",
                     embed=None,
                     view=None,
@@ -1085,7 +1137,8 @@ async def _discum_browse_impl(
                 return
             guilds = info.get("guilds") or []
             if not guilds:
-                await interaction.response.edit_message(
+                await _safe_edit(
+                    interaction,
                     content="**No guilds found** for the configured user token.",
                     embed=None,
                     view=None,
