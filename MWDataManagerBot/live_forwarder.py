@@ -1526,7 +1526,7 @@ def run_bot(*, settings: Dict[str, Any], token: str) -> Optional[int]:
             except Exception:
                 pass
 
-        # Slash commands: sync ONLY to destination guild(s) (fast propagation).
+        # Slash commands: copy global (e.g. /discum) into each guild, then sync to destination guild(s).
         try:
             dest_guild_ids = sorted(int(x) for x in (cfg.DESTINATION_GUILD_IDS or set()) if int(x) > 0)
         except Exception:
@@ -1536,7 +1536,12 @@ def run_bot(*, settings: Dict[str, Any], token: str) -> Optional[int]:
                 synced = 0
                 for gid in dest_guild_ids:
                     try:
-                        cmds = await bot.tree.sync(guild=discord.Object(id=int(gid)))
+                        gobj = discord.Object(id=int(gid))
+                        try:
+                            bot.tree.copy_global_to(guild=gobj)
+                        except Exception:
+                            pass
+                        cmds = await bot.tree.sync(guild=gobj)
                         try:
                             log_info(f"Slash commands sync ok: guild={int(gid)} count={len(cmds)}")
                         except Exception:
