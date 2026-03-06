@@ -1412,6 +1412,22 @@ def run_bot(*, settings: Dict[str, Any], token: str) -> Optional[int]:
     except Exception as e:
         log_warn(f"Failed to register commands: {e}")
 
+    # Register /discum on this same bot so one tree.sync() pushes both DataManager commands and /discum.
+    # (DiscumBot is a user-account; only this bot token can register slash commands. Single sync avoids overwriting.)
+    try:
+        import sys
+        from pathlib import Path as _Path
+        _live_dir = _Path(__file__).resolve().parent
+        _mw_discum_dir = _live_dir.parent / "MWDiscumBot"
+        if _mw_discum_dir.is_dir():
+            if str(_mw_discum_dir) not in sys.path:
+                sys.path.insert(0, str(_mw_discum_dir))
+            import discum_command_bot as _dcm
+            _dcm.register_discum_commands_to_bot(bot)
+            log_info("Registered /discum on this bot (single sync will include /discum).")
+    except Exception as e:
+        log_warn(f"Could not register /discum on this bot (run discum_command_bot separately if needed): {e}")
+
     @bot.event
     async def on_ready() -> None:
         try:

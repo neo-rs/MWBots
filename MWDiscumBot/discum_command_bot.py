@@ -1021,33 +1021,29 @@ class DiscumCommandBot(commands.Bot):
 # Create bot instance
 bot = DiscumCommandBot()
 
-@bot.tree.command(name="discum", description="Browse and manage Discum bot channel mappings")
-@app_commands.describe(action="Action to perform")
-@app_commands.choices(action=[
-    app_commands.Choice(name="browse", value="browse"),
-])
-async def discum_command(interaction: discord.Interaction, action: app_commands.Choice[str]):
-    """Main /discum command handler."""
+async def _discum_browse_impl(
+    interaction: discord.Interaction,
+    action: app_commands.Choice[str],
+    bot_obj: commands.Bot,
+) -> None:
+    """Shared /discum browse handler (used by standalone bot or when registered on DataManagerBot)."""
     if action.value != "browse":
         await interaction.response.send_message("❌ Unknown action.", ephemeral=True)
         return
-    
     await interaction.response.defer(ephemeral=True)
-    
-    # Load channel map (always show the first screen with the button so the button is visible)
     channel_map = _load_channel_map()
     owner_id = int(interaction.user.id)
-    
+
     class BrowseView(discord.ui.View):
         def __init__(self, bot_obj: commands.Bot, channel_map: Dict[int, str], owner_id: int):
             super().__init__(timeout=600)
             self.bot = bot_obj
             self.channel_map = channel_map
             self.owner_id = owner_id
-        
+
         async def interaction_check(self, interaction: discord.Interaction) -> bool:
             return int(interaction.user.id) == self.owner_id
-        
+
         @discord.ui.button(label="View Current Mappings", style=discord.ButtonStyle.primary, emoji="📋", row=0)
         async def view_mappings(self, interaction: discord.Interaction, button: discord.ui.Button):
             channel_map = _load_channel_map()
@@ -1055,7 +1051,7 @@ async def discum_command(interaction: discord.Interaction, action: app_commands.
                 await interaction.response.edit_message(
                     content="**No channel mappings configured.** Use « Browse source & map » or the main discum bot to add mappings.",
                     embed=None,
-                    view=None
+                    view=None,
                 )
                 return
             view = MappingViewView(self.bot, channel_map, self.owner_id)
@@ -1063,7 +1059,7 @@ async def discum_command(interaction: discord.Interaction, action: app_commands.
             embed = discord.Embed(
                 title="Channel Mappings",
                 description=content,
-                color=discord.Color.blurple()
+                color=discord.Color.blurple(),
             )
             embed.set_footer(text=f"Page 1 of {max(1, len(view.guild_mappings))} ({len(channel_map)} total mappings)")
             await interaction.response.edit_message(embed=embed, view=view)
@@ -1075,7 +1071,7 @@ async def discum_command(interaction: discord.Interaction, action: app_commands.
                 await interaction.response.edit_message(
                     content="**Missing user token for browsing.** Set DISCUM_BOT or DISCUM_USER_DISCUMBOT in config/tokens.env (same as the main discumbot).",
                     embed=None,
-                    view=None
+                    view=None,
                 )
                 return
             from discord_user_api import list_user_guilds
@@ -1084,7 +1080,7 @@ async def discum_command(interaction: discord.Interaction, action: app_commands.
                 await interaction.response.edit_message(
                     content=f"**Could not list guilds.** {info.get('reason', 'unknown')}",
                     embed=None,
-                    view=None
+                    view=None,
                 )
                 return
             guilds = info.get("guilds") or []
@@ -1092,33 +1088,52 @@ async def discum_command(interaction: discord.Interaction, action: app_commands.
                 await interaction.response.edit_message(
                     content="**No guilds found** for the configured user token.",
                     embed=None,
-                    view=None
+                    view=None,
                 )
                 return
             view_guild_pick = _GuildPickView(guilds, self.bot, self.owner_id)
             embed = discord.Embed(
                 title="Discum browse",
                 description="Pick a source guild to browse:",
-                color=discord.Color.blurple()
+                color=discord.Color.blurple(),
             )
             await interaction.response.edit_message(embed=embed, view=view_guild_pick)
-    
-    view = BrowseView(bot, channel_map, owner_id)
-    
+
+    view = BrowseView(bot_obj, channel_map, owner_id)
     if not channel_map:
         embed = discord.Embed(
             title="Discum Bot Mappings",
             description="No channel mappings configured yet.\n\n👉 **Click the button below** to open the mappings viewer (you can add mappings via the main discum bot, then use this to view/remove/update).",
-            color=discord.Color.blurple()
+            color=discord.Color.blurple(),
         )
     else:
         embed = discord.Embed(
             title="Discum Bot Mappings",
             description=f"**{len(channel_map)}** channel mapping(s) configured.\n\n👉 **Click the button below** to view mappings by server and to remove/update them.",
-            color=discord.Color.blurple()
+            color=discord.Color.blurple(),
         )
-    
     await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+
+def register_discum_commands_to_bot(bot_instance: commands.Bot) -> None:
+    """Register /discum slash command on an existing bot (e.g. DataManagerBot). Call before bot.run()."""
+    @bot_instance.tree.command(name="discum", description="Browse and manage Discum bot channel mappings")
+    @app_commands.describe(action="Action to perform")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="browse", value="browse"),
+    ])
+    async def _discum_cmd(interaction: discord.Interaction, action: app_commands.Choice[str]):
+        await _discum_browse_impl(interaction, action, bot_instance)
+
+
+# Standalone: register on our own bot when running discum_command_bot.py
+@bot.tree.command(name="discum", description="Browse and manage Discum bot channel mappings")
+@app_commands.describe(action="Action to perform")
+@app_commands.choices(action=[
+    app_commands.Choice(name="browse", value="browse"),
+])
+async def discum_command(interaction: discord.Interaction, action: app_commands.Choice[str]):
+    await _discum_browse_impl(interaction, action, bot)
 
 def _list_guild_commands_via_api(token: str, guild_id: int) -> None:
     """List slash commands registered for the guild via Discord API (no bot run)."""
