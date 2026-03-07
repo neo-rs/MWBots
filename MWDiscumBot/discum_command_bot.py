@@ -481,6 +481,7 @@ class MappingViewView(discord.ui.View):
         await _safe_edit(interaction, embed=embed, view=self)
     
     async def _prev_page(self, interaction: discord.Interaction) -> None:
+        _log_channel_mapping("MappingViewView Prev page clicked")
         if not await self._guard(interaction):
             return
         await _safe_defer_ephemeral(interaction)
@@ -489,6 +490,7 @@ class MappingViewView(discord.ui.View):
         await self._update_message(interaction)
     
     async def _next_page(self, interaction: discord.Interaction) -> None:
+        _log_channel_mapping("MappingViewView Next page clicked")
         if not await self._guard(interaction):
             return
         await _safe_defer_ephemeral(interaction)
@@ -508,19 +510,23 @@ class MappingViewView(discord.ui.View):
         await self._update_message(interaction)
     
     async def _manage_mappings(self, interaction: discord.Interaction) -> None:
+        _log_channel_mapping("Manage Mappings button clicked")
         if not await self._guard(interaction):
             return
         await _safe_defer_ephemeral(interaction)
-        # Open manage view
-        view = ManageMappingsView(self.bot, self.channel_map, self.owner_id)
-        embed = await view._build_embed()
         try:
+            view = ManageMappingsView(self.bot, self.channel_map, self.owner_id)
+            embed = await view._build_embed()
             if _resp_done(interaction):
                 await interaction.followup.send(embed=embed, view=view, ephemeral=True)
             else:
                 await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-        except Exception:
-            pass
+            _log_channel_mapping("Manage Mappings view sent")
+        except Exception as e:
+            _log_channel_mapping(f"Manage Mappings error: {e}", level="ERROR")
+            import traceback
+            traceback.print_exc()
+            await _safe_send_ephemeral(interaction, f"**Error opening Manage Mappings.** `{type(e).__name__}: {str(e)[:150]}`. Check Data Manager bot logs for `[Channel Mapping]`.")
 
 class ManageMappingsView(discord.ui.View):
     """View for managing (removing/updating) channel mappings, grouped by destination channel."""
@@ -1310,18 +1316,38 @@ class DiscumCommandBot(commands.Bot):
 # Create bot instance
 bot = DiscumCommandBot()
 
+
+def _log_channel_mapping(msg: str, level: str = "INFO") -> None:
+    """Diagnostic log for /discum flows. Appears in Data Manager bot stdout (journalctl). Prefix so you can grep [Channel Mapping]."""
+    try:
+        prefix = "[Channel Mapping]"
+        line = f"{prefix} [{level}] {msg}"
+        print(line, flush=True)
+    except Exception:
+        pass
+
+
 async def _discum_browse_impl(
     interaction: discord.Interaction,
     action: app_commands.Choice[str],
     bot_obj: commands.Bot,
 ) -> None:
     """Shared /discum browse handler (used by standalone bot or when registered on DataManagerBot)."""
+    _log_channel_mapping(f"/discum triggered (action={action.value})")
     if action.value != "browse":
         await _safe_send_ephemeral(interaction, "❌ Unknown action.")
         return
-    await _safe_defer_ephemeral(interaction)
-    channel_map = _load_channel_map()
-    owner_id = int(interaction.user.id)
+    try:
+        await _safe_defer_ephemeral(interaction)
+        channel_map = _load_channel_map()
+        owner_id = int(interaction.user.id)
+        _log_channel_mapping(f"/discum browse: channel_map size={len(channel_map or {})}")
+    except Exception as e:
+        _log_channel_mapping(f"/discum browse error: {e}", level="ERROR")
+        import traceback
+        traceback.print_exc()
+        await _safe_send_ephemeral(interaction, f"❌ Error loading /discum: {e}. Check Data Manager bot logs for [Channel Mapping].")
+        return
 
     class BrowseView(discord.ui.View):
         def __init__(self, bot_obj: commands.Bot, channel_map: Dict[int, str], owner_id: int):
@@ -1335,6 +1361,7 @@ async def _discum_browse_impl(
 
         @discord.ui.button(label="View Current Mappings", style=discord.ButtonStyle.primary, emoji="📋", row=0)
         async def view_mappings(self, interaction: discord.Interaction, button: discord.ui.Button):
+            _log_channel_mapping("View Current Mappings button clicked")
             await _safe_defer_ephemeral(interaction)
             try:
                 self.disable_all_items()
@@ -1346,27 +1373,38 @@ async def _discum_browse_impl(
                 embed=None,
                 view=self,
             )
-            channel_map = _load_channel_map()
-            if not channel_map:
-                await _safe_edit(
-                    interaction,
-                    content="**No channel mappings configured.** Use « Browse source & map » or the main discum bot to add mappings.",
-                    embed=None,
-                    view=None,
+            try:
+                channel_map = _load_channel_map()
+                if not channel_map:
+                    _log_channel_mapping("View Current Mappings: no mappings")
+                    await _safe_edit(
+                        interaction,
+                        content="**No channel mappings configured.** Use « Browse source & map » or the main discum bot to add mappings.",
+                        embed=None,
+                        view=None,
+                    )
+                    return
+                _log_channel_mapping(f"View Current Mappings: building view for {len(channel_map)} mappings")
+                view = MappingViewView(self.bot, channel_map, self.owner_id)
+                content, max_page = view._get_page_content(0)
+                embed = discord.Embed(
+                    title="Channel Mappings",
+                    description=content,
+                    color=discord.Color.blurple(),
                 )
-                return
-            view = MappingViewView(self.bot, channel_map, self.owner_id)
-            content, max_page = view._get_page_content(0)
-            embed = discord.Embed(
-                title="Channel Mappings",
-                description=content,
-                color=discord.Color.blurple(),
-            )
-            embed.set_footer(text=f"Page 1 of {max(1, len(view.guild_mappings))} ({len(channel_map)} total mappings)")
-            await _safe_edit(interaction, content=None, embed=embed, view=view)
+                embed.set_footer(text=f"Page 1 of {max(1, len(view.guild_mappings))} ({len(channel_map)} total mappings)")
+                await _safe_edit(interaction, content=None, embed=embed, view=view)
+                _log_channel_mapping(f"View Current Mappings done (count={len(channel_map)})")
+            except Exception as e:
+                _log_channel_mapping(f"View Current Mappings error: {e}", level="ERROR")
+                import traceback
+                traceback.print_exc()
+                err_msg = f"**Error loading mappings.**\n`{type(e).__name__}: {str(e)[:200]}`\n\nCheck Data Manager bot logs for `[Channel Mapping]`."
+                await _safe_edit(interaction, content=err_msg, embed=None, view=None)
 
         @discord.ui.button(label="Browse source & map", style=discord.ButtonStyle.secondary, emoji="🗺️", row=0)
         async def browse_source(self, interaction: discord.Interaction, button: discord.ui.Button):
+            _log_channel_mapping("Browse source & map button clicked")
             await _safe_defer_ephemeral(interaction)
             try:
                 self.disable_all_items()
@@ -1378,56 +1416,75 @@ async def _discum_browse_impl(
                 embed=None,
                 view=self,
             )
-            browse_token = _get_browse_user_token()
-            if not browse_token:
-                await _safe_edit(
-                    interaction,
-                    content="**Missing user token for browsing.** Set DISCUM_BOT or DISCUM_USER_DISCUMBOT in config/tokens.env (same as the main discumbot).",
-                    embed=None,
-                    view=None,
+            try:
+                browse_token = _get_browse_user_token()
+                if not browse_token:
+                    _log_channel_mapping("Browse source: missing user token", level="WARN")
+                    await _safe_edit(
+                        interaction,
+                        content="**Missing user token for browsing.** Set DISCUM_BOT or DISCUM_USER_DISCUMBOT in config/tokens.env (same as the main discumbot).",
+                        embed=None,
+                        view=None,
+                    )
+                    return
+                _log_channel_mapping("Browse source: fetching guilds")
+                from discord_user_api import list_user_guilds
+                info = await list_user_guilds(user_token=browse_token)
+                if not info.get("ok"):
+                    _log_channel_mapping(f"Browse source: list guilds failed reason={info.get('reason', 'unknown')}", level="WARN")
+                    await _safe_edit(
+                        interaction,
+                        content=f"**Could not list guilds.** {info.get('reason', 'unknown')}",
+                        embed=None,
+                        view=None,
+                    )
+                    return
+                guilds = info.get("guilds") or []
+                if not guilds:
+                    _log_channel_mapping("Browse source: no guilds")
+                    await _safe_edit(
+                        interaction,
+                        content="**No guilds found** for the configured user token.",
+                        embed=None,
+                        view=None,
+                    )
+                    return
+                view_guild_pick = _GuildPickView(guilds, self.bot, self.owner_id)
+                embed = discord.Embed(
+                    title="Discum browse",
+                    description="Pick a source guild to browse:",
+                    color=discord.Color.blurple(),
                 )
-                return
-            from discord_user_api import list_user_guilds
-            info = await list_user_guilds(user_token=browse_token)
-            if not info.get("ok"):
-                await _safe_edit(
-                    interaction,
-                    content=f"**Could not list guilds.** {info.get('reason', 'unknown')}",
-                    embed=None,
-                    view=None,
-                )
-                return
-            guilds = info.get("guilds") or []
-            if not guilds:
-                await _safe_edit(
-                    interaction,
-                    content="**No guilds found** for the configured user token.",
-                    embed=None,
-                    view=None,
-                )
-                return
-            view_guild_pick = _GuildPickView(guilds, self.bot, self.owner_id)
+                await _safe_edit(interaction, content=None, embed=embed, view=view_guild_pick)
+                _log_channel_mapping(f"Browse source done (guilds={len(guilds)})")
+            except Exception as e:
+                _log_channel_mapping(f"Browse source error: {e}", level="ERROR")
+                import traceback
+                traceback.print_exc()
+                err_msg = f"**Error loading servers.**\n`{type(e).__name__}: {str(e)[:200]}`\n\nCheck Data Manager bot logs for `[Channel Mapping]`."
+                await _safe_edit(interaction, content=err_msg, embed=None, view=None)
+
+    try:
+        view = BrowseView(bot_obj, channel_map, owner_id)
+        if not channel_map:
             embed = discord.Embed(
-                title="Discum browse",
-                description="Pick a source guild to browse:",
+                title="Discum Bot Mappings",
+                description="No channel mappings configured yet.\n\n👉 **Click the button below** to open the mappings viewer (you can add mappings via the main discum bot, then use this to view/remove/update).",
                 color=discord.Color.blurple(),
             )
-            await _safe_edit(interaction, content=None, embed=embed, view=view_guild_pick)
-
-    view = BrowseView(bot_obj, channel_map, owner_id)
-    if not channel_map:
-        embed = discord.Embed(
-            title="Discum Bot Mappings",
-            description="No channel mappings configured yet.\n\n👉 **Click the button below** to open the mappings viewer (you can add mappings via the main discum bot, then use this to view/remove/update).",
-            color=discord.Color.blurple(),
-        )
-    else:
-        embed = discord.Embed(
-            title="Discum Bot Mappings",
-            description=f"**{len(channel_map)}** channel mapping(s) configured.\n\n👉 **Click the button below** to view mappings by server and to remove/update them.",
-            color=discord.Color.blurple(),
-        )
-    await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        else:
+            embed = discord.Embed(
+                title="Discum Bot Mappings",
+                description=f"**{len(channel_map)}** channel mapping(s) configured.\n\n👉 **Click the button below** to view mappings by server and to remove/update them.",
+                color=discord.Color.blurple(),
+            )
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        _log_channel_mapping("/discum browse initial message sent")
+    except Exception as e:
+        _log_channel_mapping(f"/discum browse send error: {e}", level="ERROR")
+        import traceback
+        traceback.print_exc()
+        await _safe_send_ephemeral(interaction, f"❌ Error sending /discum menu: {e}. Check Data Manager bot logs for [Channel Mapping].")
 
 
 def register_discum_commands_to_bot(bot_instance: commands.Bot) -> None:
