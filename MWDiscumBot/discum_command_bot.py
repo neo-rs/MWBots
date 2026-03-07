@@ -47,6 +47,36 @@ _SOURCE_CHANNEL_NAMES: Dict[int, Tuple[str, str]] = {}  # channel_id -> (guild_n
 _SOURCE_CHANNEL_FULL: Dict[int, Tuple[int, str, str]] = {}  # channel_id -> (guild_id, guild_name, channel_name)
 _SOURCE_GUILD_NAMES: Dict[int, str] = {}  # guild_id -> guild_name (for grouping when bot not in guild)
 _SOURCE_NAMES_LOADED = 0.0
+# Optional manual override: config/channel_display_names.json { "channel_id": "Display Name" } (see README or doc below)
+_DISPLAY_NAMES_OVERRIDE: Dict[int, str] = {}  # channel_id -> display_name
+_DISPLAY_NAMES_LOADED = 0.0
+
+# Why "Channel-XXXXXX" appears: channel_map.json only stores ID -> webhook; names come from (1) bot cache,
+# (2) source_channels.json (written when the discumbot fetches/caches source guild channels), or
+# (3) channel_display_names.json (optional manual map). Add channel_display_names.json to fix missing names.
+
+
+def _load_display_names_override() -> Dict[int, str]:
+    """Load optional config/channel_display_names.json: { "channel_id": "Display Name" }. Use for channels not in cache."""
+    global _DISPLAY_NAMES_OVERRIDE, _DISPLAY_NAMES_LOADED
+    path = str(Path(_CHANNEL_MAP_PATH).resolve().parent / "channel_display_names.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, Exception):
+        return _DISPLAY_NAMES_OVERRIDE
+    out: Dict[int, str] = {}
+    for k, v in (data if isinstance(data, dict) else {}).items():
+        try:
+            cid = int(str(k).strip())
+            name = str(v or "").strip()
+            if name:
+                out[cid] = name
+        except (ValueError, TypeError):
+            continue
+    _DISPLAY_NAMES_OVERRIDE = out
+    _DISPLAY_NAMES_LOADED = time.time()
+    return out
 
 
 def _load_source_channel_names() -> Dict[int, Tuple[str, str]]:
@@ -90,7 +120,7 @@ def _get_channel_display_name(bot: commands.Bot, channel_id: int) -> str:
 
 
 def _source_channel_name_only(bot: commands.Bot, channel_id: int) -> str:
-    """Return just the channel name (e.g. pokemon-online❣️) for list display. Prefer cache/bot over 'Channel-XXXXXX'."""
+    """Return just the channel name (e.g. pokemon-online❣️) for list display. Prefer cache, then source_channels.json, then channel_display_names.json."""
     try:
         ch = bot.get_channel(channel_id)
         if ch and getattr(ch, "name", None):
@@ -101,6 +131,9 @@ def _source_channel_name_only(bot: commands.Bot, channel_id: int) -> str:
     info = _SOURCE_CHANNEL_FULL.get(channel_id)
     if info:
         return (info[2] or "").strip() or f"Channel-{str(channel_id)[-6:]}"
+    _load_display_names_override()
+    if channel_id in _DISPLAY_NAMES_OVERRIDE:
+        return _DISPLAY_NAMES_OVERRIDE[channel_id]
     return f"Channel-{str(channel_id)[-6:]}"
 
 
@@ -123,6 +156,9 @@ def _source_channel_display_and_guild(bot: commands.Bot, channel_id: int) -> Tup
     if info:
         gid, guild_name, cname = info
         return (f"{guild_name} / #{cname}", int(gid))
+    _load_display_names_override()
+    if channel_id in _DISPLAY_NAMES_OVERRIDE:
+        return (f"# {_DISPLAY_NAMES_OVERRIDE[channel_id]}", 0)
     return (f"Channel-{str(channel_id)[-6:]}", 0)
 
 
