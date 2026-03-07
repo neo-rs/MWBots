@@ -85,19 +85,41 @@ def _load_source_channel_names() -> Dict[int, Tuple[str, str]]:
 
 def _get_channel_display_name(bot: commands.Bot, channel_id: int) -> str:
     """Return 'ServerName / #channel-name' or fallback to 'Channel-XXXXXX' using bot cache or source_channels.json."""
+    _name, _ = _source_channel_display_and_guild(bot, channel_id)
+    return _name
+
+
+def _source_channel_display_and_guild(bot: commands.Bot, channel_id: int) -> Tuple[str, int]:
+    """
+    Canonical: (display_name, guild_id_for_link).
+    Same logic for all /discum channel display (Channel Mappings, Manage preview, dropdowns).
+    guild_id_for_link is 0 when unknown (no clickable link).
+    """
     try:
         ch = bot.get_channel(channel_id)
-        if ch:
-            gname = getattr(ch.guild, "name", "Unknown") if hasattr(ch, "guild") and ch.guild else "Unknown"
-            cname = getattr(ch, "name", f"Channel-{channel_id}")
-            return f"{gname} / #{cname}"
+        if ch and hasattr(ch, "guild") and ch.guild:
+            gname = getattr(ch.guild, "name", "Unknown")
+            cname = getattr(ch, "name", f"Channel-{str(channel_id)[-6:]}")
+            return (f"{gname} / #{cname}", int(ch.guild.id))
     except Exception:
         pass
-    names = _load_source_channel_names()
-    if channel_id in names:
-        gname, cname = names[channel_id]
-        return f"{gname} / #{cname}"
-    return f"Channel-{str(channel_id)[-6:]}"
+    _load_source_channel_names()
+    info = _SOURCE_CHANNEL_FULL.get(channel_id)
+    if info:
+        gid, guild_name, cname = info
+        return (f"{guild_name} / #{cname}", int(gid))
+    return (f"Channel-{str(channel_id)[-6:]}", 0)
+
+
+def _format_mapping_line(channel_name: str, dest_display: str, guild_id: int, channel_id: int) -> str:
+    """
+    One mapping line: channel → destination. Same format everywhere (Browse source & map style).
+    When guild_id > 0, channel name is a clickable Discord link.
+    """
+    if guild_id and channel_id:
+        url = f"https://discord.com/channels/{guild_id}/{channel_id}"
+        return f"💥・[{channel_name}]({url}) → {dest_display}"
+    return f"💥・{channel_name} → {dest_display}"
 
 def cfg_get(key: str, default: str = "") -> str:
     """Get config value from env file, then os.environ, then settings.json."""
@@ -335,45 +357,43 @@ class MappingViewView(discord.ui.View):
         self.channel_map = channel_map
         self.owner_id = owner_id
         self.current_page = 0
-        # (guild or None, mappings, guild_id) so we can show/sort by name when bot not in guild
-        self.guild_mappings: List[Tuple[Optional[discord.Guild], List[Tuple[int, str, Optional[str]]], int]] = []
+        # (guild or None, mappings, guild_id). Each mapping: (channel_id, channel_name, dest_display, link_guild_id)
+        self.guild_mappings: List[Tuple[Optional[discord.Guild], List[Tuple[int, str, Optional[str], int]], int]] = []
         self._build_guild_mappings()
         self._rebuild_buttons()
     
     def _build_guild_mappings(self) -> None:
-        """Build list of guilds and their channel mappings."""
-        guild_dict: Dict[int, List[Tuple[int, str, Optional[str]]]] = {}
+        """Build list of guilds and their channel mappings. Each mapping has link_guild_id for clickable channel links."""
+        guild_dict: Dict[int, List[Tuple[int, str, Optional[str], int]]] = {}
         
-        _load_source_channel_names()  # ensure cache for fallback
+        _load_source_channel_names()
         for channel_id, webhook_url in self.channel_map.items():
             dest_channel_id, dest_channel_name = resolve_webhook_destination(webhook_url, self.bot)
             dest_display = dest_channel_name if dest_channel_name else "webhook"
+            channel_name, link_guild_id = _source_channel_display_and_guild(self.bot, channel_id)
             try:
                 channel = self.bot.get_channel(channel_id)
-                if channel and hasattr(channel, 'guild') and channel.guild:
+                if channel and hasattr(channel, "guild") and channel.guild:
                     guild_id = channel.guild.id
-                    channel_name = getattr(channel, 'name', f'Channel-{str(channel_id)[-6:]}')
                     if guild_id not in guild_dict:
                         guild_dict[guild_id] = []
-                    guild_dict[guild_id].append((channel_id, channel_name, dest_display))
+                    guild_dict[guild_id].append((channel_id, channel_name, dest_display, link_guild_id))
                 else:
-                    # Bot not in source guild: use source_channels.json names
                     info = _SOURCE_CHANNEL_FULL.get(channel_id)
                     if info:
-                        gid, guild_name, channel_name = info
+                        gid, _, _ = info
                         if gid not in guild_dict:
                             guild_dict[gid] = []
-                        guild_dict[gid].append((channel_id, channel_name, dest_display))
+                        guild_dict[gid].append((channel_id, channel_name, dest_display, link_guild_id))
                     else:
                         if 0 not in guild_dict:
                             guild_dict[0] = []
-                        guild_dict[0].append((channel_id, f"Channel-{str(channel_id)[-6:]}", dest_display))
+                        guild_dict[0].append((channel_id, channel_name, dest_display, link_guild_id))
             except Exception:
                 if 0 not in guild_dict:
                     guild_dict[0] = []
-                guild_dict[0].append((channel_id, f"Channel-{str(channel_id)[-6:]}", dest_display))
+                guild_dict[0].append((channel_id, channel_name, dest_display, link_guild_id))
         
-        # Build list (guild or None, mappings, guild_id); use cached guild name when bot not in guild
         self.guild_mappings = []
         for guild_id, mappings in guild_dict.items():
             try:
@@ -399,7 +419,7 @@ class MappingViewView(discord.ui.View):
         return True
     
     def _get_page_content(self, page: int) -> Tuple[str, int]:
-        """Get content for a specific page."""
+        """Get content for a specific page. Each page = one source server (guild). Channel names are clickable when we have guild/channel."""
         if not self.guild_mappings:
             return "**No channel mappings configured.**", 0
         
@@ -409,13 +429,14 @@ class MappingViewView(discord.ui.View):
         guild, mappings, guild_id = self.guild_mappings[page]
         guild_name = guild.name if guild else _SOURCE_GUILD_NAMES.get(guild_id, "Unknown Guild")
         
-        lines = [f"**{guild_name}**"]
+        lines = ["*Each page = one source server (guild).*", ""]
+        lines.append(f"**{guild_name}**")
         lines.append(f"*Guild ID: {guild.id if guild else guild_id}*")
         lines.append("")
         
-        for channel_id, channel_name, dest_name in mappings:
+        for channel_id, channel_name, dest_name, link_gid in mappings:
             dest_display = dest_name if dest_name else "webhook"
-            lines.append(f"💥・{channel_name} → {dest_display}")
+            lines.append(_format_mapping_line(channel_name, dest_display, link_gid, channel_id))
         
         content = "\n".join(lines)
         return content, max_page
@@ -705,23 +726,29 @@ class ManageMappingsView(discord.ui.View):
                 break
         embed.description = f"Destination: {dest_disp}\n\nSelect a **source mapping** below to remove/update."
 
-        # Show a preview list (first ~20 sources) so user can browse without opening dropdown
+        # Show a preview list (first ~20 sources), same format as Browse: channel name clickable when we have guild
         src_ids = list(self._dest_groups.get(self.selected_dest_key) or [])
         preview = []
         for cid in src_ids[:20]:
-            preview.append(f"💥・{_get_channel_display_name(self.bot, cid)} `{cid}`")
+            name, link_gid = _source_channel_display_and_guild(self.bot, cid)
+            if link_gid and cid:
+                preview.append(f"💥・[{name}](https://discord.com/channels/{link_gid}/{cid})")
+            else:
+                preview.append(f"💥・{name}")
         if preview:
             embed.add_field(name="Sources (preview)", value="\n".join(preview), inline=False)
         if len(src_ids) > 20:
             embed.add_field(name="More", value=f"…and {len(src_ids) - 20} more", inline=False)
 
         if self.selected_source_channel_id:
-            wh = self.channel_map.get(self.selected_source_channel_id, "")
-            embed.add_field(
-                name="Selected",
-                value=f"`{self.selected_source_channel_id}`\n{_get_channel_display_name(self.bot, self.selected_source_channel_id)}",
-                inline=False,
-            )
+            cid = self.selected_source_channel_id
+            wh = self.channel_map.get(cid, "")
+            name, link_gid = _source_channel_display_and_guild(self.bot, cid)
+            if link_gid and cid:
+                selected_val = f"[{name}](https://discord.com/channels/{link_gid}/{cid})"
+            else:
+                selected_val = name
+            embed.add_field(name="Selected", value=selected_val, inline=False)
             embed.add_field(
                 name="Webhook",
                 value=f"`{wh[:80]}…`" if len(wh) > 80 else f"`{wh}`",
