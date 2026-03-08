@@ -1240,6 +1240,11 @@ def register_discum_commands_to_bot(bot_instance: commands.Bot) -> None:
     async def _discum_cmd(interaction: discord.Interaction, action: app_commands.Choice[str]):
         await _discum_browse_impl(interaction, action, bot_instance)
 
+
+# So the module's bot has /discum when run via main() or when another process imports and runs it
+register_discum_commands_to_bot(bot)
+
+
 def _list_guild_commands_via_api(token: str, guild_id: int) -> None:
     """List slash commands registered for the guild via Discord API (no bot run)."""
     if not token or not guild_id:
@@ -1275,13 +1280,12 @@ def _list_guild_commands_via_api(token: str, guild_id: int) -> None:
 
 
 async def main():
-    """Main entry point. Register /discum once on our bot, then start."""
+    """Main entry point. Bot already has /discum from module load; start it."""
     print("=" * 50)
     print("DISCUM COMMAND BOT")
     print("=" * 50)
     print(f"[INFO] Channel map path: {_CHANNEL_MAP_PATH}")
     print(f"[INFO] Target guild: {MIRRORWORLD_SERVER_ID or 'Global'}")
-    register_discum_commands_to_bot(bot)
     await bot.start(BOT_TOKEN)
 
 
