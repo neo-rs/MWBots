@@ -53,7 +53,17 @@ _DISPLAY_NAMES_LOADED = 0.0
 
 # Why "Channel-XXXXXX" appears: channel_map.json only stores ID -> webhook; names come from (1) bot cache,
 # (2) source_channels.json (written when the discumbot fetches/caches source guild channels), or
-# (3) channel_display_names.json (optional manual map). Add channel_display_names.json to fix missing names.
+# (3) channel_display_names.json (optional manual map). If source_channels.json exists but some channels
+# still show as Channel-XXXXXX, those channel IDs are from a guild that was never cached (e.g. only 2 guilds
+# in the cache but channel_map has sources from a 3rd guild). Fix: run discumbot fetch for that guild, or
+# add channel_display_names.json with those channel_id -> name entries.
+# (4) When opening View Current Mappings we can also fetch names via the same user-token API that
+# "Browse source & map" uses (list_user_guilds + list_source_guild_channels), so View Mappings shows
+# the same names as Browse.
+
+_LIVE_CHANNEL_NAMES_CACHE: Dict[int, str] = {}
+_LIVE_CHANNEL_NAMES_CACHE_TIME: float = 0.0
+_LIVE_CACHE_TTL = 60.0  # seconds
 
 
 def _load_display_names_override() -> Dict[int, str]:
@@ -76,6 +86,51 @@ def _load_display_names_override() -> Dict[int, str]:
             continue
     _DISPLAY_NAMES_OVERRIDE = out
     _DISPLAY_NAMES_LOADED = time.time()
+    return out
+
+
+async def _fetch_channel_names_via_user_token() -> Dict[int, str]:
+    """
+    Same source as "Browse source & map": use user token to list guilds and then
+    list_source_guild_channels for each guild. Returns channel_id -> channel name.
+    Cached for _LIVE_CACHE_TTL seconds. Use this when building View Current Mappings
+    so we show the same names as in Browse.
+    """
+    global _LIVE_CHANNEL_NAMES_CACHE, _LIVE_CHANNEL_NAMES_CACHE_TIME
+    now = time.time()
+    if now - _LIVE_CHANNEL_NAMES_CACHE_TIME < _LIVE_CACHE_TTL and _LIVE_CHANNEL_NAMES_CACHE:
+        return _LIVE_CHANNEL_NAMES_CACHE
+    token = _get_browse_user_token()
+    if not token:
+        return {}
+    try:
+        from discord_user_api import list_user_guilds, list_source_guild_channels
+    except ImportError:
+        return {}
+    info = await list_user_guilds(user_token=token)
+    if not info.get("ok"):
+        return {}
+    guilds = info.get("guilds") or []
+    out: Dict[int, str] = {}
+    for g in guilds:
+        gid = int(g.get("id") or 0)
+        if gid <= 0:
+            continue
+        try:
+            ch_info = await list_source_guild_channels(source_guild_id=gid, user_token=token)
+            if not ch_info.get("ok"):
+                continue
+            for ch in (ch_info.get("channels") or []):
+                if not isinstance(ch, dict):
+                    continue
+                cid = int(ch.get("id") or 0)
+                name = str(ch.get("name") or "").strip()
+                if cid and name:
+                    out[cid] = name
+        except Exception:
+            continue
+    _LIVE_CHANNEL_NAMES_CACHE = out
+    _LIVE_CHANNEL_NAMES_CACHE_TIME = time.time()
     return out
 
 
@@ -451,11 +506,12 @@ async def _safe_send_ephemeral(i: discord.Interaction, content: str) -> None:
 class MappingViewView(discord.ui.View):
     """View for channel mappings organized by Mirror World destination. Each page = one destination; manage (remove/update) from here."""
     
-    def __init__(self, bot_obj: commands.Bot, channel_map: Dict[int, str], owner_id: int):
+    def __init__(self, bot_obj: commands.Bot, channel_map: Dict[int, str], owner_id: int, *, live_channel_names: Optional[Dict[int, str]] = None):
         super().__init__(timeout=600)
         self.bot = bot_obj
         self.channel_map = channel_map
         self.owner_id = owner_id
+        self.live_channel_names: Dict[int, str] = dict(live_channel_names) if live_channel_names else {}
         self.current_page = 0
         self.source_page = 0
         self.selected_source_id: Optional[int] = None
@@ -463,6 +519,12 @@ class MappingViewView(discord.ui.View):
         self.dest_pages: List[Tuple[str, Optional[int], str, List[int]]] = []
         self._build_pages()
         self._rebuild_buttons()
+    
+    def _get_channel_name(self, cid: int) -> str:
+        """Use live names (same as Browse) if we have them, else fallback to cache/display_names."""
+        if cid in self.live_channel_names:
+            return self.live_channel_names[cid]
+        return _source_channel_name_only(self.bot, cid)
     
     def _build_pages(self) -> None:
         _load_source_channel_names()
@@ -486,7 +548,7 @@ class MappingViewView(discord.ui.View):
         dest_key, _did, dest_display, src_ids = self.dest_pages[page]
         lines = [f"**{dest_display}**", ""]
         for cid in src_ids:
-            name = _source_channel_name_only(self.bot, cid)
+            name = self._get_channel_name(cid)
             lines.append(f"💥・{name} {cid}")
         return "\n".join(lines), max_page
     
@@ -519,7 +581,7 @@ class MappingViewView(discord.ui.View):
         if page_srcs:
             opts = []
             for cid in page_srcs:
-                label = _source_channel_name_only(self.bot, cid)
+                label = self._get_channel_name(cid)
                 if len(label) > 100:
                     label = label[:97] + "..."
                 opts.append(discord.SelectOption(label=label, value=str(cid)))
@@ -553,7 +615,7 @@ class MappingViewView(discord.ui.View):
         embed.set_footer(text=f"Page {self.current_page + 1} of {max_page + 1} ({len(self.channel_map)} total mappings)")
         if self.selected_source_id is not None:
             cid = self.selected_source_id
-            name = _source_channel_name_only(self.bot, cid)
+            name = self._get_channel_name(cid)
             wh = self.channel_map.get(cid, "")
             embed.add_field(name="Selected", value=f"💥・{name} `{cid}`", inline=False)
             embed.add_field(name="Webhook", value=f"`{wh[:80]}…`" if len(wh) > 80 else f"`{wh}`", inline=False)
@@ -640,7 +702,7 @@ class MappingViewView(discord.ui.View):
         if cid in self.channel_map:
             del self.channel_map[cid]
             if _save_channel_map(self.channel_map):
-                name = _source_channel_name_only(self.bot, cid)
+                name = self._get_channel_name(cid)
                 await _safe_send_ephemeral(interaction, f"✅ Removed mapping for **{name}** (`{cid}`)")
                 self.selected_source_id = None
                 self._build_pages()
@@ -1158,7 +1220,10 @@ async def _discum_browse_impl(
                     )
                     return
                 _log_channel_mapping(f"View Current Mappings: building view for {len(channel_map)} mappings")
-                view = MappingViewView(self.bot, channel_map, self.owner_id)
+                live_names = await _fetch_channel_names_via_user_token()
+                if live_names:
+                    _log_channel_mapping(f"View Current Mappings: using {len(live_names)} live channel names (same as Browse)")
+                view = MappingViewView(self.bot, channel_map, self.owner_id, live_channel_names=live_names)
                 embed = view._build_embed()
                 await _safe_edit(interaction, content=None, embed=embed, view=view)
                 _log_channel_mapping(f"View Current Mappings done (count={len(channel_map)})")
