@@ -491,7 +491,9 @@ class MappingViewView(discord.ui.View):
     def _build_embed(self) -> discord.Embed:
         content, max_page = self._get_page_content(self.current_page)
         embed = discord.Embed(title="Channel Mappings", description=content, color=discord.Color.blurple())
-        embed.set_footer(text=f"Page {self.current_page + 1} of {max_page + 1} ({len(self.channel_map)} total mappings)")
+        footer = f"Page {self.current_page + 1} of {max_page + 1} ({len(self.channel_map)} total mappings)"
+        footer += " • Source channels in other servers may show as Channel-XXX (Discord unresolved mention)"
+        embed.set_footer(text=footer)
         if self.selected_source_id is not None:
             cid = self.selected_source_id
             wh = self.channel_map.get(cid, "")
