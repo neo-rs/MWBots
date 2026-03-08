@@ -49,29 +49,46 @@ _SOURCE_NAMES_LOADED = 0.0
 
 
 def _load_source_channel_names() -> Dict[int, Tuple[int, str]]:
-    """Load channel_id -> (guild_id, guild_name) from config/source_channels.json. Used only for ' — Server Name' next to <#id>."""
+    """Load channel_id -> (guild_id, guild_name) from source_channels.json and channel_map_info.json (verify script)."""
     global _SOURCE_CHANNEL_FULL, _SOURCE_GUILD_NAMES, _SOURCE_NAMES_LOADED
-    path = str(Path(_CHANNEL_MAP_PATH).resolve().parent / "source_channels.json")
+    config_dir = Path(_CHANNEL_MAP_PATH).resolve().parent
+    full: Dict[int, Tuple[int, str]] = {}
+    guild_names: Dict[int, str] = {}
+    path = config_dir / "source_channels.json"
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError, Exception):
-        return _SOURCE_CHANNEL_FULL
-    full: Dict[int, Tuple[int, str]] = {}
-    guild_names: Dict[int, str] = {}
-    for guild in data.get("guilds", []) or []:
-        try:
-            gid = int(guild.get("guild_id", 0))
-        except (TypeError, ValueError):
-            continue
-        guild_name = (guild.get("guild_name") or f"Guild-{gid}").strip() or "Unknown"
-        guild_names[gid] = guild_name
-        for ch in guild.get("channels", []) or []:
+        for guild in data.get("guilds", []) or []:
             try:
-                cid = int(ch.get("id", 0))
-                full[cid] = (gid, guild_name)
+                gid = int(guild.get("guild_id", 0))
             except (TypeError, ValueError):
                 continue
+            guild_name = (guild.get("guild_name") or f"Guild-{gid}").strip() or "Unknown"
+            guild_names[gid] = guild_name
+            for ch in guild.get("channels", []) or []:
+                try:
+                    cid = int(ch.get("id", 0))
+                    full[cid] = (gid, guild_name)
+                except (TypeError, ValueError):
+                    continue
+    except (FileNotFoundError, json.JSONDecodeError, Exception):
+        pass
+    path_info = config_dir / "channel_map_info.json"
+    try:
+        with open(path_info, "r", encoding="utf-8") as f:
+            info = json.load(f)
+        for cid_str, ent in (info.get("channels") or {}).items():
+            try:
+                cid = int(cid_str)
+                gid = int(ent.get("guild_id", 0))
+                gname = (ent.get("guild_name") or f"Guild-{gid}").strip() or "Unknown"
+                full[cid] = (gid, gname)
+                if gid:
+                    guild_names[gid] = gname
+            except (TypeError, ValueError, AttributeError):
+                continue
+    except (FileNotFoundError, json.JSONDecodeError, Exception):
+        pass
     _SOURCE_CHANNEL_FULL = full
     _SOURCE_GUILD_NAMES = guild_names
     _SOURCE_NAMES_LOADED = time.time()
@@ -496,7 +513,7 @@ class MappingViewView(discord.ui.View):
         _log_channel_mapping(f"SENT_DESCRIPTION sample (format=numbered <#id>): {sample_str[:350]}", level="INFO")
         embed = discord.Embed(title="Channel Mappings", description=content, color=discord.Color.blurple())
         footer = f"Page {self.current_page + 1} of {max_page + 1} ({len(self.channel_map)} total mappings)"
-        footer += " • Source channels in other servers may show as Channel-XXX (Discord unresolved mention)"
+        footer += " • # unknown / No Access = Discord cannot resolve that channel (deleted, no access, or other server); run scripts/verify_discum_channel_ids.py to check"
         embed.set_footer(text=footer)
         if self.selected_source_id is not None:
             cid = self.selected_source_id
@@ -1178,7 +1195,7 @@ async def _discum_browse_impl(
                     _log_channel_mapping("Browse source: missing user token", level="WARN")
                     await _safe_edit(
                         interaction,
-                        content="**Missing user token for browsing.** Set DISCUM_BOT or DISCUM_USER_DISCUMBOT in config/tokens.env (same as the main discumbot).",
+                        content="**Missing user token for browsing.** Set DISCUM_USER_DISCUMBOT in config/tokens.env (same as the main discumbot).",
                         embed=None,
                         view=None,
                     )
