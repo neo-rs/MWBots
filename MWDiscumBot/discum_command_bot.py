@@ -424,6 +424,7 @@ class MappingViewView(discord.ui.View):
         return self.dest_pages[self.current_page][3]
     
     def _rebuild_buttons(self) -> None:
+        """Rebuild components once (clear then add). One view per message, no duplicate buttons."""
         self.clear_items()
         _content, max_page = self._get_page_content(self.current_page)
         src_ids = self._current_sources()
@@ -505,6 +506,8 @@ class MappingViewView(discord.ui.View):
         await _safe_edit(interaction, embed=embed, view=self)
     
     async def _prev_page(self, interaction: discord.Interaction) -> None:
+        if _resp_done(interaction):
+            return
         _log_channel_mapping("MappingViewView Prev page clicked")
         if not await self._guard(interaction):
             return
@@ -516,6 +519,8 @@ class MappingViewView(discord.ui.View):
         await self._update_message(interaction)
     
     async def _next_page(self, interaction: discord.Interaction) -> None:
+        if _resp_done(interaction):
+            return
         _log_channel_mapping("MappingViewView Next page clicked")
         if not await self._guard(interaction):
             return
@@ -528,6 +533,8 @@ class MappingViewView(discord.ui.View):
         await self._update_message(interaction)
     
     async def _prev_source_page(self, interaction: discord.Interaction) -> None:
+        if _resp_done(interaction):
+            return
         if not await self._guard(interaction):
             return
         await _safe_defer_ephemeral(interaction)
@@ -536,6 +543,8 @@ class MappingViewView(discord.ui.View):
         await self._update_message(interaction)
     
     async def _next_source_page(self, interaction: discord.Interaction) -> None:
+        if _resp_done(interaction):
+            return
         if not await self._guard(interaction):
             return
         await _safe_defer_ephemeral(interaction)
@@ -547,6 +556,8 @@ class MappingViewView(discord.ui.View):
         await self._update_message(interaction)
     
     async def _refresh(self, interaction: discord.Interaction) -> None:
+        if _resp_done(interaction):
+            return
         if not await self._guard(interaction):
             return
         await _safe_defer_ephemeral(interaction)
@@ -558,6 +569,8 @@ class MappingViewView(discord.ui.View):
         await self._update_message(interaction)
     
     async def _select_source(self, interaction: discord.Interaction) -> None:
+        if _resp_done(interaction):
+            return
         if not await self._guard(interaction):
             return
         await _safe_defer_ephemeral(interaction)
@@ -570,6 +583,8 @@ class MappingViewView(discord.ui.View):
             await _safe_send_ephemeral(interaction, f"❌ Error: {e}")
     
     async def _remove_mapping(self, interaction: discord.Interaction) -> None:
+        if _resp_done(interaction):
+            return
         if not await self._guard(interaction):
             return
         if self.selected_source_id is None:
@@ -591,6 +606,8 @@ class MappingViewView(discord.ui.View):
             await _safe_send_ephemeral(interaction, "❌ Mapping not found.")
     
     async def _update_webhook(self, interaction: discord.Interaction) -> None:
+        if _resp_done(interaction):
+            return
         if not await self._guard(interaction):
             return
         if self.selected_source_id is None:
@@ -620,6 +637,8 @@ class WebhookUpdateModal(discord.ui.Modal, title="Update Webhook URL"):
         self.webhook_url_input.default = current_url
     
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        if _resp_done(interaction):
+            return
         try:
             if int(interaction.user.id) != self.owner_id:
                 await _safe_send_ephemeral(interaction, "❌ This modal is not for you.")
@@ -910,6 +929,8 @@ async def _discum_browse_for_guild(interaction: discord.Interaction, *, source_g
 
         @discord.ui.button(label="Map → destination", style=discord.ButtonStyle.success)
         async def map_btn(self, i: discord.Interaction, _b: discord.ui.Button) -> None:
+            if _resp_done(i):
+                return
             if not self.selected_ids:
                 await i.response.send_message("No source channels selected.", ephemeral=True)
                 return
@@ -960,6 +981,8 @@ async def _discum_browse_for_guild(interaction: discord.Interaction, *, source_g
 
         @discord.ui.button(label="Unmap selected", style=discord.ButtonStyle.danger)
         async def unmap_btn(self, i: discord.Interaction, _b: discord.ui.Button) -> None:
+            if _resp_done(i):
+                return
             if not self.selected_ids:
                 await i.response.send_message("No source channels selected.", ephemeral=True)
                 return
@@ -1083,6 +1106,8 @@ async def _discum_browse_impl(
 
         @discord.ui.button(label="View Current Mappings", style=discord.ButtonStyle.primary, emoji="📋", row=0)
         async def view_mappings(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if _resp_done(interaction):
+                return
             _log_channel_mapping("View Current Mappings button clicked")
             await _safe_defer_ephemeral(interaction)
             try:
@@ -1120,6 +1145,8 @@ async def _discum_browse_impl(
 
         @discord.ui.button(label="Browse source & map", style=discord.ButtonStyle.secondary, emoji="🗺️", row=0)
         async def browse_source(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if _resp_done(interaction):
+                return
             _log_channel_mapping("Browse source & map button clicked")
             await _safe_defer_ephemeral(interaction)
             try:
@@ -1204,7 +1231,7 @@ async def _discum_browse_impl(
 
 
 def register_discum_commands_to_bot(bot_instance: commands.Bot) -> None:
-    """Register /discum slash command on an existing bot (e.g. DataManagerBot). Call before bot.run()."""
+    """Register /discum slash command on an existing bot (e.g. DataManagerBot). Call before bot.run(). Single registration path — no duplicate handlers."""
     @bot_instance.tree.command(name="discum", description="Browse and manage Discum bot channel mappings")
     @app_commands.describe(action="Action to perform")
     @app_commands.choices(action=[
@@ -1212,16 +1239,6 @@ def register_discum_commands_to_bot(bot_instance: commands.Bot) -> None:
     ])
     async def _discum_cmd(interaction: discord.Interaction, action: app_commands.Choice[str]):
         await _discum_browse_impl(interaction, action, bot_instance)
-
-
-# Standalone: register on our own bot when running discum_command_bot.py
-@bot.tree.command(name="discum", description="Browse and manage Discum bot channel mappings")
-@app_commands.describe(action="Action to perform")
-@app_commands.choices(action=[
-    app_commands.Choice(name="browse", value="browse"),
-])
-async def discum_command(interaction: discord.Interaction, action: app_commands.Choice[str]):
-    await _discum_browse_impl(interaction, action, bot)
 
 def _list_guild_commands_via_api(token: str, guild_id: int) -> None:
     """List slash commands registered for the guild via Discord API (no bot run)."""
@@ -1258,12 +1275,13 @@ def _list_guild_commands_via_api(token: str, guild_id: int) -> None:
 
 
 async def main():
-    """Main entry point."""
+    """Main entry point. Register /discum once on our bot, then start."""
     print("=" * 50)
     print("DISCUM COMMAND BOT")
     print("=" * 50)
     print(f"[INFO] Channel map path: {_CHANNEL_MAP_PATH}")
     print(f"[INFO] Target guild: {MIRRORWORLD_SERVER_ID or 'Global'}")
+    register_discum_commands_to_bot(bot)
     await bot.start(BOT_TOKEN)
 
 
