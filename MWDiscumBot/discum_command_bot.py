@@ -1046,6 +1046,10 @@ class DiscumCommandBot(commands.Bot):
             )
             print(f"[INFO] If /discum is not visible: ensure this bot is in the server with slash command scope. Re-invite: {invite_url}")
         print(f"[INFO] Ready to handle /discum browse")
+        print(f"[INFO] Channel Mappings display: numbered list (1. <#id>, 2. <#id>...) — if you see 'Channel-XXXXX' the wrong code path is running")
+
+# Log once at import so deploy can confirm this file is the one running (Channel Mappings use "1. <#id>")
+print("[discum_command_bot] loaded — Channel Mappings format: 1. <#id>, 2. <#id> ...")
 
 # Create bot instance
 bot = DiscumCommandBot()
