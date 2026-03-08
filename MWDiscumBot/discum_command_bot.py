@@ -1077,6 +1077,9 @@ async def _discum_browse_impl(
     bot_obj: commands.Bot,
 ) -> None:
     """Shared /discum browse handler (used by standalone bot or when registered on DataManagerBot)."""
+    if _resp_done(interaction):
+        _log_channel_mapping("DUPLICATE /discum invocation ignored (already responded) — prevents two messages", level="WARN")
+        return
     _log_channel_mapping(f"/discum triggered (action={action.value}) — handler=discum_command_bot.py")
     if action.value != "browse":
         await _safe_send_ephemeral(interaction, "❌ Unknown action.")
