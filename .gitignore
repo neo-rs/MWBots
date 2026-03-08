@@ -27,3 +27,6 @@
 # Discum channel caches are runtime artifacts (never commit)
 MWDiscumBot/config/source_channels.json
 MWDiscumBot/config/destination_channels.json
+
+# WhopMembershipSync secrets (never commit)
+WhopMembershipSync/config.secrets.json
