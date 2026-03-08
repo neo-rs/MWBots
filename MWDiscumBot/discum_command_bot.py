@@ -490,6 +490,10 @@ class MappingViewView(discord.ui.View):
 
     def _build_embed(self) -> discord.Embed:
         content, max_page = self._get_page_content(self.current_page)
+        # Log exact description sample so journal shows what we sent (proves which code path ran)
+        sample = (content or "").strip().split("\n")[:4]
+        sample_str = " | ".join(s for s in sample if s)
+        _log_channel_mapping(f"SENT_DESCRIPTION sample (format=numbered <#id>): {sample_str[:350]}", level="INFO")
         embed = discord.Embed(title="Channel Mappings", description=content, color=discord.Color.blurple())
         footer = f"Page {self.current_page + 1} of {max_page + 1} ({len(self.channel_map)} total mappings)"
         footer += " • Source channels in other servers may show as Channel-XXX (Discord unresolved mention)"
@@ -1073,7 +1077,7 @@ async def _discum_browse_impl(
     bot_obj: commands.Bot,
 ) -> None:
     """Shared /discum browse handler (used by standalone bot or when registered on DataManagerBot)."""
-    _log_channel_mapping(f"/discum triggered (action={action.value})")
+    _log_channel_mapping(f"/discum triggered (action={action.value}) — handler=discum_command_bot.py")
     if action.value != "browse":
         await _safe_send_ephemeral(interaction, "❌ Unknown action.")
         return
@@ -1137,7 +1141,7 @@ async def _discum_browse_impl(
                         view=None,
                     )
                     return
-                _log_channel_mapping(f"View Current Mappings: building view for {len(channel_map)} mappings")
+                _log_channel_mapping(f"View Current Mappings: building view for {len(channel_map)} mappings (discum_command_bot.MappingViewView)")
                 view = MappingViewView(self.bot, channel_map, self.owner_id)
                 embed = view._build_embed()
                 await _safe_edit(interaction, content=None, embed=embed, view=view)
