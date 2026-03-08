@@ -102,15 +102,9 @@ def _format_mapping_line(channel_name: str, dest_display: str, guild_id: int, ch
     return f"💥・{src} → {dest_display}"
 
 
-def _format_channel_mention_line(channel_id: int, guild_name: str) -> str:
-    """
-    One line for Channel Mappings list: Discord channel mention (clickable) + optional server name.
-    Uses <#channel_id> so Discord renders it as #channel-name. Format: 💥・<#id> — Server Name
-    """
-    line = f"💥・<#{channel_id}>"
-    if guild_name and guild_name.strip():
-        line += f" — {guild_name.strip()}"
-    return line
+def _format_channel_mention(channel_id: int) -> str:
+    """Single channel display: <#channel_id> (Discord resolves to #channel-name and server)."""
+    return f"<#{channel_id}>"
 
 def cfg_get(key: str, default: str = "") -> str:
     """Get config value from env file, then os.environ, then settings.json."""
@@ -399,10 +393,6 @@ class MappingViewView(discord.ui.View):
         self._build_pages()
         self._rebuild_buttons()
     
-    def _get_channel_label(self, cid: int) -> str:
-        """Label for dropdown / ephemeral messages: Discord channel mention format."""
-        return f"<#{cid}>"
-
     def _build_pages(self) -> None:
         _load_source_channel_names()
         self.dest_pages = _build_destination_pages(self.channel_map, self.bot)
@@ -417,16 +407,15 @@ class MappingViewView(discord.ui.View):
         return True
     
     def _get_page_content(self, page: int) -> Tuple[str, int]:
-        """One page = one Mirror World destination. Body: dest name then 💥・source_name source_id per line."""
+        """One page = one Mirror World destination. Body: dest then numbered lines 1. <#id>, 2. <#id>, ..."""
         if not self.dest_pages:
             return "**No channel mappings configured.**", 0
         max_page = max(0, len(self.dest_pages) - 1)
         page = max(0, min(page, max_page))
         dest_key, _did, dest_display, src_ids = self.dest_pages[page]
         lines = [f"**{dest_display}**", ""]
-        for cid in src_ids:
-            guild_name = _source_guild_name_only(self.bot, cid)
-            lines.append(_format_channel_mention_line(cid, guild_name))
+        for i, cid in enumerate(src_ids, 1):
+            lines.append(f"{i}. {_format_channel_mention(cid)}")
         return "\n".join(lines), max_page
     
     def _current_sources(self) -> List[int]:
@@ -457,8 +446,8 @@ class MappingViewView(discord.ui.View):
 
         if page_srcs:
             opts = []
-            for cid in page_srcs:
-                label = self._get_channel_label(cid)
+            for idx, cid in enumerate(page_srcs, 1):
+                label = f"{idx}. {_format_channel_mention(cid)}"
                 if len(label) > 100:
                     label = label[:97] + "..."
                 opts.append(discord.SelectOption(label=label, value=str(cid)))
@@ -504,9 +493,8 @@ class MappingViewView(discord.ui.View):
         embed.set_footer(text=f"Page {self.current_page + 1} of {max_page + 1} ({len(self.channel_map)} total mappings)")
         if self.selected_source_id is not None:
             cid = self.selected_source_id
-            guild_name = _source_guild_name_only(self.bot, cid)
             wh = self.channel_map.get(cid, "")
-            embed.add_field(name="Selected", value=_format_channel_mention_line(cid, guild_name), inline=False)
+            embed.add_field(name="Selected", value=_format_channel_mention(cid), inline=False)
             embed.add_field(name="Webhook", value=f"`{wh[:80]}…`" if len(wh) > 80 else f"`{wh}`", inline=False)
         return embed
     
@@ -591,7 +579,7 @@ class MappingViewView(discord.ui.View):
         if cid in self.channel_map:
             del self.channel_map[cid]
             if _save_channel_map(self.channel_map):
-                await _safe_send_ephemeral(interaction, f"✅ Removed mapping for {self._get_channel_label(cid)} (`{cid}`)")
+                await _safe_send_ephemeral(interaction, f"✅ Removed mapping for {_format_channel_mention(cid)}")
                 self.selected_source_id = None
                 self._build_pages()
                 embed = self._build_embed()
