@@ -1,0 +1,3600 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Channel Map - Mirror World</title>
+    <link rel="icon" type="image/png" href="./assets/images/rs-logo.png">
+    <link rel="stylesheet" href="./shared-styles.css">
+    <script src="./config.js"></script>
+    <style>
+        /* Glassy Dark Theme */
+        :root {
+            --bg-primary: #0f1419;
+            --bg-secondary: rgba(22, 27, 34, 0.8);
+            --bg-card: rgba(30, 35, 42, 0.6);
+            --bg-grid: #0a0d12;
+            --accent: #00d9ff;
+            --orange: #ff8c00;
+            --green: #3fb950;
+            --purple: #a371f7;
+            --red: #f85149;
+            --yellow: #d29922;
+            --text: #e6edf3;
+            --text-dim: #8b949e;
+            --border: rgba(99, 110, 123, 0.4);
+            --border-light: rgba(139, 148, 158, 0.2);
+            --glass: rgba(255, 255, 255, 0.03);
+            --glass-border: rgba(255, 255, 255, 0.08);
+            --shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            --radius: 16px;
+            --radius-sm: 10px;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #0a0d12 0%, #0f1419 50%, #141820 100%);
+            background-size: cover;
+            color: var(--text);
+            min-height: 100vh;
+        }
+        
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.6);
+            z-index: -1;
+        }
+
+        /* Use unified header from shared-styles.css */
+
+        /* Navigation Tabs - Glassy */
+        .nav-tabs {
+            display: flex;
+            gap: 3px;
+            background: rgba(255, 255, 255, 0.03);
+            padding: 4px;
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--glass-border);
+            backdrop-filter: blur(10px);
+        }
+
+        .nav-tab {
+            padding: 8px 18px;
+            border-radius: 8px;
+            color: var(--text-dim);
+            text-decoration: none;
+            font-size: 12px;
+            font-weight: 500;
+            transition: all 0.25s ease;
+        }
+
+        .nav-tab:hover {
+            color: var(--text);
+            background: rgba(255,255,255,0.08);
+        }
+
+        .nav-tab.active {
+            background: linear-gradient(135deg, var(--accent) 0%, #0099cc 100%);
+            color: #000;
+            font-weight: 600;
+            box-shadow: 0 2px 8px rgba(0, 217, 255, 0.3);
+        }
+
+        .toolbar-divider {
+            width: 1px;
+            height: 24px;
+            background: var(--border);
+            margin: 0 8px;
+        }
+
+        /* Main Layout */
+        .main-content {
+            margin-top: 50px;
+            padding: 12px;
+            min-height: calc(100vh - 50px);
+        }
+
+        /* Bridge Container - Compact layout */
+        .bridge-container {
+            display: grid;
+            grid-template-columns: 1fr 300px 1fr;
+            gap: 10px;
+            max-width: 1600px;
+            margin: 0 auto;
+        }
+
+        .server-panel {
+            background: rgba(15, 17, 20, 0.5);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: var(--radius);
+            overflow: hidden;
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            box-shadow: var(--shadow);
+            transition: all 0.3s ease;
+        }
+
+        .server-panel:hover {
+            border-color: var(--border);
+            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+        }
+
+        .server-panel-header {
+            padding: 10px 12px;
+            background: rgba(255, 255, 255, 0.02);
+            border-bottom: 1px solid var(--glass-border);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .server-panel-header h3 {
+            font-size: 14px;
+            font-weight: 600;
+            flex: 1;
+        }
+
+        .server-select {
+            width: 100%;
+            padding: 10px 12px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--glass-border);
+            border-radius: 6px;
+            color: var(--text);
+            font-size: 13px;
+            cursor: pointer;
+        }
+
+        .server-select:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
+        .channel-search {
+            width: 100%;
+            padding: 10px 12px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text);
+            font-size: 13px;
+            margin: 12px 16px;
+            width: calc(100% - 32px);
+        }
+
+        .channel-search:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
+        .channel-search::placeholder {
+            color: var(--text-dim);
+        }
+
+        .channel-list {
+            max-height: calc(100vh - 400px);
+            overflow-y: auto;
+            padding: 6px;
+        }
+
+        .channel-item {
+            padding: 10px 12px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .channel-item:hover {
+            background: rgba(0, 217, 255, 0.1);
+        }
+
+        .channel-item.selected {
+            background: rgba(0, 217, 255, 0.2);
+            border: 1px solid var(--accent);
+        }
+
+        .channel-item.mapped {
+            background: rgba(63, 185, 80, 0.15);
+        }
+
+        .channel-icon {
+            font-size: 16px;
+        }
+
+        .channel-name {
+            flex: 1;
+            font-size: 13px;
+        }
+
+        .channel-category {
+            font-size: 10px;
+            color: var(--text-dim);
+            padding: 2px 6px;
+            background: var(--bg-primary);
+            border-radius: 4px;
+        }
+
+        /* Discord-like Category Dropdowns */
+        .discord-category {
+            background: transparent;
+            border: none;
+            padding: 0;
+            margin: 0;
+            width: 100%;
+            text-align: left;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .discord-category-header {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 8px;
+            margin: 2px 0;
+            color: var(--text-dim);
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            transition: color 0.2s;
+            border-radius: 4px;
+        }
+
+        .discord-category-header:hover {
+            color: var(--text);
+            background: rgba(255,255,255,0.05);
+        }
+
+        .discord-category-icon {
+            font-size: 10px;
+            transition: transform 0.2s;
+        }
+
+        .discord-category-icon.collapsed {
+            transform: rotate(-90deg);
+        }
+
+        .discord-category-channels {
+            display: block;
+            padding-left: 8px;
+        }
+
+        .discord-category-channels.collapsed {
+            display: none;
+        }
+
+        .discord-channel-item {
+            padding: 4px 8px;
+            margin: 1px 0;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.15s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            color: var(--text-dim);
+        }
+
+        .discord-channel-item:hover {
+            background: rgba(255,255,255,0.05);
+            color: var(--text);
+        }
+
+        .discord-channel-item.selected {
+            background: var(--accent);
+            color: #000;
+        }
+
+        .discord-channel-item.mapped {
+            border-left: 3px solid var(--green);
+            padding-left: 7px;
+        }
+
+        .discord-channel-hash {
+            color: var(--text-dim);
+            font-size: 16px;
+        }
+
+        .discord-channel-name {
+            flex: 1;
+        }
+
+        .discord-category-badge {
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-size: 9px;
+            font-weight: 600;
+            text-transform: uppercase;
+            background: rgba(0, 217, 255, 0.15);
+            color: var(--accent);
+        }
+
+        .discord-category-badge.mapped {
+            background: rgba(63, 185, 80, 0.15);
+            color: var(--green);
+        }
+
+        /* Bridge Arrow */
+        .bridge-arrow-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 16px;
+        }
+
+        .bridge-arrow {
+            width: 60px;
+            height: 60px;
+            background: var(--bg-secondary);
+            border: 2px solid var(--accent);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            color: var(--accent);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .bridge-arrow:hover {
+            background: var(--accent);
+            color: #000;
+            transform: scale(1.1);
+        }
+
+        /* Bridge Center Panel - Compact Webhook Map */
+        .bridge-center-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            height: 100%;
+        }
+
+        .mapping-controls {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+            padding: 12px;
+            background: rgba(15, 17, 20, 0.5);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: var(--radius-sm);
+            backdrop-filter: blur(10px);
+        }
+
+        .btn-sm {
+            padding: 6px 16px !important;
+            font-size: 11px !important;
+        }
+
+        .center-webhook-map {
+            flex: 1;
+            background: rgba(15, 17, 20, 0.5);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: var(--radius-sm);
+            backdrop-filter: blur(10px);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            min-height: 200px;
+        }
+
+        .center-webhook-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 12px;
+            background: rgba(0, 217, 255, 0.1);
+            border-bottom: 1px solid var(--glass-border);
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--accent);
+        }
+
+        .webhook-count {
+            background: var(--accent);
+            color: #000;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 10px;
+            font-weight: 700;
+        }
+
+        .center-webhook-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .webhook-mini-card {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 10px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--glass-border);
+            border-radius: 6px;
+            border-left: 3px solid var(--green);
+            transition: all 0.2s;
+        }
+
+        .webhook-mini-card:hover {
+            background: rgba(255, 255, 255, 0.06);
+            transform: translateX(2px);
+        }
+
+        .webhook-mini-icon {
+            font-size: 14px;
+        }
+
+        .webhook-mini-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .webhook-mini-dest {
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--green);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .webhook-mini-src {
+            font-size: 9px;
+            color: var(--text-dim);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .webhook-mini-status {
+            font-size: 10px;
+        }
+
+        /* Mappings Panel - Glassy */
+        .mappings-panel {
+            background: var(--bg-card);
+            border: 1px solid var(--glass-border);
+            border-radius: var(--radius);
+            margin-top: 20px;
+            max-width: 1400px;
+            margin-left: auto;
+            margin-right: auto;
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            box-shadow: var(--shadow);
+        }
+
+        .mappings-header {
+            padding: 16px;
+            background: rgba(0,0,0,0.2);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .mappings-header h3 {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .mapping-count {
+            font-size: 12px;
+            padding: 4px 10px;
+            background: var(--accent);
+            color: #000;
+            border-radius: 12px;
+            font-weight: 600;
+        }
+
+        .mappings-list {
+            padding: 16px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .mapping-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px;
+            background: var(--bg-primary);
+            border-radius: 8px;
+            margin-bottom: 8px;
+        }
+
+        .mapping-source, .mapping-dest {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .mapping-arrow {
+            color: var(--green);
+            font-size: 18px;
+        }
+
+        .mapping-remove {
+            width: 28px;
+            height: 28px;
+            border-radius: 6px;
+            border: none;
+            background: rgba(248, 81, 73, 0.2);
+            color: var(--red);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+        }
+
+        .mapping-remove:hover {
+            background: var(--red);
+            color: #fff;
+        }
+
+        /* Empty State */
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: var(--text-dim);
+        }
+
+        .empty-state .icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+        }
+
+        /* Loading */
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            padding: 40px;
+            color: var(--text-dim);
+        }
+
+        .spinner {
+            width: 20px;
+            height: 20px;
+            border: 2px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Webhook Full Map - Glassy */
+        .webhook-fullmap-panel {
+            background: rgba(15, 17, 20, 0.5);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: var(--radius);
+            margin-top: 12px;
+            overflow: hidden;
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+
+        .webhook-cards-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+            gap: 10px;
+            padding: 10px;
+            max-height: 280px;
+            overflow-y: auto;
+        }
+
+        .webhook-card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--glass-border);
+            border-radius: 8px;
+            padding: 10px;
+            border-left: 3px solid var(--green);
+            transition: all 0.2s ease;
+        }
+
+        .webhook-card:hover {
+            border-color: var(--border);
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .webhook-card-header {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 8px;
+            padding-bottom: 6px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .webhook-card-dest {
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--green);
+            flex: 1;
+        }
+
+        .webhook-card-status {
+            font-size: 10px;
+            color: var(--text-dim);
+        }
+
+        .webhook-card-sources {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            max-height: 120px;
+            overflow-y: auto;
+        }
+
+        .webhook-source-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 6px;
+            background: rgba(0,217,255,0.08);
+            border-radius: 4px;
+            font-size: 10px;
+        }
+
+        .webhook-source-name {
+            flex: 1;
+            color: var(--accent);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .webhook-remove-btn {
+            width: 16px;
+            height: 16px;
+            border-radius: 4px;
+            border: none;
+            background: rgba(248,81,73,0.2);
+            color: var(--red);
+            cursor: pointer;
+            font-size: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }
+
+        .webhook-remove-btn:hover {
+            background: var(--red);
+            color: #fff;
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+        /* Discord-style Server Icon Sidebar - Glassy See-through */
+        .discord-servers-bar {
+            width: 72px;
+            background: rgba(15, 17, 20, 0.5);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 12px 0;
+            gap: 8px;
+            border-right: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 0 var(--radius) var(--radius) 0;
+            height: calc(100vh - 50px);
+            overflow-y: auto;
+            overflow-x: hidden;
+        }
+        
+        .discord-servers-bar::-webkit-scrollbar {
+            width: 4px;
+        }
+        
+        .discord-servers-bar::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 2px;
+        }
+        
+        .servers-section-label {
+            font-size: 9px;
+            font-weight: 700;
+            text-transform: uppercase;
+            color: var(--text-dim);
+            letter-spacing: 0.5px;
+            padding: 4px 8px;
+            width: 100%;
+            text-align: center;
+        }
+
+        .server-icon {
+            width: 48px;
+            height: 48px;
+            min-height: 48px;
+            border-radius: 50%;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+            background: rgba(255, 255, 255, 0.05);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            overflow: hidden;
+            border: 2px solid transparent;
+            position: relative;
+        }
+
+        .server-icon:hover {
+            border-radius: var(--radius);
+            border-color: var(--accent);
+            box-shadow: 0 4px 16px rgba(0, 217, 255, 0.3);
+            transform: translateY(-2px);
+        }
+
+        .server-icon.active {
+            border-radius: var(--radius);
+            border-color: var(--green);
+            box-shadow: 0 4px 16px rgba(63, 185, 80, 0.3);
+        }
+        
+        .server-icon.source-selected {
+            border-radius: var(--radius);
+            border-color: var(--accent);
+            box-shadow: 0 0 12px rgba(0, 217, 255, 0.5);
+        }
+        
+        .server-icon.source-selected::after {
+            content: '';
+            position: absolute;
+            left: -6px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 4px;
+            height: 32px;
+            background: var(--accent);
+            border-radius: 0 4px 4px 0;
+        }
+
+        .server-icon img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .server-icon span {
+            font-size: 20px;
+        }
+        
+        .server-icon .server-initial {
+            font-size: 18px;
+            font-weight: 700;
+            color: var(--text);
+            text-transform: uppercase;
+        }
+
+        .server-icon.add-server {
+            background: rgba(0,217,255,0.1);
+            color: var(--accent);
+            font-size: 24px;
+            font-weight: 300;
+        }
+
+        .server-icon.add-server:hover {
+            background: var(--accent);
+            color: #000;
+        }
+
+        .server-icon.bridge-status {
+            background: rgba(63,185,80,0.1);
+        }
+
+        .server-icon.bridge-status.offline {
+            background: rgba(248,81,73,0.1);
+        }
+
+        .server-icon.settings-icon {
+            background: transparent;
+        }
+
+        .server-divider {
+            width: 32px;
+            height: 2px;
+            background: var(--border);
+            border-radius: 1px;
+            margin: 4px 0;
+        }
+        
+        /* Server tooltip */
+        .server-icon[title]:hover::before {
+            content: attr(title);
+            position: absolute;
+            left: 60px;
+            background: var(--bg-primary);
+            color: var(--text);
+            padding: 6px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            white-space: nowrap;
+            z-index: 1000;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+            border: 1px solid var(--border);
+        }
+
+        /* Right Info Sidebar - Glassy */
+        .info-sidebar {
+            background: rgba(15, 17, 20, 0.5);
+            border-left: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: var(--radius) 0 0 var(--radius);
+            display: flex;
+            flex-direction: column;
+            height: calc(100vh - 50px);
+            overflow: hidden;
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            margin: 0;
+        }
+
+        .info-sidebar-header {
+            padding: 16px;
+            background: rgba(255, 255, 255, 0.03);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: var(--radius) 0 0 0;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .info-sidebar-header img {
+            width: 40px;
+            height: 40px;
+            border-radius: var(--radius-sm);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        }
+
+        .info-sidebar-header h3 {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .info-section {
+            padding: 12px;
+            margin: 8px;
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: var(--radius-sm);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .info-section-title {
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            margin-bottom: 8px;
+            letter-spacing: 0.5px;
+        }
+
+        .bridge-status-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 12px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            margin-bottom: 6px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            transition: all 0.2s ease;
+        }
+        
+        .bridge-status-row:hover {
+            background: rgba(0, 0, 0, 0.4);
+            border-color: rgba(255, 255, 255, 0.1);
+        }
+
+        .bridge-status-dot {
+            width: 10px;
+            height: 10px;
+            min-width: 10px;
+            border-radius: 50%;
+            background: var(--green);
+            box-shadow: 0 0 8px var(--green);
+            animation: pulse-glow 2s ease-in-out infinite;
+        }
+        
+        @keyframes pulse-glow {
+            0%, 100% { opacity: 1; box-shadow: 0 0 8px currentColor; }
+            50% { opacity: 0.7; box-shadow: 0 0 4px currentColor; }
+        }
+
+        .bridge-status-dot.offline {
+            background: var(--red);
+            box-shadow: 0 0 6px var(--red);
+            animation: none;
+        }
+        
+        .bridge-status-dot.loading {
+            background: var(--yellow);
+            box-shadow: 0 0 6px var(--yellow);
+            animation: pulse 1s infinite;
+        }
+        
+        .bridge-status-name {
+            flex: 1;
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text);
+        }
+        
+        .bridge-status-label {
+            font-size: 11px;
+            font-weight: 600;
+            padding: 3px 8px;
+            border-radius: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .bridge-status-label.online {
+            background: rgba(63, 185, 80, 0.2);
+            color: var(--green);
+        }
+        
+        .bridge-status-label.offline {
+            background: rgba(248, 81, 73, 0.2);
+            color: var(--red);
+        }
+        
+        .bridge-status-label.info {
+            background: rgba(0, 217, 255, 0.15);
+            color: var(--accent);
+            text-transform: none;
+            font-weight: 500;
+        }
+
+        /* Support Ticket Channels */
+        .ticket-channels-list {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .ticket-channel-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 10px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 11px;
+        }
+
+        .ticket-channel-item:hover {
+            background: rgba(0, 217, 255, 0.1);
+        }
+
+        .ticket-channel-item.active {
+            background: rgba(0, 217, 255, 0.2);
+            border-left: 2px solid var(--accent);
+        }
+
+        .ticket-channel-item .channel-icon {
+            font-size: 12px;
+            opacity: 0.7;
+        }
+
+        .ticket-channel-item .channel-name {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .ticket-channel-item .msg-count {
+            font-size: 9px;
+            background: var(--accent);
+            color: #000;
+            padding: 1px 5px;
+            border-radius: 8px;
+            font-weight: 600;
+        }
+
+        /* Ticket Messages List */
+        .ticket-messages-list {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            padding: 4px;
+        }
+
+        .ticket-msg-item {
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 6px;
+            padding: 8px;
+            font-size: 11px;
+        }
+
+        .ticket-msg-header {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 4px;
+        }
+
+        .ticket-msg-author {
+            font-weight: 600;
+            color: var(--accent);
+            font-size: 10px;
+        }
+
+        .ticket-msg-time {
+            font-size: 9px;
+            color: var(--text-dim);
+            margin-left: auto;
+        }
+
+        .ticket-msg-channel {
+            font-size: 9px;
+            color: var(--text-dim);
+            background: rgba(255,255,255,0.05);
+            padding: 1px 4px;
+            border-radius: 3px;
+        }
+
+        .ticket-msg-content {
+            color: var(--text);
+            line-height: 1.4;
+            word-break: break-word;
+        }
+
+        /* Full Send Comparison */
+        .fullsend-compare-list {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            padding: 4px;
+        }
+
+        .fullsend-item {
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 6px;
+            padding: 8px;
+            font-size: 11px;
+            border-left: 3px solid transparent;
+        }
+
+        .fullsend-item.in-list {
+            border-left-color: var(--green);
+            background: rgba(63, 185, 80, 0.1);
+        }
+
+        .fullsend-item.not-in-list {
+            border-left-color: var(--orange);
+            background: rgba(255, 140, 0, 0.1);
+        }
+
+        .fullsend-title {
+            font-weight: 600;
+            color: var(--text);
+            margin-bottom: 4px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .fullsend-title .status-badge {
+            font-size: 8px;
+            padding: 1px 4px;
+            border-radius: 3px;
+            font-weight: 700;
+        }
+
+        .fullsend-title .status-badge.in { background: var(--green); color: #000; }
+        .fullsend-title .status-badge.out { background: var(--orange); color: #000; }
+
+        .fullsend-meta {
+            font-size: 10px;
+            color: var(--text-dim);
+            display: flex;
+            gap: 8px;
+        }
+
+        .fullsend-meta span {
+            display: flex;
+            align-items: center;
+            gap: 3px;
+        }
+
+        /* RS Emoji img styling */
+        .rs-emoji {
+            width: 16px;
+            height: 16px;
+            vertical-align: text-bottom;
+        }
+
+        .rs-emoji.lg {
+            width: 20px;
+            height: 20px;
+        }
+
+        /* Full Send List Embed (legacy) */
+        .fullsend-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 12px;
+        }
+
+        .fullsend-item {
+            background: var(--bg-primary);
+            border-radius: 8px;
+            padding: 10px;
+            margin-bottom: 8px;
+            border-left: 3px solid var(--accent);
+            font-size: 12px;
+        }
+
+        .fullsend-item.match {
+            border-left-color: var(--green);
+            background: rgba(63,185,80,0.1);
+        }
+
+        .fullsend-item-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 6px;
+        }
+
+        .fullsend-store {
+            font-weight: 600;
+            color: var(--accent);
+        }
+
+        .fullsend-time {
+            font-size: 10px;
+            color: var(--text-dim);
+        }
+
+        .fullsend-product {
+            color: var(--text);
+            margin-bottom: 4px;
+        }
+
+        .fullsend-upc {
+            font-family: monospace;
+            font-size: 10px;
+            color: var(--text-dim);
+            background: rgba(0,0,0,0.2);
+            padding: 2px 6px;
+            border-radius: 4px;
+            display: inline-block;
+        }
+
+        .upc-match {
+            color: var(--green);
+            font-weight: 600;
+        }
+
+        /* API Sidebar */
+        .api-sidebar {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .api-status-panel, .mapping-stats-panel, .token-info-panel {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        .api-panel-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px;
+            background: rgba(0,0,0,0.2);
+            border-bottom: 1px solid var(--border);
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        .api-status-content {
+            padding: 12px;
+        }
+
+        .api-status-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            font-size: 12px;
+        }
+
+        .api-status-item:last-child { border-bottom: none; }
+
+        .api-status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+        }
+
+        .api-status-dot.online { background: var(--green); box-shadow: 0 0 6px var(--green); }
+        .api-status-dot.offline { background: var(--red); }
+        .api-status-dot.loading { background: var(--yellow); animation: pulse 1s infinite; }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        /* Server Cards */
+        .server-cards {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .server-card {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .server-card:hover {
+            border-color: var(--accent);
+            background: rgba(0,217,255,0.05);
+        }
+
+        .server-card.active {
+            border-color: var(--accent);
+            background: rgba(0,217,255,0.1);
+        }
+
+        .server-card-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            object-fit: cover;
+            border: 2px solid var(--border);
+        }
+
+        .server-card-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .server-card-name {
+            display: block;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .server-card-meta {
+            display: block;
+            font-size: 11px;
+            color: var(--text-dim);
+        }
+
+        .server-card-status {
+            font-size: 16px;
+        }
+
+        /* Mapping Stats */
+        .mapping-stats-panel {
+            padding: 12px;
+        }
+
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            font-size: 12px;
+        }
+
+        .stat-row:last-child { border-bottom: none; }
+
+        .stat-label { color: var(--text-dim); }
+        .stat-value { color: var(--accent); font-weight: 600; }
+
+        /* Token Info */
+        .token-info-panel {
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .token-info-panel:hover {
+            background: rgba(0,217,255,0.05);
+        }
+
+        .token-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .token-header .expand-icon {
+            margin-left: auto;
+            transition: transform 0.2s;
+            font-size: 10px;
+            color: var(--text-dim);
+        }
+
+        .token-header .expand-icon.expanded {
+            transform: rotate(180deg);
+        }
+
+        .token-details {
+            padding: 0 12px 12px;
+            border-top: 1px solid var(--border);
+        }
+
+        .token-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            font-size: 11px;
+        }
+
+        .token-label { color: var(--text-dim); font-family: monospace; }
+        .token-status { font-size: 14px; }
+
+        /* Bridge Main Area */
+        .bridge-main {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+    </style>
+</head>
+<body>
+    <header class="mw-header">
+        <img src="./assets/images/rs-logo.png" alt="RS" class="logo" onerror="this.style.display='none'">
+        <span class="header-title">Channel Map</span>
+        <div class="mw-nav-tabs">
+            <span class="mw-nav-tab active">Channel Map</span>
+        </div>
+    </header>
+
+    <main class="main-content" style="display: grid; grid-template-columns: 72px 1fr 280px; gap: 0;">
+        <!-- Discord-style Server Icon Sidebar -->
+        <aside class="discord-servers-bar">
+            <!-- Source Servers Section -->
+            <div class="servers-section-label">Source</div>
+            <div id="sourceServersIcons">
+                <!-- Dynamic server icons loaded here -->
+                <div class="server-icon" style="opacity: 0.5;">
+                    <div class="spinner" style="width: 20px; height: 20px;"></div>
+            </div>
+            </div>
+            
+            <div class="server-divider"></div>
+            
+            <!-- Destination Server -->
+            <div class="servers-section-label">Dest</div>
+            <div id="destServerIcon" class="server-icon" onclick="focusDestServer()" title="Mirror World (Destination)">
+                <img src="./assets/images/mirrorworld-default.jpg" alt="MW" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                <span class="server-initial" style="display:none;">MW</span>
+            </div>
+            
+            <div class="server-divider"></div>
+            
+            <div class="server-icon add-server" onclick="showAddServerModal()" title="Add Server">
+                <span>+</span>
+            </div>
+            
+            <div style="flex: 1;"></div>
+            
+            <!-- Bridge Status -->
+            <div class="server-icon bridge-status" id="bridgeStatusIcon" onclick="showBridgePanel()" title="Bot Bridge Status">
+                <span id="bridgeStatusEmoji">🔗</span>
+            </div>
+            <div class="server-icon settings-icon" onclick="showSettingsPanel()" title="Settings">
+                <span>⚙️</span>
+            </div>
+        </aside>
+
+        <!-- Main Bridge Area -->
+        <div class="bridge-main">
+            <!-- Bridge Container -->
+            <div class="bridge-container">
+                <!-- Source Server -->
+                <div class="server-panel">
+                <div class="server-panel-header">
+                    <span style="font-size: 20px;">📥</span>
+                    <h3>Source Server</h3>
+                    <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 2px;">
+                        <span id="sourceCount" style="font-size: 11px; color: var(--text-dim);">0 channels</span>
+                        <span id="selectedCount" style="font-size: 10px; color: var(--green); font-weight: 600; display: none;">
+                            <span id="selectedCountNum">0</span> selected
+                        </span>
+                    </div>
+                </div>
+                    <div style="padding: 8px 12px;">
+                        <select class="server-select" id="sourceServer" onchange="loadSourceChannels()">
+                            <option value="">Select source server...</option>
+                        </select>
+                    </div>
+                    <div style="padding: 0 12px 8px; display: flex; gap: 8px; align-items: center;">
+                        <input type="text" class="channel-search" id="sourceSearch" placeholder="Search channels..." oninput="filterSourceChannels()" style="flex: 1;">
+                        <select id="sourceFilter" onchange="filterSourceChannels()" style="padding: 6px 10px; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 11px; cursor: pointer;">
+                            <option value="all">All</option>
+                            <option value="mapped">Mapped</option>
+                            <option value="unmapped">Unmapped</option>
+                        </select>
+                    </div>
+                    <div class="channel-list" id="sourceChannels">
+                        <div class="empty-state">
+                            <div class="icon">📂</div>
+                            <p>Select a server to load channels</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Bridge Center - Arrow + Webhook Map -->
+                <div class="bridge-center-panel">
+                    <!-- Mapping Controls -->
+                    <div class="mapping-controls">
+                    <button class="bridge-arrow" onclick="createMapping()" title="Create Mapping">→</button>
+                        <button class="btn btn-sm" onclick="clearSelection()">Clear</button>
+                    </div>
+                    
+                    <!-- Active Webhooks Preview -->
+                    <div class="center-webhook-map">
+                        <div class="center-webhook-header">
+                            <span>🔗 Active Webhooks</span>
+                            <span class="webhook-count" id="centerWebhookCount">0</span>
+                        </div>
+                        <div class="center-webhook-list" id="centerWebhookList">
+                            <div class="loading"><div class="spinner" style="width:16px;height:16px;"></div></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Destination Server -->
+                <div class="server-panel">
+                    <div class="server-panel-header">
+                        <span style="font-size: 20px;">📤</span>
+                        <h3>Destination Server</h3>
+                        <span id="destCount" style="font-size: 11px; color: var(--text-dim);">0 channels</span>
+                    </div>
+                    <div style="padding: 8px 12px;">
+                        <select class="server-select" id="destServer" onchange="loadDestChannels()">
+                            <option value="">Select destination server...</option>
+                        </select>
+                    </div>
+                    <div style="padding: 0 12px 8px; display: flex; gap: 8px; align-items: center;">
+                        <input type="text" class="channel-search" id="destSearch" placeholder="Search channels..." oninput="filterDestChannels()" style="flex: 1;">
+                        <select id="destFilter" onchange="filterDestChannels()" style="padding: 6px 10px; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 11px; cursor: pointer;">
+                            <option value="all">All</option>
+                            <option value="mapped">Mapped</option>
+                            <option value="unmapped">Unmapped</option>
+                        </select>
+                    </div>
+                    <div class="channel-list" id="destChannels">
+                        <div class="empty-state">
+                            <div class="icon">📂</div>
+                            <p>Select a server to load channels</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Webhook Full Map -->
+            <div class="webhook-fullmap-panel">
+                <div class="mappings-header">
+                    <h3>🗺️ Webhook Full Map</h3>
+                    <span id="webhookGuildName" style="font-size: 11px; color: var(--text-dim);"></span>
+                </div>
+                <div class="help-text" style="padding: 8px; margin: 8px 0; font-size: 11px; background: rgba(255, 255, 255, 0.03); border-radius: var(--radius-sm); border: 1px solid var(--glass-border);">
+                    💡 Each card shows a destination channel with its mapped source channels. Click × to remove a mapping.
+                </div>
+                <div class="webhook-cards-grid" id="webhookCardsContainer">
+                    <div class="loading"><div class="spinner"></div> Loading webhook mappings...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Info Sidebar - API Status & Server Connections -->
+        <aside class="info-sidebar">
+            <div class="info-sidebar-header">
+                <div style="width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; background: rgba(0,217,255,0.1); border-radius: 8px;">
+                    <span style="font-size: 24px;">📡</span>
+                </div>
+                <div>
+                    <h3>API Status</h3>
+                    <span style="font-size: 11px; color: var(--text-dim);">Connections & Tokens</span>
+                </div>
+            </div>
+
+            <!-- Bot Bridge Status -->
+            <div class="info-section">
+                <div class="info-section-title">🤖 Bot Bridge Status</div>
+                <div style="display: flex; flex-direction: column; gap: 6px;">
+                    <div class="status-row" style="display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: rgba(0,0,0,0.2); border-radius: 6px;">
+                        <div class="status-dot loading" id="testcenterBridgeDot" style="width: 8px; height: 8px; border-radius: 50%; background: var(--yellow);"></div>
+                        <span style="flex: 1; font-size: 11px;">TestCenter Bot</span>
+                        <span class="status-label" id="testcenterBridgeStatus" style="font-size: 10px; padding: 2px 6px; border-radius: 4px; background: rgba(248,81,73,0.2); color: var(--red);">Offline</span>
+                </div>
+                    <div class="status-row" style="display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: rgba(0,0,0,0.2); border-radius: 6px;">
+                        <div class="status-dot loading" id="discumBridgeDot" style="width: 8px; height: 8px; border-radius: 50%; background: var(--yellow);"></div>
+                        <span style="flex: 1; font-size: 11px;">Discum Bridge</span>
+                        <span class="status-label" id="discumBridgeStatus" style="font-size: 10px; padding: 2px 6px; border-radius: 4px; background: rgba(248,81,73,0.2); color: var(--red);">Offline</span>
+                </div>
+                    <div class="status-row" style="display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: rgba(0,0,0,0.2); border-radius: 6px;">
+                        <div class="status-dot loading" id="dataBridgeDot" style="width: 8px; height: 8px; border-radius: 50%; background: var(--yellow);"></div>
+                        <span style="flex: 1; font-size: 11px;">Data Manager</span>
+                        <span class="status-label" id="dataBridgeStatus" style="font-size: 10px; padding: 2px 6px; border-radius: 4px; background: rgba(248,81,73,0.2); color: var(--red);">Offline</span>
+                    </div>
+                    <div class="status-row" style="display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: rgba(0,0,0,0.2); border-radius: 6px;">
+                        <div class="status-dot loading" id="pingBridgeDot" style="width: 8px; height: 8px; border-radius: 50%; background: var(--yellow);"></div>
+                        <span style="flex: 1; font-size: 11px;">Ping Bot</span>
+                        <span class="status-label" id="pingBridgeStatus" style="font-size: 10px; padding: 2px 6px; border-radius: 4px; background: rgba(248,81,73,0.2); color: var(--red);">Offline</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- API Token Status -->
+            <div class="info-section">
+                <div class="info-section-title">🔑 API Token Status</div>
+                <div style="display: flex; flex-direction: column; gap: 6px;">
+                    <div class="status-row" style="display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: rgba(0,0,0,0.2); border-radius: 6px;">
+                        <div class="status-dot" id="discumTokenDot" style="width: 8px; height: 8px; border-radius: 50%; background: var(--yellow);"></div>
+                        <span style="flex: 1; font-size: 11px;">DISCUM_BOT</span>
+                        <span style="font-size: 10px; padding: 2px 6px; border-radius: 4px; background: rgba(0,217,255,0.15); color: var(--accent);">📺 Channels</span>
+                </div>
+                    <div class="status-row" style="display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: rgba(0,0,0,0.2); border-radius: 6px;">
+                        <div class="status-dot" id="neoTokenDot" style="width: 8px; height: 8px; border-radius: 50%; background: var(--yellow);"></div>
+                        <span style="flex: 1; font-size: 11px;">NEO_TOKEN</span>
+                        <span style="font-size: 10px; padding: 2px 6px; border-radius: 4px; background: rgba(0,217,255,0.15); color: var(--accent);">💜 RS Only</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Connected Servers -->
+            <div class="info-section" style="flex: 1; overflow-y: auto;">
+                <div class="info-section-title" style="display: flex; justify-content: space-between;">
+                    <span>🌐 Connected Servers</span>
+                    <span style="font-size: 10px; color: var(--text-dim);" id="serverCount">0</span>
+                </div>
+                <div id="connectedServersList" style="display: flex; flex-direction: column; gap: 4px;">
+                    <div class="loading"><div class="spinner"></div> Loading...</div>
+                </div>
+            </div>
+
+            <!-- API Calls Log -->
+            <div class="info-section" style="max-height: 150px; overflow-y: auto;">
+                <div class="info-section-title" style="display: flex; justify-content: space-between;">
+                    <span>📊 Recent API Calls</span>
+                    <button onclick="clearApiLog()" style="background: rgba(255,255,255,0.1); border: none; color: var(--text-dim); padding: 2px 6px; border-radius: 4px; font-size: 9px; cursor: pointer;">Clear</button>
+                    </div>
+                <div id="apiCallsLog" style="font-size: 10px; font-family: monospace;">
+                    <div style="color: var(--text-dim); padding: 8px;">No API calls yet...</div>
+                </div>
+            </div>
+
+            <!-- Quick Stats -->
+            <div class="info-section" style="flex: 0 0 auto;">
+                <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; text-align: center;">
+                    <div style="background: rgba(0,217,255,0.1); padding: 8px 4px; border-radius: 6px;">
+                        <div style="font-size: 16px; font-weight: 700; color: var(--accent);" id="statServers">0</div>
+                        <div style="font-size: 9px; color: var(--text-dim);">Servers</div>
+                    </div>
+                    <div style="background: rgba(63,185,80,0.1); padding: 8px 4px; border-radius: 6px;">
+                        <div style="font-size: 16px; font-weight: 700; color: var(--green);" id="statChannels">0</div>
+                        <div style="font-size: 9px; color: var(--text-dim);">Channels</div>
+                    </div>
+                    <div style="background: rgba(255,140,0,0.1); padding: 8px 4px; border-radius: 6px;">
+                        <div style="font-size: 16px; font-weight: 700; color: var(--orange);" id="statMappings">0</div>
+                        <div style="font-size: 9px; color: var(--text-dim);">Mappings</div>
+                    </div>
+                </div>
+            </div>
+        </aside>
+    </main>
+
+    <script src="./channel-bridge.js"></script>
+    <script>
+        if (typeof window.RSEmojis === 'undefined') {
+            window.RSEmojis = { toHtml: function(c) { return c || ''; }, get: function() { return null; }, init: function() { return Promise.resolve(); } };
+        }
+        // State
+        let selectedSources = new Set(); // Multiple source channels can be selected
+        let selectedDest = null;
+        let mappings = [];
+        let sourceChannels = [];
+        
+        // API Call Log
+        const apiCallLog = [];
+        const MAX_API_LOG = 20;
+        
+        function logApiCall(endpoint, status, time) {
+            const entry = { endpoint, status, time: new Date().toLocaleTimeString(), duration: time };
+            apiCallLog.unshift(entry);
+            if (apiCallLog.length > MAX_API_LOG) apiCallLog.pop();
+            updateApiLogDisplay();
+        }
+        
+        function updateApiLogDisplay() {
+            const container = document.getElementById('apiCallsLog');
+            if (!container) return;
+            
+            if (apiCallLog.length === 0) {
+                container.innerHTML = '<div style="color: var(--text-dim); padding: 8px;">No API calls yet...</div>';
+                return;
+            }
+            
+            container.innerHTML = apiCallLog.map(call => {
+                const color = call.status === 'ok' ? 'var(--green)' : 'var(--red)';
+                const icon = call.status === 'ok' ? '✓' : '✗';
+                return `<div style="padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.05);">
+                    <span style="color: ${color};">${icon}</span>
+                    <span style="color: var(--text-dim);">${call.time}</span>
+                    <span style="color: var(--text);">${call.endpoint}</span>
+                    ${call.duration ? `<span style="color: var(--text-dim);">${call.duration}ms</span>` : ''}
+                </div>`;
+            }).join('');
+        }
+        
+        function clearApiLog() {
+            apiCallLog.length = 0;
+            updateApiLogDisplay();
+        }
+        
+        // Load connected servers list
+        async function loadConnectedServers() {
+            const container = document.getElementById('connectedServersList');
+            if (!container) return;
+            
+            const startTime = Date.now();
+            try {
+                const guilds = await window.ChannelBridge.getGuilds();
+                logApiCall('/guilds', 'ok', Date.now() - startTime);
+                
+                document.getElementById('serverCount').textContent = guilds.length;
+                document.getElementById('statServers').textContent = guilds.length;
+                
+                if (guilds.length === 0) {
+                    container.innerHTML = '<div style="color: var(--text-dim); padding: 8px;">No servers connected</div>';
+                    return;
+                }
+                
+                container.innerHTML = guilds.slice(0, 10).map(g => `
+                    <div style="display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: rgba(0,0,0,0.2); border-radius: 6px;">
+                        <img src="${g.icon_url || './assets/images/discord-default.png'}" style="width: 24px; height: 24px; border-radius: 50%;" onerror="this.src='./assets/images/discord-default.png'">
+                        <span style="flex: 1; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${g.name}</span>
+                        <span style="font-size: 9px; color: var(--green);">●</span>
+                    </div>
+                `).join('') + (guilds.length > 10 ? `<div style="text-align: center; color: var(--text-dim); font-size: 10px; padding: 4px;">+${guilds.length - 10} more</div>` : '');
+                
+            } catch (e) {
+                logApiCall('/guilds', 'error', Date.now() - startTime);
+                container.innerHTML = '<div style="color: var(--red); padding: 8px;">Failed to load servers</div>';
+            }
+        }
+        
+        // Count total channels
+        async function countChannels() {
+            try {
+                const guilds = await window.ChannelBridge.getGuilds();
+                let totalChannels = 0;
+                
+                // Just count channels from the selected source server if any
+                const sourceSelect = document.getElementById('sourceServer');
+                if (sourceSelect && sourceSelect.value) {
+                    const channels = await window.ChannelBridge.getChannels(sourceSelect.value);
+                    totalChannels = channels.length;
+                } else if (guilds.length > 0) {
+                    // Count from first server
+                    const channels = await window.ChannelBridge.getChannels(guilds[0].id);
+                    totalChannels = channels.length;
+                }
+                
+                document.getElementById('statChannels').textContent = totalChannels;
+            } catch (e) {
+                console.error('Failed to count channels:', e);
+            }
+        }
+        
+        // Support Ticket Channel IDs (kept for backwards compatibility but not used in Channel Map)
+        const TICKET_CHANNEL_IDS = [
+            '1438892765076262912',  // Whops
+            '1411757814338027560'   // Questions/Chats
+        ];
+        
+        // Full Send list cache (loaded from external)
+        let fullSendList = [];
+        
+        // RS Emoji helper
+        function rsEmoji(name, size = 16) {
+            const emoji = RSEmojis?.get?.(name);
+            if (emoji) {
+                const ext = emoji.animated ? 'gif' : 'png';
+                return `<img src="https://cdn.discordapp.com/emojis/${emoji.id}.${ext}" alt="${name}" class="rs-emoji" style="width:${size}px;height:${size}px;">`;
+            }
+            // Fallback emojis
+            const fallbacks = {
+                'rsprofit': '💰', 'rsllove': '❤️', 'rshype': '🔥', 'rsknock': '🚪',
+                'rssmart': '🧠', 'bluesiren': '🚨', 'rsfire': '🔥', 'rscash': '💵',
+                'rsrocket': '🚀', 'rsticket': '🎫', 'rschat': '💬'
+            };
+            return fallbacks[name] || '⭐';
+        }
+        
+        // Initialize RS Emojis in header elements
+        async function initRSEmojis() {
+            await RSEmojis?.init?.();
+            
+            // Helper function to safely set emoji
+            const setEmoji = (id, emojiName, size) => {
+                const el = document.getElementById(id);
+                if (el) el.innerHTML = rsEmoji(emojiName, size);
+            };
+            
+            // Sidebar header
+            setEmoji('rsEmojiHeader', 'rsprofit', 24);
+            setEmoji('rsEmojiLove', 'rsllove', 12);
+            
+            // Section headers
+            setEmoji('rsEmojiTicket', 'rssmart', 14);
+            setEmoji('rsEmojiChat', 'rsllove', 14);
+            setEmoji('rsEmojiRocket', 'rsprofit', 14);
+            
+            // Quick stats
+            setEmoji('rsEmojiSmart', 'rssmart', 12);
+            setEmoji('rsEmojiProfit', 'rsprofit', 12);
+            setEmoji('rsEmojiHype', 'rshype', 12);
+        }
+        let destChannels = [];
+        let collapsedCategories = new Set();
+
+        // Toggle category collapse
+        function toggleCategory(catKey) {
+            if (collapsedCategories.has(catKey)) {
+                collapsedCategories.delete(catKey);
+            } else {
+                collapsedCategories.add(catKey);
+            }
+            if (catKey.startsWith('source_')) {
+                renderSourceChannels();
+            } else {
+                renderDestChannels();
+            }
+        }
+
+        // Render a single channel item
+        function renderChannelItem(channel, side) {
+            const isSelected = side === 'source' ? selectedSources.has(channel.id) : selectedDest === channel.id;
+            const mapped = isMapped(channel.id, side);
+            const icon = channel.type === 0 ? '#' : channel.type === 2 ? '🔊' : channel.type === 5 ? '📢' : '#';
+            
+            return `
+                <div class="discord-channel-item ${isSelected ? 'selected' : ''} ${mapped ? 'mapped' : ''}" 
+                     onclick="select${side === 'source' ? 'Source' : 'Dest'}('${channel.id}')">
+                    ${side === 'source' && isSelected ? '<span style="color: var(--green); margin-right: 4px;">✓</span>' : ''}
+                    <span class="discord-channel-hash">${icon}</span>
+                    <span class="discord-channel-name">${channel.name}</span>
+                </div>
+            `;
+        }
+
+        // Server selection from left sidebar
+        let activeSourceServer = null;
+        let loadedServers = [];
+        
+        // Load source server icons into sidebar (uses ChannelBridge cache)
+        async function loadSourceServerIcons() {
+            const container = document.getElementById('sourceServersIcons');
+            try {
+                // Use ChannelBridge cache to avoid duplicate API calls
+                loadedServers = await window.ChannelBridge.getGuilds();
+                
+                if (loadedServers.length === 0) {
+                    container.innerHTML = '<div class="server-icon" style="opacity:0.5;" title="No servers"><span>?</span></div>';
+                    return;
+                }
+                
+                container.innerHTML = loadedServers.map((guild, index) => {
+                    const iconUrl = guild.icon_url || guild.icon 
+                        ? (guild.icon_url || `https://cdn.discordapp.com/icons/${guild.id}/${guild.icon}.png?size=128`)
+                        : null;
+                    const initial = guild.name?.charAt(0)?.toUpperCase() || '?';
+                    const isActive = index === 0 ? 'source-selected' : '';
+                    
+                    return `
+                        <div class="server-icon ${isActive}" 
+                             data-guild-id="${guild.id}" 
+                             data-guild-name="${guild.name}"
+                             onclick="selectSourceServer('${guild.id}')" 
+                             title="${guild.name}">
+                            ${iconUrl 
+                                ? `<img src="${iconUrl}" alt="${initial}" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                                   <span class="server-initial" style="display:none;">${initial}</span>`
+                                : `<span class="server-initial">${initial}</span>`
+                            }
+                        </div>
+                    `;
+                }).join('');
+                
+                // Auto-select first server
+                if (loadedServers.length > 0) {
+                    selectSourceServer(loadedServers[0].id);
+                }
+            } catch (e) {
+                console.warn('Failed to load server icons, using fallback:', e);
+                container.innerHTML = `
+                    <div class="server-icon source-selected" data-guild-id="resellingsecrets" onclick="selectSourceServer('resellingsecrets')" title="Reselling Secrets">
+                        <img src="./assets/images/rs-default.png" alt="RS" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                        <span class="server-initial" style="display:none;">RS</span>
+                    </div>
+                `;
+                loadedServers = FALLBACK_SERVERS;
+            }
+        }
+        
+        function selectSourceServer(guildId) {
+            activeSourceServer = guildId;
+            
+            // Update sidebar icons
+            document.querySelectorAll('#sourceServersIcons .server-icon').forEach(el => {
+                el.classList.remove('source-selected');
+                if (el.dataset.guildId === guildId) {
+                    el.classList.add('source-selected');
+                }
+            });
+            
+            // Find the server info
+            const server = loadedServers.find(g => g.id === guildId) || { name: guildId };
+            
+            // Sidebar now shows Support Hub - don't overwrite it
+            
+            // Update source dropdown and load channels
+            const sourceSelect = document.getElementById('sourceServer');
+            if (sourceSelect) {
+                for (let opt of sourceSelect.options) {
+                    if (opt.value === guildId) {
+                        sourceSelect.value = guildId;
+                    loadSourceChannels();
+                    break;
+                    }
+                }
+            }
+        }
+        
+        function focusDestServer() {
+            document.getElementById('destServer').focus();
+        }
+        
+        function showAddServerModal() {
+            const serverId = prompt('Add Server\n\nEnter a Discord server ID to add to the channel bridge.\n\nNote: Bot must have access to the server.');
+            if (serverId && serverId.trim()) {
+                // Try to add to dropdown
+                const sourceSelect = document.getElementById('sourceServer');
+                const exists = Array.from(sourceSelect.options).some(o => o.value === serverId.trim());
+                if (!exists) {
+                    const opt = document.createElement('option');
+                    opt.value = serverId.trim();
+                    opt.textContent = `Server ${serverId.trim()}`;
+                    sourceSelect.appendChild(opt);
+                }
+                sourceSelect.value = serverId.trim();
+                loadSourceChannels();
+            }
+        }
+        
+        function showBridgePanel() {
+            // Scroll to or highlight bridge status section
+            document.querySelector('.info-section').scrollIntoView({ behavior: 'smooth' });
+        }
+        
+        function showSettingsPanel() {
+            window.location.href = '/dashboard.html#settings';
+        }
+        
+        // Server Log utility
+        // Console logging helper (replaces old serverLog)
+        function logInfo(message) {
+            console.log(`[ChannelMap] ${message}`);
+        }
+        
+        // Load Full Send List from RS channel (legacy)
+        // Load Support Ticket Channels
+        async function loadTicketChannels() {
+            const container = document.getElementById('ticketChannelsList');
+            
+            try {
+                // Find RS Server dynamically
+                const guilds = await window.ChannelBridge.getGuilds();
+                const rsGuild = guilds.find(g => 
+                    g.name?.toLowerCase().includes('reselling') || 
+                    g.name?.toLowerCase().includes('secrets') ||
+                    g.name?.includes('RS ')
+                );
+                
+                if (!rsGuild) {
+                    container.innerHTML = '<div class="empty-state" style="font-size:11px; padding:10px; color:var(--yellow);">RS Server not found</div>';
+                    return;
+                }
+                
+                const rsServerId = rsGuild.id;
+                console.log(`[ChannelMap] Found RS Server: ${rsGuild.name} (${rsServerId})`);
+                
+                const channels = await window.ChannelBridge.getChannels(rsServerId);
+                
+                // Filter for ticket channels
+                const ticketChannels = channels.filter(ch => {
+                    // Include specific channel IDs
+                    if (TICKET_CHANNEL_IDS.includes(ch.id)) return true;
+                    // Include channels with "ticket" in name
+                    if (ch.name?.toLowerCase().includes('ticket')) return true;
+                    return false;
+                });
+                
+                // Group by category
+                const categories = {};
+                ticketChannels.forEach(ch => {
+                    const cat = ch.parent_name || 'Other';
+                    if (!categories[cat]) categories[cat] = [];
+                    categories[cat].push(ch);
+                });
+                
+                if (ticketChannels.length === 0) {
+                    container.innerHTML = '<div class="empty-state" style="font-size:11px; padding:10px;">No ticket channels found</div>';
+                    return;
+                }
+                
+                let html = '';
+                for (const [catName, chans] of Object.entries(categories)) {
+                    html += `<div style="font-size:9px; color:var(--text-muted); padding:4px 0; text-transform:uppercase;">${catName}</div>`;
+                    chans.forEach(ch => {
+                        html += `
+                            <div class="ticket-channel-item" onclick="loadChannelMessages('${ch.id}', '${ch.name}')" data-channel-id="${ch.id}">
+                                <span class="channel-icon">#</span>
+                                <span class="channel-name">${ch.name}</span>
+                            </div>
+                        `;
+                    });
+                }
+                
+                container.innerHTML = html;
+                document.getElementById('ticketCount').textContent = ticketChannels.length;
+                document.getElementById('statTickets').textContent = ticketChannels.length;
+                
+            } catch (e) {
+                container.innerHTML = `<div class="empty-state" style="font-size:11px; padding:10px; color:var(--red);">Error: ${e.message}</div>`;
+            }
+        }
+        
+        // Load messages from a ticket channel
+        async function loadChannelMessages(channelId, channelName) {
+            const container = document.getElementById('recentTicketMessages');
+            container.innerHTML = '<div class="loading"><div class="spinner"></div> Loading...</div>';
+            
+            // Highlight active channel
+            document.querySelectorAll('.ticket-channel-item').forEach(el => el.classList.remove('active'));
+            document.querySelector(`[data-channel-id="${channelId}"]`)?.classList.add('active');
+            
+            try {
+                const response = await fetch((window.CHANNELMAP_API_BASE || '') + `/api/discord/rs/messages/${channelId}?limit=15`);
+                    const data = await response.json();
+                    const messages = data.messages || [];
+                    
+                    if (messages.length === 0) {
+                    container.innerHTML = '<div class="empty-state" style="font-size:11px; padding:20px;">No recent messages</div>';
+                        return;
+                    }
+                    
+                    container.innerHTML = messages.map(msg => {
+                    const author = msg.author?.username || 'Unknown';
+                    const content = msg.content?.substring(0, 200) || '[No content]';
+                    const time = new Date(msg.timestamp).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+                        
+                        return `
+                        <div class="ticket-msg-item">
+                            <div class="ticket-msg-header">
+                                <span class="ticket-msg-author">${author}</span>
+                                <span class="ticket-msg-channel">#${channelName}</span>
+                                <span class="ticket-msg-time">${time}</span>
+                                </div>
+                            <div class="ticket-msg-content">${RSEmojis?.toHtml?.(content, 14) || content}</div>
+                            </div>
+                        `;
+                    }).join('');
+                
+            } catch (e) {
+                container.innerHTML = `<div class="empty-state" style="padding:20px; color:var(--red);">Error: ${e.message}</div>`;
+            }
+        }
+        
+        // Refresh ticket messages
+        function refreshTicketMessages() {
+            const activeChannel = document.querySelector('.ticket-channel-item.active');
+            if (activeChannel) {
+                const channelId = activeChannel.dataset.channelId;
+                const channelName = activeChannel.querySelector('.channel-name')?.textContent;
+                loadChannelMessages(channelId, channelName);
+                } else {
+                // Load from first ticket channel
+                const firstChannel = document.querySelector('.ticket-channel-item');
+                if (firstChannel) {
+                    firstChannel.click();
+                }
+            }
+        }
+        
+        // Load RS Full Send with comparison
+        async function loadFullSendComparison() {
+            const container = document.getElementById('fullSendCompare');
+            
+            try {
+                // Fetch recent Full Send messages
+                const response = await fetch((window.CHANNELMAP_API_BASE || '') + '/api/discord/rs/messages/1429649205714227260?limit=10');
+                const data = await response.json();
+                const messages = data.messages || [];
+                
+                // Try to load the Full Send list for comparison
+                try {
+                    const listResponse = await fetch('https://flipgraphic.github.io/Reselling-Secrets/data/fullsend.json');
+                    if (listResponse.ok) {
+                        fullSendList = await listResponse.json();
+                    }
+                } catch { /* ignore if list not available */ }
+                
+                if (messages.length === 0) {
+                    container.innerHTML = '<div class="empty-state" style="font-size:11px; padding:20px;">No recent Full Send items</div>';
+                    return;
+                }
+                
+                document.getElementById('statFullSend').textContent = messages.length;
+                
+                container.innerHTML = messages.map(msg => {
+                    // Parse product info from message
+                    const content = msg.content || '';
+                    const embed = msg.embeds?.[0];
+                    
+                    // Extract title/product name
+                    let title = embed?.title || '';
+                    if (!title) {
+                        const lines = content.split('\n').filter(l => l.trim());
+                        title = lines[0]?.replace(/[*_~<>@#]/g, '').trim() || 'Unknown Product';
+                    }
+                    title = title.substring(0, 60);
+                    
+                    // Extract SKU/UPC
+                    const skuMatch = content.match(/SKU[:\s]*([A-Z0-9-]+)/i) || embed?.description?.match(/SKU[:\s]*([A-Z0-9-]+)/i);
+                    const upcMatch = content.match(/UPC[:\s]*(\d+)/i) || embed?.description?.match(/UPC[:\s]*(\d+)/i);
+                    const sku = skuMatch?.[1] || null;
+                    const upc = upcMatch?.[1] || null;
+                    
+                    // Check if in Full Send list
+                    const inList = fullSendList.some(item => 
+                        (sku && item.sku === sku) || 
+                        (upc && item.upc === upc) ||
+                        item.title?.toLowerCase().includes(title.toLowerCase().substring(0, 20))
+                    );
+                    
+                    const time = new Date(msg.timestamp).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+                    
+                    return `
+                        <div class="fullsend-item ${inList ? 'in-list' : 'not-in-list'}">
+                            <div class="fullsend-title">
+                                ${RSEmojis?.toHtml?.(title, 14) || title}
+                                <span class="status-badge ${inList ? 'in' : 'out'}">${inList ? 'IN LIST' : 'NEW'}</span>
+                            </div>
+                            <div class="fullsend-meta">
+                                ${sku ? `<span>${rsEmoji('rsprofit', 12)} SKU: ${sku}</span>` : ''}
+                                ${upc ? `<span>UPC: ${upc}</span>` : ''}
+                                <span style="margin-left:auto;">${time}</span>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+                
+            } catch (e) {
+                container.innerHTML = `<div class="empty-state" style="padding:20px; color:var(--red);">Error: ${e.message}</div>`;
+            }
+        }
+        
+        // Legacy function kept for compatibility
+        async function loadFullSendList() {
+            await loadFullSendComparison();
+        }
+        
+        // Check bot bridge status
+        async function checkBridgeStatus() {
+            try {
+                const response = await fetch((window.CHANNELMAP_API_BASE || '') + '/api/bot_status');
+                if (response.ok) {
+                    const data = await response.json();
+                    // API returns { bots: { testcenter: { running: true }, ... } }
+                    const bots = data.bots || data;
+                    
+                    // Update bridge dots and labels with restart buttons
+                    const updateStatus = (dotId, labelId, botName, isOnline) => {
+                        const dot = document.getElementById(dotId);
+                        const label = document.getElementById(labelId);
+                        const restartBtn = document.getElementById(`restart-${botName}`);
+                        if (dot) {
+                            dot.classList.remove('loading', 'offline');
+                            if (!isOnline) {
+                                dot.classList.add('offline');
+                            }
+                        }
+                        if (label) {
+                            label.textContent = isOnline ? 'Online' : 'Offline';
+                            label.classList.remove('online', 'offline');
+                            label.classList.add(isOnline ? 'online' : 'offline');
+                        }
+                        if (restartBtn) {
+                            restartBtn.classList.toggle('hidden', isOnline);
+                        }
+                    };
+                    
+                    updateStatus('testcenterBridgeDot', 'testcenterBridgeStatus', 'testcenter', bots.testcenter?.running);
+                    updateStatus('discumBridgeDot', 'discumBridgeStatus', 'discumbot', bots.discumbot?.running || bots.discum?.running);
+                    updateStatus('dataBridgeDot', 'dataBridgeStatus', 'datamanagerbot', bots.datamanager?.running);
+                    updateStatus('pingBridgeDot', 'pingBridgeStatus', 'pingbot', bots.pingbot?.running);
+                    
+                    // Update token status dots (keep info labels)
+                    const updateTokenDot = (dotId, isConfigured) => {
+                        const dot = document.getElementById(dotId);
+                        if (dot) {
+                            dot.classList.remove('loading', 'offline');
+                            if (!isConfigured) {
+                                dot.classList.add('offline');
+                            }
+                        }
+                    };
+                    
+                    updateTokenDot('discumTokenDot', true); // Assume configured
+                    updateTokenDot('neoTokenDot', true);
+                    
+                    // Update bridge status icon in sidebar
+                    const bridgeIcon = document.getElementById('bridgeStatusIcon');
+                    const allOnline = bots.testcenter?.running && (bots.discumbot?.running || bots.discum?.running) && bots.datamanager?.running && bots.pingbot?.running;
+                    const someOnline = bots.testcenter?.running || bots.discumbot?.running || bots.discum?.running || bots.datamanager?.running || bots.pingbot?.running;
+                    if (bridgeIcon) {
+                        bridgeIcon.classList.toggle('offline', !someOnline);
+                        document.getElementById('bridgeStatusEmoji').textContent = allOnline ? '🟢' : someOnline ? '🟡' : '🔴';
+                    }
+                } else {
+                    // API failed - show offline
+                    setAllOffline();
+                }
+            } catch (e) {
+                console.warn('Failed to check bridge status:', e);
+                setAllOffline();
+            }
+        }
+        
+        function setAllOffline() {
+            ['discumBridgeDot', 'dataBridgeDot', 'pingBridgeDot', 'discumTokenDot', 'neoTokenDot'].forEach(id => {
+                const dot = document.getElementById(id);
+                if (dot) {
+                    dot.classList.remove('loading');
+                    dot.classList.add('offline');
+                }
+            });
+            ['discumBridgeStatus', 'dataBridgeStatus', 'pingBridgeStatus'].forEach(id => {
+                const label = document.getElementById(id);
+                if (label) {
+                    label.textContent = 'Offline';
+                    label.classList.remove('online');
+                    label.classList.add('offline');
+                }
+            });
+        }
+        
+        // Safe DOM element setter helper
+        function safeSet(id, value, prop = 'textContent') {
+            const el = document.getElementById(id);
+            if (el) el[prop] = value;
+        }
+        
+        // Update mapping stats in right sidebar
+        function updateSidebarStats() {
+            safeSet('statMappings', mappings.length);
+            safeSet('statWebhooks', mappings.filter(m => m.webhook).length);
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', async () => {
+            console.log('🚀 Channel Map starting...');
+            
+            // Step 1: Initialize RS Emojis (doesn't need API)
+            await initRSEmojis();
+            
+            // Step 2: Pre-load source channels for channel name resolution
+            console.log('[Init] Pre-loading source channels...');
+            await loadSourceChannelsData();
+            
+            // Step 3: Pre-fetch guilds ONCE (all other functions will use cache)
+            console.log('[Init] Pre-fetching guilds...');
+            await window.ChannelBridge.getGuilds();
+            
+            // Step 4: Run independent operations in parallel (all use cached guilds now)
+            console.log('[Init] Loading components in parallel...');
+            await Promise.all([
+                checkApiStatus(),
+                loadServers().then(() => loadSourceServerIcons()),
+                loadMappings().then(() => updateMappingStats()),
+                checkBridgeStatus(),
+                loadWebhookFullMap(),
+                loadConnectedServers(),
+                countChannels()
+            ]);
+            
+            // Log initial load complete
+            logApiCall('init', 'ok', 0);
+            console.log('✅ Channel Map ready');
+        });
+
+        // Check API Status
+        async function checkApiStatus() {
+            const container = document.getElementById('apiStatusContent');
+            if (!container) return; // Element not in DOM
+            
+            try {
+                // Check ENV status using ChannelBridge cache
+                const envData = await window.ChannelBridge.getEnvStatus();
+                
+                // Check Discord API using cached guilds
+                const guilds = await window.ChannelBridge.getGuilds();
+                const discordOk = guilds.length > 0 && !guilds[0].fallback;
+                
+                container.innerHTML = `
+                    <div class="api-status-item">
+                        <span>HTTP Server</span>
+                        <div class="api-status-dot online"></div>
+                    </div>
+                    <div class="api-status-item">
+                        <span>Discord API</span>
+                        <div class="api-status-dot ${discordOk ? 'online' : 'offline'}"></div>
+                    </div>
+                    <div class="api-status-item">
+                        <span>Channel Map</span>
+                        <div class="api-status-dot ${mappings.length > 0 ? 'online' : 'loading'}"></div>
+                    </div>
+                `;
+                
+                // Update token status
+                if (envData && envData.tokens) {
+                    const discumEl = document.getElementById('discumTokenStatus');
+                    const neoEl = document.getElementById('neoTokenStatus');
+                    if (discumEl) discumEl.textContent = envData.tokens.DISCUM_BOT?.configured ? '✅' : '❌';
+                    if (neoEl) neoEl.textContent = envData.tokens.NEO_TOKEN?.configured ? '✅' : '❌';
+                }
+            } catch (e) {
+                container.innerHTML = `
+                    <div class="api-status-item">
+                        <span>HTTP Server</span>
+                        <div class="api-status-dot online"></div>
+                    </div>
+                    <div class="api-status-item">
+                        <span>Discord API</span>
+                        <div class="api-status-dot offline"></div>
+                    </div>
+                `;
+            }
+        }
+
+        // Toggle token info panel
+        function toggleTokenInfo() {
+            const details = document.getElementById('tokenDetails');
+            const icon = document.getElementById('tokenExpandIcon');
+            
+            if (details.style.display === 'none') {
+                details.style.display = 'block';
+                icon.classList.add('expanded');
+            } else {
+                details.style.display = 'none';
+                icon.classList.remove('expanded');
+            }
+        }
+
+        // Update server card when server is selected
+        function updateServerCard(side, serverName, channelCount, iconUrl) {
+            const nameEl = document.getElementById(`${side}ServerName`);
+            const metaEl = document.getElementById(`${side}ServerMeta`);
+            const iconEl = document.getElementById(`${side}ServerIcon`);
+            const statusEl = document.getElementById(`${side}ServerStatus`);
+            const cardEl = document.getElementById(`${side}ServerCard`);
+            
+            if (nameEl) nameEl.textContent = serverName || 'Not Selected';
+            if (metaEl) metaEl.textContent = channelCount !== undefined ? `${channelCount} channels` : 'Loading...';
+            if (statusEl) statusEl.textContent = channelCount !== undefined ? '✅' : '⏳';
+            
+            if (iconEl && iconUrl) {
+                iconEl.src = iconUrl;
+            }
+            
+            if (cardEl) cardEl.classList.toggle('active', !!serverName);
+        }
+
+        // Update mapping stats
+        function updateMappingStats() {
+            const totalEl = document.getElementById('totalMappings');
+            if (totalEl) totalEl.textContent = mappings.length;
+            
+            // Count unique webhooks
+            const webhooks = new Set(mappings.map(m => m.dest));
+            const webhookEl = document.getElementById('totalWebhooks');
+            if (webhookEl) webhookEl.textContent = webhooks.size;
+            
+            // Update last sync time
+            const syncEl = document.getElementById('lastSync');
+            if (syncEl) syncEl.textContent = new Date().toLocaleTimeString();
+            
+            // Update sidebar stats
+            updateSidebarStats();
+        }
+
+        // Toggle server info (for future expansion)
+        function toggleServerInfo(side) {
+            const card = document.getElementById(`${side}ServerCard`);
+            // Could show more server details in a popup
+            console.log(`Toggle ${side} server info`);
+        }
+
+        // Fallback servers when API fails
+        const FALLBACK_SERVERS = [
+            { id: 'mirrorworld', name: '🌐 Mirror World', icon_url: './assets/images/mirrorworld-default.jpg' },
+            { id: 'resellingsecrets', name: '💰 Reselling Secrets', icon_url: './assets/images/rs-default.png' }
+        ];
+
+        // Load servers from API
+        async function loadServers() {
+            const sourceSelect = document.getElementById('sourceServer');
+            const destSelect = document.getElementById('destServer');
+            
+            if (!sourceSelect || !destSelect) {
+                console.error('[ChannelMap] Server dropdowns not found!');
+                return;
+            }
+            
+            try {
+                // Use ChannelBridge cache to avoid duplicate API calls
+                const guilds = await window.ChannelBridge.getGuilds();
+                console.log(`[ChannelMap] Got ${guilds.length} guilds from API`);
+                    
+                if (guilds.length > 0 && !guilds[0].fallback) {
+                    console.log(`[ChannelMap] ✅ DISCUM_BOT: ${guilds.length} servers accessible`);
+                        guilds.forEach(guild => {
+                        // Add to source dropdown
+                        if (sourceSelect) {
+                            const optionS = document.createElement('option');
+                            optionS.value = guild.id;
+                            optionS.textContent = guild.name;
+                            sourceSelect.appendChild(optionS);
+                        }
+                            
+                        // Add to destination dropdown
+                        if (destSelect) {
+                            const optionD = document.createElement('option');
+                            optionD.value = guild.id;
+                            optionD.textContent = guild.name;
+                            destSelect.appendChild(optionD);
+                        }
+                        });
+                    console.log(`[ChannelMap] Populated both dropdowns with ${guilds.length} servers`);
+                    
+                    // Auto-select Mirror World as destination if available
+                    const mirrorWorld = guilds.find(g => g.name.toLowerCase().includes('mirror'));
+                    if (mirrorWorld && destSelect) {
+                        destSelect.value = mirrorWorld.id;
+                        console.log(`[ChannelMap] Auto-selected Mirror World as destination`);
+                        loadDestChannels();
+                    }
+                        return;
+                } else if (guilds[0]?.fallback) {
+                    console.warn('[ChannelMap] Using fallback servers (DISCUM_BOT may be offline)');
+                    }
+                // Fall through to fallback if no guilds
+                throw new Error('No guilds available');
+            } catch (e) {
+                console.warn('Failed to load servers from API, using fallbacks:', e);
+                // Use fallback servers
+                FALLBACK_SERVERS.forEach(guild => {
+                    if (sourceSelect) {
+                    const optionS = document.createElement('option');
+                    optionS.value = guild.id;
+                    optionS.textContent = guild.name;
+                    sourceSelect.appendChild(optionS);
+                    }
+                    
+                    if (destSelect) {
+                    const optionD = document.createElement('option');
+                    optionD.value = guild.id;
+                    optionD.textContent = guild.name;
+                    destSelect.appendChild(optionD);
+                    }
+                });
+            }
+        }
+
+        // Load source channels
+        async function loadSourceChannels() {
+            const select = document.getElementById('sourceServer');
+            if (!select) return;
+            
+            const serverId = select.value;
+            const serverName = select.options[select.selectedIndex]?.text || '';
+            const container = document.getElementById('sourceChannels');
+            
+            if (!serverId) {
+                if (container) container.innerHTML = '<div class="empty-state"><div class="icon">📂</div><p>Select a server</p></div>';
+                updateServerCard('source', null, undefined, null);
+                // Reload webhook map when no server selected (show all)
+                loadWebhookFullMap();
+                return;
+            }
+            
+            if (container) container.innerHTML = '<div class="loading"><div class="spinner"></div>Loading...</div>';
+            updateServerCard('source', serverName, undefined, './assets/images/rs-default.png');
+            
+            try {
+                // Use ChannelBridge cache for channels
+                sourceChannels = await window.ChannelBridge.getChannels(serverId);
+                
+                if (sourceChannels.length > 0) {
+                    const channelCount = sourceChannels.filter(c => c.type !== 4).length;
+                    console.log(`[ChannelMap] Source: ${channelCount} channels loaded`);
+                    renderSourceChannels();
+                    updateServerCard('source', serverName, channelCount, './assets/images/rs-default.png');
+                } else {
+                    console.warn('[ChannelMap] Source: No channels returned');
+                    if (container) container.innerHTML = '<div class="empty-state"><div class="icon">📭</div><p>No channels found</p></div>';
+                }
+                
+                // Reload webhook map with filtered results
+                loadWebhookFullMap();
+            } catch (e) {
+                console.error(`[ChannelMap] Source fetch error: ${e.message}`);
+                if (container) container.innerHTML = '<div class="empty-state"><div class="icon">❌</div><p>Failed to load</p></div>';
+                updateServerCard('source', serverName + ' (Error)', 0, null);
+            }
+        }
+
+        // Load dest channels
+        async function loadDestChannels() {
+            const select = document.getElementById('destServer');
+            const serverId = select.value;
+            const serverName = select.options[select.selectedIndex]?.text || '';
+            const container = document.getElementById('destChannels');
+            
+            if (!serverId) {
+                container.innerHTML = '<div class="empty-state"><div class="icon">📂</div><p>Select a server</p></div>';
+                updateServerCard('dest', null, undefined, null);
+                return;
+            }
+            
+            container.innerHTML = '<div class="loading"><div class="spinner"></div>Loading...</div>';
+            updateServerCard('dest', serverName, undefined, './assets/images/mirrorworld-default.jpg');
+            
+            try {
+                // Use ChannelBridge cache for channels
+                destChannels = await window.ChannelBridge.getChannels(serverId);
+                
+                if (destChannels.length > 0) {
+                    const channelCount = destChannels.filter(c => c.type !== 4).length;
+                    console.log(`[ChannelMap] Dest: ${channelCount} channels loaded`);
+                    renderDestChannels();
+                    updateServerCard('dest', serverName, channelCount, './assets/images/mirrorworld-default.jpg');
+                } else {
+                    console.warn('[ChannelMap] Dest: No channels returned');
+                    container.innerHTML = '<div class="empty-state"><div class="icon">📭</div><p>No channels found</p></div>';
+                }
+            } catch (e) {
+                console.error(`[ChannelMap] Dest fetch error: ${e.message}`);
+                container.innerHTML = '<div class="empty-state"><div class="icon">❌</div><p>Failed to load</p></div>';
+                updateServerCard('dest', serverName + ' (Error)', 0, null);
+            }
+        }
+
+        // Group channels by category
+        function groupByCategory(channels) {
+            const categories = {};
+            const uncategorized = [];
+            
+            // First, find all categories
+            channels.forEach(c => {
+                if (c.type === 4) { // Category type
+                    categories[c.id] = { name: c.name, channels: [] };
+                }
+            });
+            
+            // Then, assign channels to categories
+            channels.forEach(c => {
+                if (c.type === 4) return; // Skip categories themselves
+                if (c.parent_id && categories[c.parent_id]) {
+                    categories[c.parent_id].channels.push(c);
+                } else {
+                    uncategorized.push(c);
+                }
+            });
+            
+            return { categories, uncategorized };
+        }
+
+        // Render Discord-style channels with categories
+        function renderSourceChannels() {
+            const container = document.getElementById('sourceChannels');
+            const search = document.getElementById('sourceSearch')?.value.toLowerCase() || '';
+            const filterType = document.getElementById('sourceFilter')?.value || 'all';
+            
+            // First filter by search
+            let filtered = sourceChannels.filter(c => 
+                c.type !== 4 && c.name.toLowerCase().includes(search)
+            );
+            
+            // Then filter by mapped/unmapped
+            if (filterType === 'mapped') {
+                filtered = filtered.filter(c => isMapped(c.id, 'source'));
+            } else if (filterType === 'unmapped') {
+                filtered = filtered.filter(c => !isMapped(c.id, 'source'));
+            }
+            
+            document.getElementById('sourceCount').textContent = `${filtered.length} channels`;
+            
+            // Update selected count indicator
+            const selectedCountEl = document.getElementById('selectedCount');
+            const selectedCountNumEl = document.getElementById('selectedCountNum');
+            if (selectedCountEl && selectedCountNumEl) {
+                const selectedInFiltered = filtered.filter(c => selectedSources.has(c.id)).length;
+                if (selectedInFiltered > 0) {
+                    selectedCountNumEl.textContent = selectedInFiltered;
+                    selectedCountEl.style.display = 'block';
+                } else {
+                    selectedCountEl.style.display = 'none';
+                }
+            }
+            
+            if (filtered.length === 0) {
+                container.innerHTML = '<div class="empty-state"><p>No channels found</p></div>';
+                return;
+            }
+            
+            const { categories, uncategorized } = groupByCategory(sourceChannels);
+            let html = '';
+            
+            // Render uncategorized first
+            if (uncategorized.length > 0 && search === '' && filterType === 'all') {
+                uncategorized.filter(c => c.type !== 4).forEach(c => {
+                    if (filterType === 'all' || 
+                        (filterType === 'mapped' && isMapped(c.id, 'source')) ||
+                        (filterType === 'unmapped' && !isMapped(c.id, 'source'))) {
+                        html += renderChannelItem(c, 'source');
+                    }
+                });
+            }
+            
+            // Render categories with their channels
+            Object.entries(categories).forEach(([catId, cat]) => {
+                let visibleChannels = search 
+                    ? cat.channels.filter(c => c.name.toLowerCase().includes(search))
+                    : cat.channels;
+                
+                // Apply mapped/unmapped filter
+                if (filterType === 'mapped') {
+                    visibleChannels = visibleChannels.filter(c => isMapped(c.id, 'source'));
+                } else if (filterType === 'unmapped') {
+                    visibleChannels = visibleChannels.filter(c => !isMapped(c.id, 'source'));
+                }
+                    
+                if (visibleChannels.length === 0) return;
+                
+                const mappedCount = visibleChannels.filter(c => isMapped(c.id, 'source')).length;
+                const isExpanded = !collapsedCategories.has('source_' + catId);
+                
+                html += `
+                    <div class="discord-category">
+                        <div class="discord-category-header" onclick="toggleCategory('source_${catId}')">
+                            <span class="discord-category-icon ${isExpanded ? '' : 'collapsed'}">▼</span>
+                            <span>${cat.name}</span>
+                            ${mappedCount > 0 ? `<span class="discord-category-badge mapped">${mappedCount} mapped</span>` : ''}
+                            <span class="discord-category-badge">${visibleChannels.length}</span>
+                        </div>
+                        <div class="discord-category-channels ${isExpanded ? '' : 'collapsed'}">
+                            ${visibleChannels.map(c => renderChannelItem(c, 'source')).join('')}
+                        </div>
+                    </div>
+                `;
+            });
+            
+            // For search results without categories
+            if (search && html === '') {
+                html = filtered.map(c => renderChannelItem(c, 'source')).join('');
+            }
+            
+            container.innerHTML = html || '<div class="empty-state"><p>No channels found</p></div>';
+        }
+
+        async function renderDestChannels() {
+            const container = document.getElementById('destChannels');
+            const search = document.getElementById('destSearch')?.value.toLowerCase() || '';
+            const filterType = document.getElementById('destFilter')?.value || 'all';
+            
+            // First filter by search
+            let filtered = destChannels.filter(c => 
+                c.type !== 4 && c.name.toLowerCase().includes(search)
+            );
+            
+            // Refresh cache if needed, then filter
+            await refreshDestMappedCache();
+            
+            // Then filter by mapped/unmapped (for destination, check if any source maps to it)
+            if (filterType === 'mapped') {
+                filtered = filtered.filter(c => isDestMapped(c.id));
+            } else if (filterType === 'unmapped') {
+                filtered = filtered.filter(c => !isDestMapped(c.id));
+            }
+            
+            document.getElementById('destCount').textContent = `${filtered.length} channels`;
+            
+            if (filtered.length === 0) {
+                container.innerHTML = '<div class="empty-state"><p>No channels found</p></div>';
+                return;
+            }
+            
+            const { categories, uncategorized } = groupByCategory(destChannels);
+            let html = '';
+            
+            // Render uncategorized first
+            if (uncategorized.length > 0 && search === '' && filterType === 'all') {
+                uncategorized.filter(c => c.type !== 4).forEach(c => {
+                    if (filterType === 'all' || 
+                        (filterType === 'mapped' && isDestMapped(c.id)) ||
+                        (filterType === 'unmapped' && !isDestMapped(c.id))) {
+                        html += renderChannelItem(c, 'dest');
+                    }
+                });
+            }
+            
+            // Render categories with their channels
+            Object.entries(categories).forEach(([catId, cat]) => {
+                let visibleChannels = search 
+                    ? cat.channels.filter(c => c.name.toLowerCase().includes(search))
+                    : cat.channels;
+                
+                // Apply mapped/unmapped filter
+                if (filterType === 'mapped') {
+                    visibleChannels = visibleChannels.filter(c => isDestMapped(c.id));
+                } else if (filterType === 'unmapped') {
+                    visibleChannels = visibleChannels.filter(c => !isDestMapped(c.id));
+                }
+                    
+                if (visibleChannels.length === 0) return;
+                
+                const isExpanded = !collapsedCategories.has('dest_' + catId);
+                
+                html += `
+                    <div class="discord-category">
+                        <div class="discord-category-header" onclick="toggleCategory('dest_${catId}')">
+                            <span class="discord-category-icon ${isExpanded ? '' : 'collapsed'}">▼</span>
+                            <span>${cat.name}</span>
+                            <span class="discord-category-badge">${visibleChannels.length}</span>
+                        </div>
+                        <div class="discord-category-channels ${isExpanded ? '' : 'collapsed'}">
+                            ${visibleChannels.map(c => renderChannelItem(c, 'dest')).join('')}
+                        </div>
+                    </div>
+                `;
+            });
+            
+            // For search results without categories
+            if (search && html === '') {
+                html = filtered.map(c => renderChannelItem(c, 'dest')).join('');
+            }
+            
+            container.innerHTML = html || '<div class="empty-state"><p>No channels found</p></div>';
+        }
+        
+        // Cache for destination mappings
+        let destMappedCache = {};
+        let destMappedCacheTime = 0;
+        const DEST_CACHE_TTL = 30000; // 30 seconds
+        
+        // Check if destination is mapped (synchronous check using cache)
+        function isDestMapped(destChannelId) {
+            // Use cached data if available
+            if (destMappedCache[String(destChannelId)] !== undefined) {
+                return destMappedCache[String(destChannelId)];
+            }
+            // Default to false if not in cache (will be populated on next refresh)
+            return false;
+        }
+        
+        // Refresh destination mapping cache
+        async function refreshDestMappedCache() {
+            const now = Date.now();
+            if (now - destMappedCacheTime < DEST_CACHE_TTL && Object.keys(destMappedCache).length > 0) {
+                return; // Cache still valid
+            }
+            
+            destMappedCache = {};
+            try {
+                const response = await fetch((window.CHANNELMAP_API_BASE || '') + '/api/destination_channels');
+                if (response.ok) {
+                    const data = await response.json();
+                    for (const dest of data.destinations || []) {
+                        destMappedCache[String(dest.id)] = (dest.sources || []).length > 0;
+                    }
+                }
+                destMappedCacheTime = now;
+            } catch (e) {
+                console.warn('[ChannelMap] Could not refresh destination cache:', e);
+            }
+        }
+
+        function filterSourceChannels() { renderSourceChannels(); }
+        function filterDestChannels() { renderDestChannels(); }
+
+        // Selection
+        function selectSource(id) {
+            if (selectedSources.has(id)) {
+                selectedSources.delete(id);
+            } else {
+                selectedSources.add(id);
+            }
+            renderSourceChannels();
+        }
+
+        function selectDest(id) {
+            selectedDest = selectedDest === id ? null : id;
+            renderDestChannels();
+        }
+
+        function clearSelection() {
+            selectedSources.clear();
+            selectedDest = null;
+            renderSourceChannels();
+            renderDestChannels();
+        }
+
+        // Mappings
+        function isMapped(channelId, type) {
+            return mappings.some(m => type === 'source' ? m.source === channelId : m.dest === channelId);
+        }
+
+        async function createMapping() {
+            if (selectedSources.size === 0 || !selectedDest) {
+                alert('Select at least one source channel and a destination channel');
+                return;
+            }
+            
+            const sourceIds = Array.from(selectedSources);
+            const destCh = destChannels.find(c => c.id === selectedDest);
+            
+            // Check if any sources are already mapped
+            try {
+                const mapResponse = await fetch((window.CHANNELMAP_API_BASE || '') + '/config/channel_map.json');
+                if (mapResponse.ok) {
+                    const existingMap = await mapResponse.json();
+                    const alreadyMapped = sourceIds.filter(id => existingMap[id]);
+                    if (alreadyMapped.length > 0) {
+                        const mappedNames = alreadyMapped.map(id => {
+                            const ch = sourceChannels.find(c => c.id === id);
+                            return ch?.name || id;
+                        });
+                        if (!confirm(`${alreadyMapped.length} source channel(s) are already mapped:\n${mappedNames.map(n => `- #${n}`).join('\n')}\n\nDo you want to replace the existing mappings?`)) {
+                            return;
+                        }
+                    }
+                }
+            } catch (e) {
+                console.warn('[ChannelMap] Could not check existing mappings:', e);
+            }
+            
+            // Show loading state
+            const bridgeArrow = document.querySelector('.bridge-arrow');
+            if (bridgeArrow) {
+                bridgeArrow.disabled = true;
+                bridgeArrow.style.opacity = '0.5';
+                bridgeArrow.textContent = '...';
+            }
+            
+            try {
+                // Step 1: Create webhook in destination channel
+                const webhookResponse = await fetch((window.CHANNELMAP_API_BASE || '') + '/discord/create_webhook', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        channel_id: selectedDest
+                    })
+                });
+                
+                if (!webhookResponse.ok) {
+                    const error = await webhookResponse.json().catch(() => ({error: 'Unknown error'}));
+                    throw new Error(error.error || `HTTP ${webhookResponse.status}`);
+                }
+                
+                const webhookData = await webhookResponse.json();
+                const webhookUrl = webhookData.webhook_url;
+                
+                if (!webhookUrl) {
+                    throw new Error('Webhook creation failed - no webhook URL returned');
+                }
+                
+                // Step 2: Load existing channel map
+                const mapResponse = await fetch((window.CHANNELMAP_API_BASE || '') + '/config/channel_map.json');
+                const existingMap = mapResponse.ok ? await mapResponse.json() : {};
+                
+                // Step 3: Add mappings for all selected source channels (all map to same webhook)
+                const updatedMap = {...existingMap};
+                const sourceNames = [];
+                sourceIds.forEach(sourceId => {
+                    updatedMap[sourceId] = webhookUrl;
+                    const sourceCh = sourceChannels.find(c => c.id === sourceId);
+                    sourceNames.push(sourceCh?.name || sourceId);
+                    
+                    // Update local mappings
+                    mappings.push({
+                        source: sourceId,
+                        sourceName: sourceCh?.name || sourceId,
+                        dest: selectedDest,
+                        destName: destCh?.name || selectedDest,
+                        webhook: webhookUrl
+                    });
+                });
+                
+                // Step 4: Save to channel_map.json
+                const saveResponse = await fetch((window.CHANNELMAP_API_BASE || '') + '/save_channel_map', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(updatedMap)
+                });
+                
+                if (!saveResponse.ok) {
+                    throw new Error('Failed to save mapping');
+                }
+                
+                // Step 5: Reload webhook map to show new mappings
+                await loadWebhookFullMap();
+                renderSourceChannels();
+                clearSelection();
+                
+                // Show success message
+                const destName = destCh?.name || selectedDest;
+                alert(`✅ ${sourceIds.length} mapping(s) created successfully!\n\nSources:\n${sourceNames.map(n => `- #${n}`).join('\n')}\nDestination: #${destName}\n\nWebhook created and saved to channel_map.json`);
+                
+            } catch (error) {
+                console.error('[ChannelMap] Failed to create mapping:', error);
+                alert(`❌ Failed to create mapping:\n\n${error.message}\n\nPlease ensure:\n- You have "Manage Webhooks" permission\n- Discord token is configured correctly\n- Destination channel exists`);
+            } finally {
+                // Restore button state
+                if (bridgeArrow) {
+                    bridgeArrow.disabled = false;
+                    bridgeArrow.style.opacity = '1';
+                    bridgeArrow.textContent = '→';
+                }
+            }
+        }
+
+        function removeMapping(index) {
+            mappings.splice(index, 1);
+            renderMappings();
+            renderSourceChannels();
+        }
+
+        // Cache for channel names
+        const channelNameCache = {};
+        // Pre-loaded source channels data
+        let sourceChannelsData = null;
+        
+        // Load source channels data on init
+        async function loadSourceChannelsData() {
+            if (sourceChannelsData) return sourceChannelsData;
+            try {
+                const response = await fetch((window.CHANNELMAP_API_BASE || '') + '/config/source_channels.json');
+                if (response.ok) {
+                    sourceChannelsData = await response.json();
+                    // Pre-populate cache with all channel names
+                    if (sourceChannelsData.guilds) {
+                        for (const guild of sourceChannelsData.guilds) {
+                            for (const channel of (guild.channels || [])) {
+                                if (channel.id && channel.name) {
+                                    channelNameCache[channel.id] = channel.name;
+                                }
+                            }
+                        }
+                        console.log(`[ChannelMap] Pre-loaded ${Object.keys(channelNameCache).length} channel names`);
+                    }
+                }
+            } catch (e) {
+                console.log('[ChannelMap] Could not pre-load source channels:', e);
+            }
+            return sourceChannelsData;
+        }
+        
+        // Get channel name from ID (using cache)
+        async function getChannelName(channelId) {
+            if (channelNameCache[channelId]) return channelNameCache[channelId];
+            
+            // Try to load from source_channels.json if not already loaded
+            if (!sourceChannelsData) {
+                await loadSourceChannelsData();
+                if (channelNameCache[channelId]) return channelNameCache[channelId];
+            }
+            
+            try {
+                // Try to find in loaded source/dest channels from ChannelBridge
+                const sourceSelect = document.getElementById('sourceServer');
+                const destSelect = document.getElementById('destServer');
+                
+                for (const guildId of [sourceSelect?.value, destSelect?.value].filter(Boolean)) {
+                    const channels = await window.ChannelBridge.getChannels(guildId);
+                    const found = channels.find(c => c.id === channelId);
+                    if (found) {
+                        channelNameCache[channelId] = found.name;
+                        return found.name;
+                    }
+                }
+            } catch (e) {}
+            
+            // Fallback: shortened ID
+            channelNameCache[channelId] = `ch-${channelId.slice(-6)}`;
+            return channelNameCache[channelId];
+        }
+        
+        // Extract webhook ID from URL for grouping
+        function getWebhookId(webhookUrl) {
+            const match = webhookUrl.match(/webhooks\/(\d+)\//);
+            return match ? match[1] : webhookUrl.slice(-20);
+        }
+        
+        // Get destination channel name from webhook URL
+        async function getDestinationChannelName(webhookUrl) {
+            try {
+                // Try to get from /api/destination_channels endpoint
+                const destResponse = await fetch((window.CHANNELMAP_API_BASE || '') + '/api/destination_channels');
+                if (destResponse.ok) {
+                    const destData = await destResponse.json();
+                    // Find destination by webhook URL
+                    for (const dest of destData.destinations || []) {
+                        if (dest.sources && dest.sources.some(s => s.webhook === webhookUrl)) {
+                            if (dest.name && !dest.name.startsWith('Webhook #')) {
+                                return dest.name;
+                            }
+                        }
+                    }
+                }
+            } catch (e) {
+                console.log('[ChannelMap] Could not fetch destination channels:', e);
+            }
+            
+            // Fallback: extract from webhook URL
+            const webhookId = getWebhookId(webhookUrl);
+            return `Webhook #${webhookId.slice(-4)}`;
+        }
+        
+        // Load and render webhook mappings (both center and bottom panels)
+        async function loadWebhookFullMap() {
+            const centerList = document.getElementById('centerWebhookList');
+            const centerCount = document.getElementById('centerWebhookCount');
+            const bottomContainer = document.getElementById('webhookCardsContainer');
+            const guildName = document.getElementById('webhookGuildName');
+            
+            try {
+                const response = await fetch((window.CHANNELMAP_API_BASE || '') + '/config/channel_map.json');
+                if (!response.ok) {
+                    if (centerList) centerList.innerHTML = '<div class="empty-state" style="padding:20px;text-align:center;font-size:11px;color:var(--text-dim);">No webhooks</div>';
+                    if (bottomContainer) bottomContainer.innerHTML = '<div class="empty-state"><div class="icon">🗺️</div><p>No webhook mappings found</p></div>';
+                    if (centerCount) centerCount.textContent = '0';
+                    if (guildName) guildName.textContent = '';
+                    return;
+                }
+                
+                const data = await response.json();
+                
+                // Format: { "source_channel_id": "webhook_url", ... }
+                const entries = Object.entries(data);
+                const mappingCount = entries.length;
+                
+                // Get selected source server (for center panel only)
+                const sourceSelect = document.getElementById('sourceServer');
+                const selectedSourceServerId = sourceSelect?.value;
+                
+                // For CENTER panel: Filter entries by selected source server if one is selected
+                // For BOTTOM panel: Show ALL entries (all servers)
+                let filteredEntriesForCenter = entries;
+                let allEntriesForBottom = entries; // Always show all for bottom panel
+                
+                if (selectedSourceServerId) {
+                    try {
+                        // Get channels from selected source server
+                        const channels = await window.ChannelBridge.getChannels(selectedSourceServerId);
+                        const serverChannelIds = new Set(channels.map(ch => String(ch.id)));
+                        
+                        // Filter to only webhooks from this server (for center panel only)
+                        filteredEntriesForCenter = entries.filter(([sourceId]) => serverChannelIds.has(sourceId));
+                    } catch (e) {
+                        console.warn('[ChannelMap] Could not filter by source server:', e);
+                    }
+                }
+                
+                if (centerCount) centerCount.textContent = filteredEntriesForCenter.length;
+                if (guildName) guildName.textContent = mappingCount > 0 
+                    ? `${mappingCount} mappings${selectedSourceServerId ? ' (center: filtered)' : ''}` 
+                    : '';
+                
+                if (filteredEntriesForCenter.length === 0 && selectedSourceServerId) {
+                    if (centerList) centerList.innerHTML = '<div class="empty-state" style="padding:20px;text-align:center;font-size:11px;color:var(--text-dim);">No active webhooks for selected server</div>';
+                }
+                
+                if (allEntriesForBottom.length === 0) {
+                    if (bottomContainer) bottomContainer.innerHTML = '<div class="empty-state"><div class="icon">🗺️</div><p>No webhook mappings configured</p></div>';
+                    return;
+                }
+                
+                // Group by webhook URL (destination) - separate for center and bottom
+                const webhookGroupsForCenter = {};
+                filteredEntriesForCenter.forEach(([sourceId, webhookUrl]) => {
+                    const webhookId = getWebhookId(webhookUrl);
+                    if (!webhookGroupsForCenter[webhookId]) {
+                        webhookGroupsForCenter[webhookId] = {
+                            webhookUrl: webhookUrl,
+                            webhookId: webhookId,
+                            sources: []
+                        };
+                    }
+                    webhookGroupsForCenter[webhookId].sources.push(sourceId);
+                });
+                
+                // Group ALL entries for bottom panel
+                const webhookGroupsForBottom = {};
+                allEntriesForBottom.forEach(([sourceId, webhookUrl]) => {
+                    const webhookId = getWebhookId(webhookUrl);
+                    if (!webhookGroupsForBottom[webhookId]) {
+                        webhookGroupsForBottom[webhookId] = {
+                            webhookUrl: webhookUrl,
+                            webhookId: webhookId,
+                            sources: []
+                        };
+                    }
+                    webhookGroupsForBottom[webhookId].sources.push(sourceId);
+                });
+                
+                const groupCount = Object.keys(webhookGroupsForCenter).length;
+                
+                // Load destination channel names from API
+                let destChannelNames = {};
+                try {
+                    const destResponse = await fetch((window.CHANNELMAP_API_BASE || '') + '/api/destination_channels');
+                    if (destResponse.ok) {
+                        const destData = await destResponse.json();
+                        for (const dest of destData.destinations || []) {
+                            if (dest.id && dest.name) {
+                                // Match by webhook URL in sources
+                                for (const src of dest.sources || []) {
+                                    if (src.webhook) {
+                                        const whId = getWebhookId(src.webhook);
+                                        if (!destChannelNames[whId]) {
+                                            destChannelNames[whId] = dest.name;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.log('[ChannelMap] Could not load destination names:', e);
+                }
+                
+                // Also try to resolve destination channel names from destination server channels
+                try {
+                    const destSelect = document.getElementById('destServer');
+                    if (destSelect && destSelect.value) {
+                        const destChannels = await window.ChannelBridge.getChannels(destSelect.value);
+                        const destChannelMap = {};
+                        destChannels.forEach(ch => {
+                            destChannelMap[ch.id] = ch.name;
+                        });
+                        
+                        // For each webhook, try to resolve the destination channel
+                        for (const [webhookId, group] of Object.entries(webhookGroupsForCenter)) {
+                            if (!destChannelNames[webhookId] || destChannelNames[webhookId].startsWith('Webhook #')) {
+                                // Try to extract channel_id from webhook URL by fetching webhook info
+                                try {
+                                    const webhookMatch = group.webhookUrl.match(/webhooks\/(\d+)\/([^\/]+)/);
+                                    if (webhookMatch) {
+                                        const whId = webhookMatch[1];
+                                        const whToken = webhookMatch[2];
+                                        const webhookInfoUrl = `https://discord.com/api/v9/webhooks/${whId}/${whToken}`;
+                                        
+                                        const webhookRes = await fetch(webhookInfoUrl);
+                                        if (webhookRes.ok) {
+                                            const webhookData = await webhookRes.json();
+                                            const destChannelId = String(webhookData.channel_id || '');
+                                            if (destChannelId && destChannelMap[destChannelId]) {
+                                                destChannelNames[webhookId] = destChannelMap[destChannelId];
+                                            }
+                                        } else if (webhookRes.status === 404) {
+                                            // Webhook deleted - skip
+                                        }
+                                    }
+                                } catch (e) {
+                                    // Skip if webhook resolution fails
+                                }
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.log('[ChannelMap] Could not resolve from destination server:', e);
+                }
+                
+                // Get channel names for grouping by category (for center panel - selected server only)
+                const sourceChannels = selectedSourceServerId 
+                    ? await window.ChannelBridge.getChannels(selectedSourceServerId)
+                    : [];
+                const channelMap = {};
+                sourceChannels.forEach(ch => {
+                    channelMap[ch.id] = ch;
+                });
+                
+                // Group webhooks by category (for center panel only)
+                const webhooksByCategory = {};
+                Object.entries(webhookGroupsForCenter).forEach(([webhookId, group]) => {
+                    group.sources.forEach(sourceId => {
+                        const channel = channelMap[sourceId];
+                        const categoryName = channel?.parent_name || 'Uncategorized';
+                        if (!webhooksByCategory[categoryName]) {
+                            webhooksByCategory[categoryName] = [];
+                        }
+                        if (!webhooksByCategory[categoryName].find(w => w.webhookId === webhookId)) {
+                            webhooksByCategory[categoryName].push({
+                                webhookId,
+                                webhookUrl: group.webhookUrl,
+                                destName: destChannelNames[webhookId] || `Webhook #${webhookId.slice(-4)}`,
+                                sources: group.sources.filter(id => channelMap[id]?.parent_name === categoryName || (!channelMap[id]?.parent_name && categoryName === 'Uncategorized'))
+                            });
+                        }
+                    });
+                });
+                
+                // Render center panel (organized by category with full channel names)
+                if (centerList) {
+                    let centerHtml = '';
+                    
+                    if (Object.keys(webhooksByCategory).length === 0) {
+                        centerHtml = '<div class="empty-state" style="padding:20px;text-align:center;font-size:11px;color:var(--text-dim);">No webhooks for selected server</div>';
+                    } else {
+                        Object.entries(webhooksByCategory).forEach(([categoryName, webhooks]) => {
+                            if (webhooks.length === 0) return;
+                            
+                            centerHtml += `<div style="font-size: 9px; color: var(--accent); padding: 8px 0 6px; text-transform: uppercase; font-weight: 700; border-top: 1px solid var(--border); margin-top: 8px; letter-spacing: 0.5px;">▼ ${categoryName} (${webhooks.length})</div>`;
+                            
+                            webhooks.forEach(webhook => {
+                                // Get all source channel names with IDs for removal
+                                const allSources = webhook.sources.map(id => {
+                                    const ch = channelMap[id];
+                                    return {
+                                        id: id,
+                                        name: ch?.name || `ch-${String(id).slice(-6)}`
+                                    };
+                                });
+                                
+                            // Use actual destination channel name (not webhook ID)
+                            // Try to get from destChannelNames first, then fallback to webhook.destName
+                            let displayDestName = destChannelNames[webhook.webhookId] || webhook.destName;
+                            if (displayDestName.startsWith('Webhook #') || displayDestName.startsWith('Destination #')) {
+                                // Still showing webhook ID - try to get from destChannelNames again
+                                displayDestName = destChannelNames[webhook.webhookId] || displayDestName.replace(/^(Webhook|Destination) #/, '');
+                            }
+                            
+                            centerHtml += `
+                                <div class="webhook-mini-card" style="margin-bottom: 6px;">
+                                    <span class="webhook-mini-icon">🔗</span>
+                                    <div class="webhook-mini-info" style="flex: 1;">
+                                        <div class="webhook-mini-dest" style="font-weight: 600; margin-bottom: 4px; color: var(--green);">→ #${escapeHtml(displayDestName)}</div>
+                                        <div class="webhook-mini-src" style="font-size: 10px; line-height: 1.4; display: flex; flex-wrap: wrap; gap: 4px; align-items: center;">
+                                            ${allSources.map(src => `
+                                                <span style="display: inline-flex; align-items: center; gap: 4px; background: rgba(0,217,255,0.1); padding: 2px 6px; border-radius: 4px;">
+                                                    <span>#${escapeHtml(src.name)}</span>
+                                                    <button onclick="removeWebhookMapping('${src.id}'); event.stopPropagation();" 
+                                                            style="background: rgba(248,81,73,0.2); border: none; color: var(--red); cursor: pointer; padding: 0 4px; border-radius: 3px; font-size: 12px; line-height: 1; width: 16px; height: 16px; display: flex; align-items: center; justify-content: center; transition: all 0.2s;"
+                                                            onmouseover="this.style.background='rgba(248,81,73,0.4)'; this.style.transform='scale(1.1)'"
+                                                            onmouseout="this.style.background='rgba(248,81,73,0.2)'; this.style.transform='scale(1)'"
+                                                            title="Remove mapping">×</button>
+                                                </span>
+                                            `).join('')}
+                                        </div>
+                                    </div>
+                                    <span class="webhook-mini-status" style="font-size: 10px; color: var(--green);">${webhook.sources.length}</span>
+                                </div>
+                            `;
+                            });
+                        });
+                    }
+                    
+                    centerList.innerHTML = centerHtml;
+                }
+                
+                // Render bottom panel - organized by ALL source servers (not just selected)
+                if (bottomContainer) {
+                    // Group webhooks by source server
+                    const webhooksByServer = {};
+                    
+                    // Get ALL source servers and their channels (not just selected)
+                    const allGuilds = await window.ChannelBridge.getGuilds();
+                    const serverChannelMaps = {};
+                    
+                    for (const guild of allGuilds) {
+                        try {
+                            const channels = await window.ChannelBridge.getChannels(guild.id);
+                            serverChannelMaps[guild.id] = {
+                                guild: guild,
+                                channels: channels,
+                                channelMap: {}
+                            };
+                            channels.forEach(ch => {
+                                serverChannelMaps[guild.id].channelMap[ch.id] = ch;
+                            });
+                        } catch (e) {
+                            console.warn(`[WebhookMap] Could not load channels for ${guild.id}:`, e);
+                        }
+                    }
+                    
+                    // Group webhooks by which server their source channels belong to (using ALL webhooks)
+                    Object.entries(webhookGroupsForBottom).forEach(([webhookId, group]) => {
+                        // Get destination channel name (not webhook ID) - use resolved name if available
+                        let destName = destChannelNames[webhookId];
+                        if (!destName || destName.startsWith('Webhook #')) {
+                            destName = `Destination #${webhookId.slice(-4)}`;
+                        }
+                        
+                        // Find which server(s) these source channels belong to
+                        const serverGroups = {};
+                        
+                        group.sources.forEach(sourceId => {
+                            // Find which server this channel belongs to
+                            for (const [guildId, serverData] of Object.entries(serverChannelMaps)) {
+                                if (serverData.channelMap[sourceId]) {
+                                    if (!serverGroups[guildId]) {
+                                        serverGroups[guildId] = {
+                                            guild: serverData.guild,
+                                            webhookId: webhookId,
+                                            webhookUrl: group.webhookUrl,
+                                            destName: destName,
+                                            sources: []
+                                        };
+                                    }
+                                    serverGroups[guildId].sources.push({
+                                        id: sourceId,
+                                        name: serverData.channelMap[sourceId].name,
+                                        parent_name: serverData.channelMap[sourceId].parent_name
+                                    });
+                                    break;
+                                }
+                            }
+                        });
+                        
+                        // Add to webhooksByServer
+                        Object.entries(serverGroups).forEach(([guildId, serverGroup]) => {
+                            if (!webhooksByServer[guildId]) {
+                                webhooksByServer[guildId] = {
+                                    guild: serverGroup.guild,
+                                    webhooks: []
+                                };
+                            }
+                            webhooksByServer[guildId].webhooks.push(serverGroup);
+                        });
+                    });
+                    
+                    // Resolve destination channel names from webhook URLs (for all webhooks)
+                    for (const [guildId, serverData] of Object.entries(webhooksByServer)) {
+                        for (const webhook of serverData.webhooks) {
+                            if (webhook.destName.startsWith('Webhook #') || webhook.destName.startsWith('Destination #')) {
+                                // Try to resolve from destination_channels API
+                                try {
+                                    const destResponse = await fetch((window.CHANNELMAP_API_BASE || '') + '/api/destination_channels');
+                                    if (destResponse.ok) {
+                                        const destData = await destResponse.json();
+                                        for (const dest of destData.destinations || []) {
+                                            for (const src of dest.sources || []) {
+                                                if (src.webhook === webhook.webhookUrl) {
+                                                    if (dest.name && !dest.name.startsWith('Webhook #')) {
+                                                        webhook.destName = dest.name;
+                                                        // Also update in destChannelNames for center panel
+                                                        destChannelNames[webhook.webhookId] = dest.name;
+                                                    }
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                } catch (e) {
+                                    // Skip if resolution fails
+                                }
+                                
+                                // Also try to resolve from destination server channels
+                                try {
+                                    const destSelect = document.getElementById('destServer');
+                                    if (destSelect && destSelect.value) {
+                                        const destChannels = await window.ChannelBridge.getChannels(destSelect.value);
+                                        const webhookMatch = webhook.webhookUrl.match(/webhooks\/(\d+)\/([^\/]+)/);
+                                        if (webhookMatch) {
+                                            const whId = webhookMatch[1];
+                                            const whToken = webhookMatch[2];
+                                            const webhookInfoUrl = `https://discord.com/api/v9/webhooks/${whId}/${whToken}`;
+                                            
+                                            const webhookRes = await fetch(webhookInfoUrl);
+                                            if (webhookRes.ok) {
+                                                const webhookData = await webhookRes.json();
+                                                const destChannelId = String(webhookData.channel_id || '');
+                                                if (destChannelId) {
+                                                    const destChannel = destChannels.find(ch => String(ch.id) === destChannelId);
+                                                    if (destChannel && destChannel.name) {
+                                                        webhook.destName = destChannel.name;
+                                                        destChannelNames[webhook.webhookId] = destChannel.name;
+                                                    }
+                                                }
+                                            } else if (webhookRes.status === 404) {
+                                                // Webhook no longer exists - skip silently
+                                                console.warn(`[WebhookMap] Webhook ${whId} not found (404) - may have been deleted`);
+                                            }
+                                        }
+                                    }
+                                } catch (e) {
+                                    // Skip if resolution fails
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Render by server with icons
+                    let bottomHtml = '';
+                    
+                    Object.entries(webhooksByServer).forEach(([guildId, serverData]) => {
+                        const guild = serverData.guild;
+                        const iconUrl = guild.icon_url || (guild.icon ? `https://cdn.discordapp.com/icons/${guild.id}/${guild.icon}.png?size=128` : null);
+                        const initial = guild.name?.charAt(0)?.toUpperCase() || '?';
+                        
+                        bottomHtml += `
+                            <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--glass-border); border-radius: var(--radius-sm); padding: 12px; margin-bottom: 12px;">
+                                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border);">
+                                    ${iconUrl 
+                                        ? `<img src="${iconUrl}" alt="${initial}" style="width: 40px; height: 40px; border-radius: 50%; border: 2px solid var(--accent);" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                                           <div style="width: 40px; height: 40px; border-radius: 50%; background: rgba(0,217,255,0.2); border: 2px solid var(--accent); display: none; align-items: center; justify-content: center; font-weight: 700; font-size: 18px;">${initial}</div>`
+                                        : `<div style="width: 40px; height: 40px; border-radius: 50%; background: rgba(0,217,255,0.2); border: 2px solid var(--accent); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 18px;">${initial}</div>`
+                                    }
+                                    <div style="flex: 1;">
+                                        <div style="font-weight: 600; font-size: 14px; color: var(--text);">${escapeHtml(guild.name)}</div>
+                                        <div style="font-size: 11px; color: var(--text-dim);">${serverData.webhooks.length} webhook${serverData.webhooks.length !== 1 ? 's' : ''} • ${serverData.webhooks.reduce((sum, w) => sum + w.sources.length, 0)} monitored channels</div>
+                                    </div>
+                                </div>
+                                <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 8px;">
+                        `;
+                        
+                        serverData.webhooks.forEach(webhook => {
+                            // Group sources by category
+                            const sourcesByCategory = {};
+                            webhook.sources.forEach(src => {
+                                const catName = src.parent_name || 'Uncategorized';
+                                if (!sourcesByCategory[catName]) {
+                                    sourcesByCategory[catName] = [];
+                                }
+                                sourcesByCategory[catName].push(src);
+                            });
+                            
+                            let sourcesHtml = '';
+                            Object.entries(sourcesByCategory).forEach(([catName, sources]) => {
+                                if (catName !== 'Uncategorized') {
+                                    sourcesHtml += `<div style="font-size: 9px; color: var(--text-dim); padding: 4px 0 2px; text-transform: uppercase; font-weight: 600;">${escapeHtml(catName)}</div>`;
+                                }
+                                sources.forEach(src => {
+                                    sourcesHtml += `
+                                        <div class="webhook-source-item" style="margin-bottom: 4px;">
+                                            <span style="color: var(--text-dim);">#</span>
+                                            <span class="webhook-source-name">${escapeHtml(src.name)}</span>
+                                            <button class="webhook-remove-btn" onclick="removeWebhookMapping('${src.id}')" title="Remove mapping">×</button>
+                                        </div>
+                                    `;
+                                });
+                            });
+                            
+                            // Use actual destination channel name (not webhook ID)
+                            // If it still starts with Webhook/Destination, it means resolution failed - show a cleaner fallback
+                            let displayDestName = webhook.destName;
+                            if (displayDestName.startsWith('Webhook #') || displayDestName.startsWith('Destination #')) {
+                                // Try one more time to get from destChannelNames
+                                displayDestName = destChannelNames[webhook.webhookId] || displayDestName.replace(/^(Webhook|Destination) #/, '');
+                            }
+                            
+                            bottomHtml += `
+                                <div class="webhook-card">
+                                    <div class="webhook-card-header">
+                                        <span class="webhook-card-dest" style="color: var(--green); font-weight: 600;">→ #${escapeHtml(displayDestName)}</span>
+                                        <span class="webhook-card-status">✅ ${webhook.sources.length} source${webhook.sources.length !== 1 ? 's' : ''}</span>
+                                    </div>
+                                    <div class="webhook-card-sources">
+                                        ${sourcesHtml}
+                                    </div>
+                                </div>
+                            `;
+                        });
+                        
+                        bottomHtml += `
+                                </div>
+                            </div>
+                        `;
+                    });
+                    
+                    bottomContainer.innerHTML = bottomHtml || '<div class="empty-state"><div class="icon">🗺️</div><p>No webhook mappings configured</p></div>';
+                }
+                
+            } catch (e) {
+                console.error('Failed to load webhook map:', e);
+                if (centerList) centerList.innerHTML = '<div class="empty-state" style="padding:20px;text-align:center;font-size:11px;color:var(--text-dim);">Error loading</div>';
+                if (bottomContainer) bottomContainer.innerHTML = '<div class="empty-state"><div class="icon">🗺️</div><p>Failed to load mappings</p></div>';
+            }
+        }
+        
+        // Remove a webhook mapping
+        async function removeWebhookMapping(sourceId) {
+            if (!confirm('Remove this mapping?')) return;
+            
+            try {
+                // Load current channel map
+                const mapResponse = await fetch((window.CHANNELMAP_API_BASE || '') + '/config/channel_map.json');
+                if (!mapResponse.ok) {
+                    throw new Error('Failed to load channel map');
+                }
+                
+                const channelMap = await mapResponse.json();
+                
+                // Remove the source channel mapping
+                const sourceIdStr = String(sourceId);
+                if (!channelMap[sourceIdStr]) {
+                    alert('Mapping not found');
+                    return;
+                }
+                
+                delete channelMap[sourceIdStr];
+                
+                // Save updated channel map
+                const saveResponse = await fetch((window.CHANNELMAP_API_BASE || '') + '/save_channel_map', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(channelMap)
+                });
+                
+                if (saveResponse.ok) {
+                    // Remove from local mappings
+                    mappings = mappings.filter(m => m.source !== sourceIdStr);
+                    
+                    // Refresh displays
+                    await loadWebhookFullMap();
+                    renderSourceChannels();
+                    
+                    // Show success
+                    const sourceCh = sourceChannels.find(c => String(c.id) === sourceIdStr);
+                    const sourceName = sourceCh?.name || sourceIdStr;
+                    console.log(`✅ Removed mapping for #${sourceName}`);
+                } else {
+                    throw new Error('Failed to save updated channel map');
+                }
+            } catch (e) {
+                console.error('Failed to remove mapping:', e);
+                alert(`❌ Failed to remove mapping:\n\n${e.message}`);
+            }
+        }
+
+        function renderMappings() {
+            // Update sidebar stats only (Active Mappings section removed)
+            updateMappingStats();
+            // Reload webhook full map to reflect changes
+            loadWebhookFullMap();
+        }
+
+        async function loadMappings() {
+            try {
+                const response = await fetch((window.CHANNELMAP_API_BASE || '') + '/config/channel_map.json');
+                if (response.ok) {
+                    const data = await response.json();
+                    mappings = Object.entries(data).map(([source, dest]) => ({
+                        source,
+                        sourceName: source,
+                        dest,
+                        destName: dest
+                    }));
+                    renderMappings();
+                }
+            } catch (e) {
+                console.log('No existing mappings');
+            }
+        }
+
+        async function saveMapping() {
+            const mapObj = {};
+            mappings.forEach(m => { mapObj[m.source] = m.dest; });
+            
+            try {
+                const response = await fetch((window.CHANNELMAP_API_BASE || '') + '/api/channel_map', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(mapObj)
+                });
+                if (response.ok) {
+                    alert('Mappings saved successfully!');
+                }
+            } catch (e) {
+                alert('Failed to save: ' + e.message);
+            }
+        }
+
+        async function testMapping() {
+            if (mappings.length === 0) {
+                alert('No mappings to test');
+                return;
+            }
+            
+            try {
+                const response = await fetch((window.CHANNELMAP_API_BASE || '') + '/api/channel_map/test', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ dest_channel_id: mappings[0].dest })
+                });
+                const result = await response.json();
+                alert(result.message || 'Test sent!');
+            } catch (e) {
+                alert('Test failed: ' + e.message);
+            }
+        }
+
+        function refreshAll() {
+            loadSourceChannels();
+            loadDestChannels();
+            loadMappings();
+        }
+        
+        // Escape HTML helper
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+    </script>
+</body>
+</html>
+
