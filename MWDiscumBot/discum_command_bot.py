@@ -42,24 +42,22 @@ from discum_config import (
 )
 _CONFIG_RAW: Dict[str, str] = load_env_file(TOKENS_ENV_PATH)
 
-# Cache from source_channels.json (written by discumbot) for guild name and Browse link-style display
-_SOURCE_CHANNEL_NAMES: Dict[int, Tuple[str, str]] = {}  # channel_id -> (guild_name, channel_name)
-_SOURCE_CHANNEL_FULL: Dict[int, Tuple[int, str, str]] = {}  # channel_id -> (guild_id, guild_name, channel_name)
+# Cache from source_channels.json (written by discumbot) for guild name only. Channel display is always <#channel_id>.
+_SOURCE_CHANNEL_FULL: Dict[int, Tuple[int, str]] = {}  # channel_id -> (guild_id, guild_name)
 _SOURCE_GUILD_NAMES: Dict[int, str] = {}  # guild_id -> guild_name
 _SOURCE_NAMES_LOADED = 0.0
 
 
-def _load_source_channel_names() -> Dict[int, Tuple[str, str]]:
-    """Load channel_id -> (guild_name, channel_name) from config/source_channels.json (written by discumbot)."""
-    global _SOURCE_CHANNEL_NAMES, _SOURCE_CHANNEL_FULL, _SOURCE_GUILD_NAMES, _SOURCE_NAMES_LOADED
+def _load_source_channel_names() -> Dict[int, Tuple[int, str]]:
+    """Load channel_id -> (guild_id, guild_name) from config/source_channels.json. Used only for ' — Server Name' next to <#id>."""
+    global _SOURCE_CHANNEL_FULL, _SOURCE_GUILD_NAMES, _SOURCE_NAMES_LOADED
     path = str(Path(_CHANNEL_MAP_PATH).resolve().parent / "source_channels.json")
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError, Exception):
-        return _SOURCE_CHANNEL_NAMES
-    out = {}
-    full: Dict[int, Tuple[int, str, str]] = {}
+        return _SOURCE_CHANNEL_FULL
+    full: Dict[int, Tuple[int, str]] = {}
     guild_names: Dict[int, str] = {}
     for guild in data.get("guilds", []) or []:
         try:
@@ -71,16 +69,13 @@ def _load_source_channel_names() -> Dict[int, Tuple[str, str]]:
         for ch in guild.get("channels", []) or []:
             try:
                 cid = int(ch.get("id", 0))
-                cname = (ch.get("name") or f"Channel-{cid}").strip() or str(cid)
-                out[cid] = (guild_name, cname)
-                full[cid] = (gid, guild_name, cname)
+                full[cid] = (gid, guild_name)
             except (TypeError, ValueError):
                 continue
-    _SOURCE_CHANNEL_NAMES = out
     _SOURCE_CHANNEL_FULL = full
     _SOURCE_GUILD_NAMES = guild_names
     _SOURCE_NAMES_LOADED = time.time()
-    return out
+    return _SOURCE_CHANNEL_FULL
 
 
 def _source_guild_name_only(bot: commands.Bot, channel_id: int) -> str:
@@ -94,30 +89,8 @@ def _source_guild_name_only(bot: commands.Bot, channel_id: int) -> str:
     _load_source_channel_names()
     info = _SOURCE_CHANNEL_FULL.get(channel_id)
     if info:
-        return str(info[1] or "").strip()  # guild_name
+        return str(info[1] or "").strip()  # guild_name (info = (guild_id, guild_name))
     return ""
-
-
-def _source_channel_display_and_guild(bot: commands.Bot, channel_id: int) -> Tuple[str, int]:
-    """
-    Canonical: (display_name, guild_id_for_link).
-    Same logic for all /discum channel display (Channel Mappings, Manage preview, dropdowns).
-    guild_id_for_link is 0 when unknown (no clickable link).
-    """
-    try:
-        ch = bot.get_channel(channel_id)
-        if ch and hasattr(ch, "guild") and ch.guild:
-            gname = getattr(ch.guild, "name", "Unknown")
-            cname = getattr(ch, "name", f"Channel-{str(channel_id)[-6:]}")
-            return (f"{gname} / #{cname}", int(ch.guild.id))
-    except Exception:
-        pass
-    _load_source_channel_names()
-    info = _SOURCE_CHANNEL_FULL.get(channel_id)
-    if info:
-        gid, guild_name, cname = info
-        return (f"{guild_name} / #{cname}", int(gid))
-    return (f"Channel-{str(channel_id)[-6:]}", 0)
 
 
 def _format_mapping_line(channel_name: str, dest_display: str, guild_id: int, channel_id: int) -> str:
@@ -512,7 +485,19 @@ class MappingViewView(discord.ui.View):
         update_btn = discord.ui.Button(label="✏️ Update Webhook", style=discord.ButtonStyle.primary, row=2, disabled=(self.selected_source_id is None))
         update_btn.callback = self._update_webhook
         self.add_item(update_btn)
-    
+
+    async def on_timeout(self) -> None:
+        """When the view expires, replace the message so the user doesn't get 'This interaction failed'."""
+        try:
+            if self.message is not None:
+                await self.message.edit(
+                    content="⏱️ Session expired. Use **/discum** again to view mappings.",
+                    embed=None,
+                    view=None,
+                )
+        except Exception:
+            pass
+
     def _build_embed(self) -> discord.Embed:
         content, max_page = self._get_page_content(self.current_page)
         embed = discord.Embed(title="Channel Mappings", description=content, color=discord.Color.blurple())
@@ -1096,6 +1081,17 @@ async def _discum_browse_impl(
 
         async def interaction_check(self, interaction: discord.Interaction) -> bool:
             return int(interaction.user.id) == self.owner_id
+
+        async def on_timeout(self) -> None:
+            try:
+                if self.message is not None:
+                    await self.message.edit(
+                        content="⏱️ Session expired. Use **/discum** again to continue.",
+                        embed=None,
+                        view=None,
+                    )
+            except Exception:
+                pass
 
         @discord.ui.button(label="View Current Mappings", style=discord.ButtonStyle.primary, emoji="📋", row=0)
         async def view_mappings(self, interaction: discord.Interaction, button: discord.ui.Button):
