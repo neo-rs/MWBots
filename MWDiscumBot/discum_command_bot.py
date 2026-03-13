@@ -1139,9 +1139,9 @@ class DiscumCommandBot(commands.Bot):
         token_status = "set" if effective_user_token else "NOT_SET"
         print(f"[FETCHALL] on_ready: DISCUM_USER_DISCUMBOT={token_status} startup_clear_enabled={startup_clear_enabled} category_ids={cat_ids[:5]}{'...' if len(cat_ids) > 5 else ''} destination_guild_ids={dest_gids}", flush=True)
         # Fetchall startup clear (same as DataManagerBot before transfer)
-        # Resolve run_startup_clear at runtime if missing at import (server may load different fetchall)
+        # Resolve run_startup_clear at runtime if missing at import (server may have _FETCHALL_AVAILABLE False due to import path)
         _run_startup_clear = run_startup_clear
-        if _run_startup_clear is None and _FETCHALL_AVAILABLE:
+        if _run_startup_clear is None:
             print("[FETCHALL] Resolving run_startup_clear at runtime...", flush=True)
             try:
                 import sys
@@ -1163,7 +1163,7 @@ class DiscumCommandBot(commands.Bot):
                     print("[WARN] [FETCHALL] run_startup_clear not found in fetchall module (startup clear and auto-poller disabled)", flush=True)
             except Exception as _e:
                 print(f"[WARN] [FETCHALL] Runtime load of run_startup_clear failed: {_e}", flush=True)
-        have_startup_clear = bool(_FETCHALL_AVAILABLE and _run_startup_clear is not None and startup_clear_enabled)
+        have_startup_clear = bool(_run_startup_clear is not None and startup_clear_enabled)
         print(f"[FETCHALL] startup_clear will run: {have_startup_clear} (run_startup_clear is None: {run_startup_clear is None})", flush=True)
         if have_startup_clear:
             try:
