@@ -691,53 +691,54 @@ async def run_startup_clear(bot) -> None:
             return
         log_warn(f"[FETCHALL] startup clear begin categories={sorted(cat_ids)} only_mirror={only_mirror} clear_all={clear_all}")
         guilds_found = 0
-        for gid in dest_guild_ids:
-            guild = bot.get_guild(int(gid))
-            if guild is None:
-                log_warn(f"[FETCHALL] startup clear: bot.get_guild({gid}) returned None (bot may not be in this server or guild cache not ready)")
-                continue
-            guilds_found += 1
-            clear_cat_ids = get_fetchall_clear_category_ids(guild, base_category_ids=cat_ids)
-            try:
-                all_channels = list(getattr(guild, "channels", []) or [])
-            except Exception:
-                all_channels = []
-            for cat_id in sorted(clear_cat_ids):
-                candidates = []
-                for ch in all_channels:
-                    try:
-                        if int(getattr(ch, "category_id", 0) or 0) != int(cat_id):
-                            continue
-                    except Exception:
-                        continue
-                    if not hasattr(ch, "delete"):
-                        continue
-                    candidates.append(ch)
+        try:
+            for gid in dest_guild_ids:
+                guild = bot.get_guild(int(gid))
+                if guild is None:
+                    log_warn(f"[FETCHALL] startup clear: bot.get_guild({gid}) returned None (bot may not be in this server or guild cache not ready)")
+                    continue
+                guilds_found += 1
+                clear_cat_ids = get_fetchall_clear_category_ids(guild, base_category_ids=cat_ids)
                 try:
-                    candidates.sort(key=lambda c: (int(getattr(c, "position", 0) or 0), int(getattr(c, "id", 0) or 0)))
+                    all_channels = list(getattr(guild, "channels", []) or [])
                 except Exception:
-                    pass
-                for ch in candidates:
-                    if not clear_all:
-                        topic = str(getattr(ch, "topic", "") or "").strip()
-                        if only_mirror:
-                            if not (topic.startswith(MIRROR_TOPIC_PREFIX) or topic.lower().startswith("separator for")):
-                                skipped += 1
+                    all_channels = []
+                for cat_id in sorted(clear_cat_ids):
+                    candidates = []
+                    for ch in all_channels:
+                        try:
+                            if int(getattr(ch, "category_id", 0) or 0) != int(cat_id):
                                 continue
+                        except Exception:
+                            continue
+                        if not hasattr(ch, "delete"):
+                            continue
+                        candidates.append(ch)
                     try:
-                        await ch.delete(reason="MWDiscumBot startup clear fetchall mirrors")
-                        deleted += 1
-                        await asyncio.sleep(0.35)
-                    except discord.Forbidden:
-                        errors += 1
-                        log_warn(f"[FETCHALL] startup clear forbidden channel_id={getattr(ch, 'id', '?')}")
-                    except discord.HTTPException as e:
-                        errors += 1
-                        log_warn(f"[FETCHALL] startup clear http_failed channel_id={getattr(ch, 'id', '?')} status={getattr(e, 'status', None)}")
-                        await asyncio.sleep(1.0)
-                    except Exception as e:
-                        errors += 1
-                        log_warn(f"[FETCHALL] startup clear failed channel_id={getattr(ch, 'id', '?')} ({type(e).__name__}: {e})")
+                        candidates.sort(key=lambda c: (int(getattr(c, "position", 0) or 0), int(getattr(c, "id", 0) or 0)))
+                    except Exception:
+                        pass
+                    for ch in candidates:
+                        if not clear_all:
+                            topic = str(getattr(ch, "topic", "") or "").strip()
+                            if only_mirror:
+                                if not (topic.startswith(MIRROR_TOPIC_PREFIX) or topic.lower().startswith("separator for")):
+                                    skipped += 1
+                                    continue
+                        try:
+                            await ch.delete(reason="MWDiscumBot startup clear fetchall mirrors")
+                            deleted += 1
+                            await asyncio.sleep(0.35)
+                        except discord.Forbidden:
+                            errors += 1
+                            log_warn(f"[FETCHALL] startup clear forbidden channel_id={getattr(ch, 'id', '?')}")
+                        except discord.HTTPException as e:
+                            errors += 1
+                            log_warn(f"[FETCHALL] startup clear http_failed channel_id={getattr(ch, 'id', '?')} status={getattr(e, 'status', None)}")
+                            await asyncio.sleep(1.0)
+                        except Exception as e:
+                            errors += 1
+                            log_warn(f"[FETCHALL] startup clear failed channel_id={getattr(ch, 'id', '?')} ({type(e).__name__}: {e})")
         finally:
             try:
                 FETCHALL_MAINTENANCE_EVENT.clear()
