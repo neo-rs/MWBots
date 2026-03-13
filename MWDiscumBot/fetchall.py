@@ -726,8 +726,12 @@ async def run_startup_clear(bot) -> None:
                                     skipped += 1
                                     continue
                         try:
+                            ch_id = getattr(ch, "id", None) or "?"
+                            ch_name = getattr(ch, "name", None) or "?"
+                            log_warn(f"[FETCHALL] startup clear: deleting channel id={ch_id} name={ch_name}")
                             await ch.delete(reason="MWDiscumBot startup clear fetchall mirrors")
                             deleted += 1
+                            log_warn(f"[FETCHALL] startup clear: deleted channel id={ch_id}")
                             await asyncio.sleep(0.35)
                         except discord.Forbidden:
                             errors += 1

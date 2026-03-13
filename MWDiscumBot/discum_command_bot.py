@@ -1067,11 +1067,10 @@ class DiscumCommandBot(commands.Bot):
     
     async def setup_hook(self) -> None:
         """Sync slash commands to the Mirror World server so /discum is visible when typing slash."""
-        if _FETCHALL_AVAILABLE:
-            try:
-                _fetchall_cfg.init(_fetchall_cfg.load_fetchall_settings())
-            except Exception as e:
-                print(f"[WARN] Fetchall config init failed: {e}")
+        try:
+            _fetchall_cfg.init(_fetchall_cfg.load_fetchall_settings())
+        except Exception as e:
+            print(f"[WARN] Fetchall config init failed: {e}", flush=True)
         try:
             if MIRRORWORLD_SERVER_ID:
                 guild_obj = discord.Object(id=MIRRORWORLD_SERVER_ID)
@@ -1103,6 +1102,7 @@ class DiscumCommandBot(commands.Bot):
             pass
 
     async def on_ready(self) -> None:
+        global run_fetchsync, run_fetchall, iter_fetchall_entries, _FETCHALL_AVAILABLE
         print(f"[INFO] Logged in as {self.user}")
         app_id = self.user.id if self.user else None
         if app_id and MIRRORWORLD_SERVER_ID:
@@ -1118,12 +1118,11 @@ class DiscumCommandBot(commands.Bot):
         print(f"[INFO] Channel Mappings display: numbered list (1. <#id>, 2. <#id>...) — if you see 'Channel-XXXXX' the wrong code path is running")
         # DISCUM_USER_DISCUMBOT (stored as USER_TOKEN): used only for fetchall source reads; bot token stays for commands/channels here
         effective_user_token = (USER_TOKEN or "").strip() or _get_browse_user_token()
-        # Reload fetchall config so we use current settings.json (same as DataManagerBot at startup)
-        if _FETCHALL_AVAILABLE:
-            try:
-                _fetchall_cfg.init(_fetchall_cfg.load_fetchall_settings())
-            except Exception as e:
-                print(f"[WARN] [FETCHALL] Config reload failed: {e}")
+        # Always reload fetchall config from settings.json so startup clear and auto-poller see current config (even when fetchall failed to import)
+        try:
+            _fetchall_cfg.init(_fetchall_cfg.load_fetchall_settings())
+        except Exception as e:
+            print(f"[WARN] [FETCHALL] Config reload failed: {e}", flush=True)
         startup_clear_enabled = bool(getattr(_fetchall_cfg, "FETCHALL_STARTUP_CLEAR_ENABLED", False))
         cat_ids = list(getattr(_fetchall_cfg, "FETCHALL_STARTUP_CLEAR_CATEGORY_IDS", set()) or set())
         if not cat_ids and _FETCHALL_AVAILABLE:
@@ -1157,8 +1156,17 @@ class DiscumCommandBot(commands.Bot):
                         sys.modules["fetchall_ondemand"] = _fm
                         _spec.loader.exec_module(_fm)
                         _run_startup_clear = getattr(_fm, "run_startup_clear", None)
+                        _run_fetchsync = getattr(_fm, "run_fetchsync", None)
+                        _run_fetchall = getattr(_fm, "run_fetchall", None)
+                        _iter_entries = getattr(_fm, "iter_fetchall_entries", None)
                         if _run_startup_clear is not None:
                             print("[FETCHALL] run_startup_clear loaded from fetchall.py at runtime", flush=True)
+                        if _run_fetchsync and _run_fetchall and _iter_entries:
+                            run_fetchsync = _run_fetchsync
+                            run_fetchall = _run_fetchall
+                            iter_fetchall_entries = _iter_entries
+                            _FETCHALL_AVAILABLE = True
+                            print("[FETCHALL] run_fetchsync/run_fetchall/iter_fetchall_entries set at runtime (commands and auto-poller available)", flush=True)
                 if _run_startup_clear is None:
                     print("[WARN] [FETCHALL] run_startup_clear not found in fetchall module (startup clear and auto-poller disabled)", flush=True)
             except Exception as _e:
@@ -1167,6 +1175,8 @@ class DiscumCommandBot(commands.Bot):
         print(f"[FETCHALL] startup_clear will run: {have_startup_clear} (run_startup_clear is None: {run_startup_clear is None})", flush=True)
         if have_startup_clear:
             try:
+                # Brief wait so guild cache is populated and bot.get_guild() in run_startup_clear can resolve
+                await asyncio.sleep(3.0)
                 print("[FETCHALL] run_startup_clear: calling", flush=True)
                 await _run_startup_clear(self)
                 print("[FETCHALL] run_startup_clear: done", flush=True)
@@ -1228,101 +1238,106 @@ bot = DiscumCommandBot()
 
 
 # -------- Fetchall prefix commands (no slash registration) --------
-if _FETCHALL_AVAILABLE and run_fetchsync is not None and run_fetchall is not None:
+# Registered always so they work after runtime load of fetchall; each command checks availability.
+@bot.command(name="fetchsync")
+@commands.has_permissions(manage_channels=True)
+async def _cmd_fetchsync(ctx: commands.Context, source_guild_id: int = 0) -> None:
+    """Pull and mirror messages from source servers into this server. Usage: !fetchsync [source_guild_id] (0 = all mappings)."""
+    if not run_fetchsync or not iter_fetchall_entries:
+        await ctx.send("[FETCHALL] Fetchall not loaded. Check logs and restart (or run /mwupdate then restart).")
+        return
+    user_tok = USER_TOKEN or _get_browse_user_token()
+    if not user_tok:
+        await ctx.send("[FETCHALL] Set DISCUM_USER_DISCUMBOT (user account token) in config/tokens.env and restart.")
+        return
+    entries = list(iter_fetchall_entries())
+    if not entries:
+        await ctx.send("No fetchall mappings. Add mappings to MWDiscumBot/config/fetchall_mappings.json.")
+        return
+    if source_guild_id:
+        entries = [e for e in entries if int(e.get("source_guild_id", 0) or 0) == source_guild_id]
+    if not entries:
+        await ctx.send(f"No mapping for source_guild_id `{source_guild_id}`.")
+        return
+    msg = await ctx.send(f"Fetchsync running ({len(entries)} mapping(s))…")
+    try:
+        async def _progress_async(payload):
+            if msg is None:
+                return
+            try:
+                stage = str(payload.get("stage", ""))
+                sent = int(payload.get("sent", 0) or 0)
+                ch_done = int(payload.get("channels_processed", 0) or 0)
+                ch_total = int(payload.get("channels_total", 0) or 0)
+                await msg.edit(content=f"Fetchsync: {stage} | sent={sent} | channels {ch_done}/{ch_total}")
+            except Exception:
+                pass
+        total_sent = 0
+        ok = 0
+        for entry in entries:
+            result = await run_fetchsync(
+                bot=ctx.bot,
+                entry=entry,
+                destination_guild=ctx.guild,
+                source_user_token=user_tok,
+                dryrun=False,
+                progress_cb=_progress_async,
+            )
+            if result.get("ok"):
+                ok += 1
+            total_sent += int(result.get("sent", 0) or 0)
+        await msg.edit(content=f"Fetchsync done: {ok}/{len(entries)} ok, sent={total_sent} messages.")
+    except Exception as e:
+        await msg.edit(content=f"Fetchsync error: {e}")
+        raise
 
-    @bot.command(name="fetchsync")
-    @commands.has_permissions(manage_channels=True)
-    async def _cmd_fetchsync(ctx: commands.Context, source_guild_id: int = 0) -> None:
-        """Pull and mirror messages from source servers into this server. Usage: !fetchsync [source_guild_id] (0 = all mappings)."""
-        user_tok = USER_TOKEN or _get_browse_user_token()
-        if not user_tok:
-            await ctx.send("[FETCHALL] Set DISCUM_USER_DISCUMBOT (user account token) in config/tokens.env and restart.")
-            return
-        entries = list(iter_fetchall_entries())
-        if not entries:
-            await ctx.send("No fetchall mappings. Add mappings to MWDiscumBot/config/fetchall_mappings.json.")
-            return
-        if source_guild_id:
-            entries = [e for e in entries if int(e.get("source_guild_id", 0) or 0) == source_guild_id]
-        if not entries:
-            await ctx.send(f"No mapping for source_guild_id `{source_guild_id}`.")
-            return
-        msg = await ctx.send(f"Fetchsync running ({len(entries)} mapping(s))…")
-        try:
-            async def _progress_async(payload):
-                if msg is None:
-                    return
-                try:
-                    stage = str(payload.get("stage", ""))
-                    sent = int(payload.get("sent", 0) or 0)
-                    ch_done = int(payload.get("channels_processed", 0) or 0)
-                    ch_total = int(payload.get("channels_total", 0) or 0)
-                    await msg.edit(content=f"Fetchsync: {stage} | sent={sent} | channels {ch_done}/{ch_total}")
-                except Exception:
-                    pass
-            total_sent = 0
-            ok = 0
-            for entry in entries:
-                result = await run_fetchsync(
-                    bot=ctx.bot,
-                    entry=entry,
-                    destination_guild=ctx.guild,
-                    source_user_token=user_tok,
-                    dryrun=False,
-                    progress_cb=_progress_async,
-                )
-                if result.get("ok"):
-                    ok += 1
-                total_sent += int(result.get("sent", 0) or 0)
-            await msg.edit(content=f"Fetchsync done: {ok}/{len(entries)} ok, sent={total_sent} messages.")
-        except Exception as e:
-            await msg.edit(content=f"Fetchsync error: {e}")
-            raise
-
-    @bot.command(name="fetchall")
-    @commands.has_permissions(manage_channels=True)
-    async def _cmd_fetchall(ctx: commands.Context, source_guild_id: int = 0) -> None:
-        """Create/update mirror channels from fetchall mappings. Usage: !fetchall [source_guild_id] (0 = all)."""
-        user_tok = USER_TOKEN or _get_browse_user_token()
-        if not user_tok:
-            await ctx.send("[FETCHALL] Set DISCUM_USER_DISCUMBOT (user account token) in config/tokens.env and restart.")
-            return
-        entries = list(iter_fetchall_entries())
-        if not entries:
-            await ctx.send("No fetchall mappings. Add mappings to MWDiscumBot/config/fetchall_mappings.json.")
-            return
-        if source_guild_id:
-            entries = [e for e in entries if int(e.get("source_guild_id", 0) or 0) == source_guild_id]
-        if not entries:
-            await ctx.send(f"No mapping for source_guild_id `{source_guild_id}`.")
-            return
-        msg = await ctx.send(f"Fetchall running ({len(entries)} mapping(s))…")
-        try:
-            async def _progress(payload):
-                if msg is None:
-                    return
-                try:
-                    stage = str(payload.get("stage", "init"))
-                    created = int(payload.get("created", 0) or 0)
-                    existing = int(payload.get("existing", 0) or 0)
-                    await msg.edit(content=f"Fetchall: {stage} | created={created} existing={existing}")
-                except Exception:
-                    pass
-            ok = 0
-            for entry in entries:
-                result = await run_fetchall(
-                    bot=ctx.bot,
-                    entry=entry,
-                    destination_guild=ctx.guild,
-                    source_user_token=user_tok,
-                    progress_cb=_progress,
-                )
-                if result.get("ok"):
-                    ok += 1
-            await msg.edit(content=f"Fetchall done: {ok}/{len(entries)} mapping(s) ok.")
-        except Exception as e:
-            await msg.edit(content=f"Fetchall error: {e}")
-            raise
+@bot.command(name="fetchall")
+@commands.has_permissions(manage_channels=True)
+async def _cmd_fetchall(ctx: commands.Context, source_guild_id: int = 0) -> None:
+    """Create/update mirror channels from fetchall mappings. Usage: !fetchall [source_guild_id] (0 = all)."""
+    if not run_fetchall or not iter_fetchall_entries:
+        await ctx.send("[FETCHALL] Fetchall not loaded. Check logs and restart (or run /mwupdate then restart).")
+        return
+    user_tok = USER_TOKEN or _get_browse_user_token()
+    if not user_tok:
+        await ctx.send("[FETCHALL] Set DISCUM_USER_DISCUMBOT (user account token) in config/tokens.env and restart.")
+        return
+    entries = list(iter_fetchall_entries())
+    if not entries:
+        await ctx.send("No fetchall mappings. Add mappings to MWDiscumBot/config/fetchall_mappings.json.")
+        return
+    if source_guild_id:
+        entries = [e for e in entries if int(e.get("source_guild_id", 0) or 0) == source_guild_id]
+    if not entries:
+        await ctx.send(f"No mapping for source_guild_id `{source_guild_id}`.")
+        return
+    msg = await ctx.send(f"Fetchall running ({len(entries)} mapping(s))…")
+    try:
+        async def _progress(payload):
+            if msg is None:
+                return
+            try:
+                stage = str(payload.get("stage", "init"))
+                created = int(payload.get("created", 0) or 0)
+                existing = int(payload.get("existing", 0) or 0)
+                await msg.edit(content=f"Fetchall: {stage} | created={created} existing={existing}")
+            except Exception:
+                pass
+        ok = 0
+        for entry in entries:
+            result = await run_fetchall(
+                bot=ctx.bot,
+                entry=entry,
+                destination_guild=ctx.guild,
+                source_user_token=user_tok,
+                progress_cb=_progress,
+            )
+            if result.get("ok"):
+                ok += 1
+        await msg.edit(content=f"Fetchall done: {ok}/{len(entries)} mapping(s) ok.")
+    except Exception as e:
+        await msg.edit(content=f"Fetchall error: {e}")
+        raise
 
 
 def _log_channel_mapping(msg: str, level: str = "INFO") -> None:
