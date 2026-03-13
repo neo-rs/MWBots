@@ -670,6 +670,7 @@ async def run_startup_clear(bot) -> None:
                 cat_ids.add(cid)
     cat_ids = {int(x) for x in cat_ids if int(x) > 0}
     if not cat_ids:
+        log_warn("[FETCHALL] startup clear skipped: no category IDs (set fetchall_startup_clear_category_ids in settings.json or add destination_category_id in fetchall_mappings.json)")
         return
     only_mirror = bool(getattr(cfg, "FETCHALL_STARTUP_CLEAR_ONLY_MIRROR_CHANNELS", True))
     clear_all = bool(getattr(cfg, "FETCHALL_STARTUP_CLEAR_ALL_CHANNELS", False))
@@ -683,11 +684,17 @@ async def run_startup_clear(bot) -> None:
             dest_guild_ids = sorted(int(x) for x in (getattr(cfg, "DESTINATION_GUILD_IDS", set()) or set()) if int(x) > 0)
         except Exception:
             dest_guild_ids = []
+        if not dest_guild_ids:
+            log_warn("[FETCHALL] startup clear skipped: no destination_guild_ids in settings.json")
+            return
         log_warn(f"[FETCHALL] startup clear begin categories={sorted(cat_ids)} only_mirror={only_mirror} clear_all={clear_all}")
+        guilds_found = 0
         for gid in dest_guild_ids:
             guild = bot.get_guild(int(gid))
             if guild is None:
+                log_warn(f"[FETCHALL] startup clear: bot.get_guild({gid}) returned None (bot may not be in this server or guild cache not ready)")
                 continue
+            guilds_found += 1
             clear_cat_ids = get_fetchall_clear_category_ids(guild, base_category_ids=cat_ids)
             try:
                 all_channels = list(getattr(guild, "channels", []) or [])
@@ -734,6 +741,8 @@ async def run_startup_clear(bot) -> None:
                 FETCHALL_MAINTENANCE_EVENT.clear()
             except Exception:
                 pass
+        if guilds_found == 0:
+            log_warn("[FETCHALL] startup clear: no destination guild found (bot.get_guild returned None for all destination_guild_ids — ensure the command bot is in the Mirror World server)")
         log_warn(f"[FETCHALL] startup clear done deleted={deleted} skipped={skipped} errors={errors}")
 
 

@@ -4135,6 +4135,7 @@ if __name__ == "__main__":
             _slash_command_bot_started = True
             _gid = getattr(_cmd_module, "MIRRORWORLD_SERVER_ID", None) or 0
             print(f"[INFO] Slash command bot started; syncing /discum to guild {_gid} (channel mapping via /discum browse).")
+            print(f"[FETCHALL] Command bot thread started — startup clear + auto-poller run in that thread when the bot is ready (watch for [FETCHALL] in logs).")
         elif not _cmd_token and VERBOSE:
             print("[INFO] No DISCORD_BOT_TOKEN/BOT_TOKEN in config - /discum browse not registered. Add a bot token to config/tokens.env to enable it.")
     except Exception as _e:
