@@ -1115,7 +1115,7 @@ class DiscumCommandBot(commands.Bot):
         # DISCUM_USER_DISCUMBOT (stored as USER_TOKEN): used only for fetchall source reads; bot token stays for commands/channels here
         effective_user_token = (USER_TOKEN or "").strip() or _get_browse_user_token()
         if _FETCHALL_AVAILABLE:
-            print(f"[FETCHALL] DISCUM_USER_DISCUMBOT: {'set — fetchall/auto-poller on' if effective_user_token else 'NOT SET — add to config/tokens.env to enable fetchall'}")
+            print(f"[FETCHALL] DISCUM_USER_DISCUMBOT: {'set — fetchall/auto-poller on' if effective_user_token else 'NOT SET — add to config/tokens.env to enable fetchall'}", flush=True)
         # Reload fetchall config so we use current settings.json (same as DataManagerBot at startup)
         if _FETCHALL_AVAILABLE:
             try:
@@ -1134,7 +1134,7 @@ class DiscumCommandBot(commands.Bot):
             except Exception:
                 pass
         dest_gids = list(getattr(_fetchall_cfg, "DESTINATION_GUILD_IDS", set()) or set())
-        print(f"[FETCHALL] Command bot on_ready: startup_clear_enabled={startup_clear_enabled} category_ids={cat_ids[:5]}{'...' if len(cat_ids) > 5 else ''} destination_guild_ids={dest_gids}")
+        print(f"[FETCHALL] Command bot on_ready: startup_clear_enabled={startup_clear_enabled} category_ids={cat_ids[:5]}{'...' if len(cat_ids) > 5 else ''} destination_guild_ids={dest_gids}", flush=True)
         # Fetchall startup clear (same as DataManagerBot before transfer)
         if _FETCHALL_AVAILABLE and run_startup_clear is not None and startup_clear_enabled:
             try:

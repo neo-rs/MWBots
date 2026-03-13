@@ -642,7 +642,7 @@ async def run_startup_clear(bot) -> None:
     - Else if FETCHALL_STARTUP_CLEAR_ONLY_MIRROR_CHANNELS: delete only channels with topic MIRROR: or "separator for".
     Controlled by fetchall_config: FETCHALL_STARTUP_CLEAR_ENABLED, FETCHALL_STARTUP_CLEAR_CATEGORY_IDS, etc.
     """
-    log_fetchall("run_startup_clear: entered")
+    print("[FETCHALL] run_startup_clear: entered", flush=True)
     try:
         import discord
     except Exception:
