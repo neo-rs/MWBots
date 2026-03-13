@@ -3,6 +3,10 @@
 Single source of truth for paths, env loading, and channel_map.json.
 Used by discumbot.py and discum_command_bot.py. No duplication of parsing logic.
 
+Tokens (config/tokens.env):
+- BOT_TOKEN: Used ONLY for registering/running the command bot (receiving /discum and !fetchall/!fetchsync). Nothing else.
+- DISCUM_USER_DISCUMBOT: User account token for everything else (D2D bridge, fetchall, channel cache, REST as user).
+
 Paths are relative to this module's folder (MWDiscumBot), so the same code runs
 on Oracle and locally; config and channel_map.json stay in MWDiscumBot/config/.
 

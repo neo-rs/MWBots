@@ -150,7 +150,10 @@ def cfg_get(key: str, default: str = "") -> str:
         pass
     return default
 
-# Bot token for slash command registration (add to MWDiscumBot/config/tokens.env — same file as user token)
+# BOT_TOKEN: used ONLY for registering/running the command bot — nothing more, nothing less.
+# - bot.start(BOT_TOKEN): so the bot can receive /discum and !fetchall/!fetchsync.
+# - _list_guild_commands_via_api(BOT_TOKEN): list slash commands (--list-commands).
+# Set in config/tokens.env as BOT_TOKEN (or DISCORD_BOT_TOKEN / DISCORD_BOT_DISCUMBOT).
 BOT_TOKEN = str(
     cfg_get("DISCORD_BOT_TOKEN")
     or cfg_get("DISCORD_BOT_DISCUMBOT")
@@ -167,7 +170,8 @@ MIRRORWORLD_SERVER_ID = int(
     or "0"
 ) or 0
 
-# User token for browsing source guilds/channels (same as main discumbot; set in config/tokens.env).
+# User account token for D2D bridge + fetchall (read source guilds as user). Canonical: DISCUM_USER_DISCUMBOT in config/tokens.env.
+# Fallbacks: DISCUM_BOT, DISCORD_TOKEN (for backward compat).
 USER_TOKEN = str(
     cfg_get("DISCUM_USER_DISCUMBOT")
     or cfg_get("DISCUM_BOT")
@@ -193,6 +197,16 @@ def _get_browse_user_token() -> str:
     except Exception:
         pass
     return ""
+
+
+# When command bot runs in same process as discumbot (thread started by discumbot.py), use main process user token
+if not USER_TOKEN:
+    try:
+        _t = _get_browse_user_token()
+        if _t:
+            USER_TOKEN = _t
+    except Exception:
+        pass
 
 
 # Only exit when run as main; when imported (e.g. by discumbot.py) allow missing token
@@ -1070,6 +1084,21 @@ class DiscumCommandBot(commands.Bot):
             import traceback
             traceback.print_exc()
 
+    async def on_command_error(self, ctx: commands.Context, error: commands.CommandError) -> None:
+        """Send a reply when a prefix command fails so the user always sees feedback."""
+        try:
+            if isinstance(error, commands.MissingPermissions):
+                await ctx.send("[FETCHALL] You need **Manage Channels** permission in this server to run !fetchall / !fetchsync.")
+                return
+            if isinstance(error, commands.CommandNotFound):
+                return  # ignore wrong prefix / unknown command
+            name = getattr(ctx.command, "name", None) if ctx.command else None
+            if name in ("fetchall", "fetchsync"):
+                msg = str(getattr(error, "original", error) or error)
+                await ctx.send(f"[FETCHALL] Command failed: {msg[:400]}")
+        except Exception:
+            pass
+
     async def on_ready(self) -> None:
         print(f"[INFO] Logged in as {self.user}")
         app_id = self.user.id if self.user else None
@@ -1084,8 +1113,12 @@ class DiscumCommandBot(commands.Bot):
             print(f"[INFO] If /discum is not visible: ensure this bot is in the server with slash command scope. Re-invite: {invite_url}")
         print(f"[INFO] Ready to handle /discum browse")
         print(f"[INFO] Channel Mappings display: numbered list (1. <#id>, 2. <#id>...) — if you see 'Channel-XXXXX' the wrong code path is running")
-        if _FETCHALL_AVAILABLE and USER_TOKEN:
-            print(f"[INFO] Fetchall prefix commands: !fetchsync [source_guild_id]  !fetchall [source_guild_id]  (no slash registration needed)")
+        if _FETCHALL_AVAILABLE:
+            if USER_TOKEN:
+                print(f"[FETCHALL] User token set — prefix commands !fetchall / !fetchsync and auto-poller enabled.")
+                print(f"[INFO] Fetchall prefix commands: !fetchsync [source_guild_id]  !fetchall [source_guild_id]  (no slash registration needed)")
+            else:
+                print(f"[FETCHALL] User token NOT set — !fetchall/!fetchsync and auto-poller disabled. Set DISCUM_BOT (or DISCUM_USER_DISCUMBOT) in config/tokens.env.")
         # Fetchall startup clear (same as DataManagerBot before transfer)
         if _FETCHALL_AVAILABLE and run_startup_clear is not None and getattr(_fetchall_cfg, "FETCHALL_STARTUP_CLEAR_ENABLED", False):
             try:
@@ -1146,8 +1179,9 @@ if _FETCHALL_AVAILABLE and run_fetchsync is not None and run_fetchall is not Non
     @commands.has_permissions(manage_channels=True)
     async def _cmd_fetchsync(ctx: commands.Context, source_guild_id: int = 0) -> None:
         """Pull and mirror messages from source servers into this server. Usage: !fetchsync [source_guild_id] (0 = all mappings)."""
-        if not USER_TOKEN:
-            await ctx.send("Fetchall user token (DISCUM_BOT) not set in config/tokens.env.")
+        user_tok = USER_TOKEN or _get_browse_user_token()
+        if not user_tok:
+            await ctx.send("[FETCHALL] User token not set. Add DISCUM_BOT (user account token) to MWDiscumBot/config/tokens.env and restart. Prefix commands use the **bot token** to receive your message; fetchall uses the **user token** to read from source servers.")
             return
         entries = list(iter_fetchall_entries())
         if not entries:
@@ -1178,7 +1212,7 @@ if _FETCHALL_AVAILABLE and run_fetchsync is not None and run_fetchall is not Non
                     bot=ctx.bot,
                     entry=entry,
                     destination_guild=ctx.guild,
-                    source_user_token=USER_TOKEN,
+                    source_user_token=user_tok,
                     dryrun=False,
                     progress_cb=_progress_async,
                 )
@@ -1194,8 +1228,9 @@ if _FETCHALL_AVAILABLE and run_fetchsync is not None and run_fetchall is not Non
     @commands.has_permissions(manage_channels=True)
     async def _cmd_fetchall(ctx: commands.Context, source_guild_id: int = 0) -> None:
         """Create/update mirror channels from fetchall mappings. Usage: !fetchall [source_guild_id] (0 = all)."""
-        if not USER_TOKEN:
-            await ctx.send("Fetchall user token (DISCUM_BOT) not set in config/tokens.env.")
+        user_tok = USER_TOKEN or _get_browse_user_token()
+        if not user_tok:
+            await ctx.send("[FETCHALL] User token not set. Add DISCUM_BOT (user account token) to MWDiscumBot/config/tokens.env and restart. Prefix commands use the **bot token** to receive your message; fetchall uses the **user token** to read from source servers.")
             return
         entries = list(iter_fetchall_entries())
         if not entries:
@@ -1224,7 +1259,7 @@ if _FETCHALL_AVAILABLE and run_fetchsync is not None and run_fetchall is not Non
                     bot=ctx.bot,
                     entry=entry,
                     destination_guild=ctx.guild,
-                    source_user_token=USER_TOKEN,
+                    source_user_token=user_tok,
                     progress_cb=_progress,
                 )
                 if result.get("ok"):

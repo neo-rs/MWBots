@@ -407,6 +407,7 @@ def _parse_guild_ids(value: str) -> List[str]:
 # Core settings / IDs (mirror neonxt.core.config behavior, but locally)
 VERBOSE: bool = cfg_get_bool("GLOBAL_VERBOSE", True)
 
+# User account token for D2D bridge (gateway + REST), channel cache, and any user-scoped API. Canonical: DISCUM_USER_DISCUMBOT in config/tokens.env.
 DISCUM_BOT: str = str(
     cfg_get("DISCUM_USER_DISCUMBOT")
     or cfg_get("DISCUM_BOT")
