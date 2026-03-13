@@ -32,7 +32,7 @@
     "forward_attachments_max_files": 10,
     "forward_attachments_max_bytes": 7500000,
 
-    "fetchall_startup_clear_enabled": true,
+    "fetchall_startup_clear_enabled": false,
     "fetchall_startup_clear_category_ids": [ 1437856372300451851 ],
     "fetchall_startup_clear_only_mirror_channels": true,
     "fetchall_startup_clear_all_channels": true,
