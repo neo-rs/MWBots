@@ -40,7 +40,7 @@ def log_fetchall(msg: str, *, event: Optional[str] = None, **fields: Any) -> Non
 
 
 def log_warn(msg: str, *, event: Optional[str] = None, **fields: Any) -> None:
-    print(f"[WARN] {msg}", flush=True)
+    print(f"[FETCHALL] [WARN] {msg}", flush=True)
     entry = {"level": "WARN", "message": msg}
     if event:
         entry["event"] = event
@@ -50,7 +50,7 @@ def log_warn(msg: str, *, event: Optional[str] = None, **fields: Any) -> None:
 
 
 def log_info(msg: str, *, event: Optional[str] = None, **fields: Any) -> None:
-    print(f"[INFO] {msg}", flush=True)
+    print(f"[FETCHALL] [INFO] {msg}", flush=True)
     entry = {"level": "INFO", "message": msg}
     if event:
         entry["event"] = event

@@ -451,9 +451,9 @@ if not os.path.exists(CHANNEL_MAP_PATH):
         if VERBOSE:
             print(f"[WARN] Could not create {CHANNEL_MAP_PATH}: {e}")
 if VERBOSE:
-    print(f"[INFO] Channel map: {CHANNEL_MAP_PATH} ({len(CHANNEL_MAP)} mapping(s))")
+    print(f"[D2D] Channel map: {CHANNEL_MAP_PATH} ({len(CHANNEL_MAP)} mapping(s)) — D2D only; fetchall uses fetchall_mappings.json + fetchall_destination_webhooks.json")
 if len(CHANNEL_MAP) == 0 and VERBOSE:
-    print("[INFO] No channel mappings yet. Use /discum browse (slash command bot) or edit channel_map.json to add mappings.")
+    print("[D2D] No channel mappings yet. Use /discum browse (slash command bot) or edit channel_map.json to add mappings.")
 
 # Fetchall: load config from settings.json and log mappings (journal/terminal + fetchalllogs.json)
 if VERBOSE:
@@ -647,7 +647,7 @@ def _queue_pending_edit_update(message_dict: Dict[str, Any], channel_id: int, gu
     }
     _prune_pending_edit_updates(now=now)
     if VERBOSE:
-        log_debug(f"Queued MESSAGE_UPDATE for {src_id} (waiting for destination mapping)")
+        log_debug(f"[D2D] Queued MESSAGE_UPDATE for {src_id} (waiting for destination mapping)")
 
 
 def _flush_pending_edit_update(source_message_id: str) -> bool:
@@ -1658,19 +1658,19 @@ def _fetch_full_message(channel_id: int, message_id: str) -> Optional[Dict[str, 
                     # Actionable: this almost always means the user-token account lacks Read Message History
                     # in the source channel, which causes gateway-only (often truncated) forwards.
                     print(
-                        f"[WARN] Cannot fetch full message {message_id} in channel {channel_id}: HTTP 403. "
+                        f"[D2D] [WARN] Cannot fetch full message {message_id} in channel {channel_id}: HTTP 403. "
                         "Grant the Discum user 'Read Message History' (and View Channel) in the monitored source channel "
                         "to eliminate truncation; forwarding will fall back to gateway payload."
                     )
                 elif VERBOSE:
-                    print(f"[DEBUG] Cannot fetch full message for {message_id}: HTTP 404 (deleted/not found)")
+                    print(f"[D2D] [DEBUG] Cannot fetch full message for {message_id}: HTTP 404 (deleted/not found)")
                 return None
             # Log other HTTP errors
             if VERBOSE:
-                print(f"[WARN] Failed to fetch full message for {message_id}: HTTP {response.status_code}")
+                print(f"[D2D] [WARN] Failed to fetch full message for {message_id}: HTTP {response.status_code}")
         except Exception as e:
             if VERBOSE:
-                print(f"[WARN] Exception fetching full message for {message_id}: {e}")
+                print(f"[D2D] [WARN] Exception fetching full message for {message_id}: {e}")
             time.sleep(0.3)
     return None
 
@@ -1876,14 +1876,29 @@ def _fetch_and_cache_channels():
         source_cache_path = os.path.join(config_dir, "source_channels.json")
         dest_cache_path = os.path.join(config_dir, "destination_channels.json")
         
-        # Fetch source guild channels
+        # Fetch source guild channels (D2D settings + fetchall_mappings.json so all monitored guilds are cached)
         source_guilds_data: List[Dict[str, Any]] = []
         source_guild_ids: List[str] = list(SOURCE_GUILD_IDS or [])
         if not source_guild_ids:
             fallback_gid = str(DISCORD_GUILD_ID or "").strip()
             if fallback_gid:
                 source_guild_ids = [fallback_gid]
-        
+        # Merge in source guilds from fetchall_mappings.json (fetchall does not use channel_map.json; it uses fetchall_mappings + fetchall_destination_webhooks)
+        try:
+            fetchall_path = os.path.join(config_dir, "fetchall_mappings.json")
+            if os.path.exists(fetchall_path):
+                with open(fetchall_path, "r", encoding="utf-8") as _f:
+                    _fa = json.load(_f)
+                if isinstance(_fa, dict):
+                    for g in _fa.get("guilds") or []:
+                        if isinstance(g, dict):
+                            sgid = g.get("source_guild_id")
+                            if sgid is not None:
+                                gid_str = str(sgid).strip()
+                                if gid_str and gid_str not in source_guild_ids:
+                                    source_guild_ids.append(gid_str)
+        except Exception:
+            pass
         # Debug: Log how many source guilds we're trying to fetch (destination will be cached after)
         if VERBOSE:
             dest_hint = f" + destination guild {MIRRORWORLD_SERVER}" if MIRRORWORLD_SERVER else ""
@@ -2599,7 +2614,7 @@ def message_handler(resp):
             if VERBOSE:
                 channel_segment = f"{friendly_channel_name or channelID}-({channelID})"
                 guild_segment = f"{friendly_guild_name or 'Unknown'}-({friendly_guild_id or guildID or 'unknown'})"
-                print(f"[INFO] Message detected in monitored {channel_segment} | {guild_segment}")
+                print(f"[D2D] [INFO] Message detected in monitored {channel_segment} | {guild_segment}")
 
         # Get message details for backend logging (with error handling)
         username = "Unknown"
@@ -2692,7 +2707,7 @@ def message_handler(resp):
                 _forward_to_webhook(m, channelID, guildID, edit_existing=True)
             except Exception as e:
                 if VERBOSE:
-                    print(f"[WARN] Edit sync failed for {msg_id}: {e}")
+                    print(f"[D2D] [WARN] Edit sync failed for {msg_id}: {e}")
             return
 
         # CRITICAL: Check for duplicates BEFORE enrichment (on original message content)
@@ -3527,19 +3542,19 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
             pass
         embed_list.append(normalized)
     
-    # Log embed processing for debugging
+    # Log embed processing for debugging (D2D live forwarding path)
     if embed_list and VERBOSE:
-        print(f"[DEBUG] Processing {len(embed_list)} embed(s) for message from {author_username}")
+        print(f"[D2D] [DEBUG] Processing {len(embed_list)} embed(s) for message from {author_username}")
         for idx, embed in enumerate(embed_list):
             embed_title = embed.get("title", "")
             embed_title_len = len(embed_title) if embed_title else 0
             embed_title_preview = embed_title[:50] if embed_title else 'No title'
             embed_desc = embed.get("description", "")
             embed_desc_len = len(embed_desc) if embed_desc else 0
-            print(f"[DEBUG] Embed {idx+1}: Title length={embed_title_len}, Title='{embed_title_preview}...', Description length={embed_desc_len}")
+            print(f"[D2D] [DEBUG] Embed {idx+1}: Title length={embed_title_len}, Title='{embed_title_preview}...', Description length={embed_desc_len}")
             # Also log full title if it's longer than 50 chars to see if it's truncated
             if embed_title_len > 50:
-                print(f"[DEBUG] Embed {idx+1} full title: {embed_title}")
+                print(f"[D2D] [DEBUG] Embed {idx+1} full title: {embed_title}")
 
     # Validate and sanitize payload before sending
     # Discord webhook limits:
@@ -3666,7 +3681,7 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
 
         if not webhook or not dest_ids:
             if VERBOSE:
-                log_warn(f"Edit sync skipped for {src_id}: no destination mapping")
+                log_warn(f"[D2D] Edit sync skipped for {src_id}: no destination mapping (channel not in channel_map.json)")
             # MESSAGE_UPDATE can arrive before we have recorded the destination mapping.
             # Queue this update and apply it once the create-forward records dest message id(s).
             try:
@@ -3679,7 +3694,7 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
             last_sig = str(idx.get("last_signature") or "") if isinstance(idx, dict) else ""
             if signature and signature == last_sig:
                 if VERBOSE:
-                    log_debug(f"Edit sync no-op for {src_id}: signature unchanged")
+                    log_debug(f"[D2D] Edit sync no-op for {src_id}: signature unchanged")
                 return
         except Exception:
             pass
@@ -3900,7 +3915,7 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
                         except Exception:
                             pass
                 if VERBOSE:
-                    log_debug(f"Webhook POST status={r.status_code} message_id={'yes' if message_id else 'no'} for src={m.get('id')}")
+                    log_debug(f"[D2D] Webhook POST status={r.status_code} message_id={'yes' if message_id else 'no'} for src={m.get('id')}")
 
                 # Success - break out of retry loop
                 break
