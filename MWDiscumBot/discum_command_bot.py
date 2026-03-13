@@ -1139,20 +1139,25 @@ class DiscumCommandBot(commands.Bot):
         token_status = "set" if effective_user_token else "NOT_SET"
         print(f"[FETCHALL] on_ready: DISCUM_USER_DISCUMBOT={token_status} startup_clear_enabled={startup_clear_enabled} category_ids={cat_ids[:5]}{'...' if len(cat_ids) > 5 else ''} destination_guild_ids={dest_gids}", flush=True)
         # Fetchall startup clear (same as DataManagerBot before transfer)
-        # Resolve run_startup_clear at runtime if missing at import (e.g. wrong sys.path when run from run_bot.sh)
+        # Resolve run_startup_clear at runtime if missing at import (server may load different fetchall)
         _run_startup_clear = run_startup_clear
         if _run_startup_clear is None and _FETCHALL_AVAILABLE:
             try:
                 import sys
-                _bot_dir = str(Path(__file__).resolve().parent)
-                if _bot_dir not in sys.path:
-                    sys.path.insert(0, _bot_dir)
                 import importlib.util
-                _spec = importlib.util.spec_from_file_location("fetchall_runtime", Path(_bot_dir) / "fetchall.py")
-                if _spec and _spec.loader:
-                    _fm = importlib.util.module_from_spec(_spec)
-                    _spec.loader.exec_module(_fm)
-                    _run_startup_clear = getattr(_fm, "run_startup_clear", None)
+                _bot_dir = Path(__file__).resolve().parent
+                _fetchall_path = _bot_dir / "fetchall.py"
+                if _fetchall_path.is_file():
+                    _spec = importlib.util.spec_from_file_location("fetchall_ondemand", _fetchall_path)
+                    if _spec and _spec.loader:
+                        _fm = importlib.util.module_from_spec(_spec)
+                        sys.modules["fetchall_ondemand"] = _fm
+                        _spec.loader.exec_module(_fm)
+                        _run_startup_clear = getattr(_fm, "run_startup_clear", None)
+                        if _run_startup_clear is not None:
+                            print("[FETCHALL] run_startup_clear loaded from fetchall.py at runtime", flush=True)
+                if _run_startup_clear is None:
+                    print("[WARN] [FETCHALL] run_startup_clear not found in fetchall module (startup clear and auto-poller disabled)", flush=True)
             except Exception as _e:
                 print(f"[WARN] [FETCHALL] Runtime load of run_startup_clear failed: {_e}", flush=True)
         have_startup_clear = bool(_FETCHALL_AVAILABLE and _run_startup_clear is not None and startup_clear_enabled)
