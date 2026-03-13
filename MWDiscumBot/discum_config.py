@@ -5,6 +5,12 @@ Used by discumbot.py and discum_command_bot.py. No duplication of parsing logic.
 
 Paths are relative to this module's folder (MWDiscumBot), so the same code runs
 on Oracle and locally; config and channel_map.json stay in MWDiscumBot/config/.
+
+IMPORTANT — no overlap with fetchall:
+- channel_map.json = D2D forwarder only (source channel ID → webhook URL). Used ONLY by
+  discumbot.py for live message forwarding. Never used by fetchall.
+- Fetchall uses its own files: fetchall_mappings.json, fetchall_mappings.runtime.json,
+  and fetchall_destination_webhooks.json (see fetchall_webhook_sender.py).
 """
 
 from __future__ import annotations
@@ -17,6 +23,7 @@ from typing import Dict
 # Project root = folder containing this module (MWDiscumBot)
 _ROOT = Path(__file__).resolve().parent
 CONFIG_DIR = str(_ROOT / "config")
+# D2D only: source channel → webhook URL. Fetchall does NOT use this file.
 CHANNEL_MAP_PATH = str(_ROOT / "config" / "channel_map.json")
 TOKENS_ENV_PATH = str(_ROOT / "config" / "tokens.env")
 SETTINGS_JSON_PATH = str(_ROOT / "config" / "settings.json")

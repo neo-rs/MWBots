@@ -1,4 +1,9 @@
-"""Webhook/bot send for fetchall only (MWDiscumBot). Uses destination_webhooks.json."""
+"""Webhook/bot send for fetchall only (MWDiscumBot). Uses fetchall_destination_webhooks.json.
+
+This file is separate from D2D's channel_map.json (discum_config): channel_map.json is
+used only by discumbot.py for live forwarding; fetchall uses this webhook map for
+sending mirrored messages to destination channels.
+"""
 from __future__ import annotations
 
 import io
@@ -13,7 +18,9 @@ import fetchall_config as cfg
 
 _ROOT = Path(__file__).resolve().parent
 _CONFIG_DIR = _ROOT / "config"
-_WEBHOOK_MAP_PATH = _CONFIG_DIR / "destination_webhooks.json"
+# Fetchall-only; not the same as D2D's channel_map.json
+_WEBHOOK_MAP_PATH = _CONFIG_DIR / "fetchall_destination_webhooks.json"
+_LEGACY_WEBHOOK_MAP_PATH = _CONFIG_DIR / "destination_webhooks.json"
 
 _LOCK = threading.RLock()
 _CACHE: Dict[int, str] = {}
@@ -43,9 +50,10 @@ def _invalidate_webhook_for_channel(channel_id: int) -> None:
 def _load_webhook_map() -> Dict[int, str]:
     try:
         with _LOCK:
-            if not _WEBHOOK_MAP_PATH.exists():
+            path = _WEBHOOK_MAP_PATH if _WEBHOOK_MAP_PATH.exists() else _LEGACY_WEBHOOK_MAP_PATH
+            if not path.exists():
                 return {}
-            raw = json.loads(_WEBHOOK_MAP_PATH.read_text(encoding="utf-8") or "{}")
+            raw = json.loads(path.read_text(encoding="utf-8") or "{}")
             if not isinstance(raw, dict):
                 return {}
             out: Dict[int, str] = {}
