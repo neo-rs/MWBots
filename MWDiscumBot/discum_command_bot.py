@@ -170,8 +170,7 @@ MIRRORWORLD_SERVER_ID = int(
     or "0"
 ) or 0
 
-# User account token for D2D bridge + fetchall (read source guilds as user). Canonical: DISCUM_USER_DISCUMBOT in config/tokens.env.
-# Fallbacks: DISCUM_BOT, DISCORD_TOKEN (for backward compat).
+# User account token (D2D + fetchall read source guilds as user). Same value: set DISCUM_USER_DISCUMBOT in config/tokens.env; we store it in USER_TOKEN.
 USER_TOKEN = str(
     cfg_get("DISCUM_USER_DISCUMBOT")
     or cfg_get("DISCUM_BOT")
@@ -1113,17 +1112,16 @@ class DiscumCommandBot(commands.Bot):
             print(f"[INFO] If /discum is not visible: ensure this bot is in the server with slash command scope. Re-invite: {invite_url}")
         print(f"[INFO] Ready to handle /discum browse")
         print(f"[INFO] Channel Mappings display: numbered list (1. <#id>, 2. <#id>...) — if you see 'Channel-XXXXX' the wrong code path is running")
+        # DISCUM_USER_DISCUMBOT (stored as USER_TOKEN): used only for fetchall source reads; bot token stays for commands/channels here
+        effective_user_token = (USER_TOKEN or "").strip() or _get_browse_user_token()
+        if _FETCHALL_AVAILABLE:
+            print(f"[FETCHALL] DISCUM_USER_DISCUMBOT: {'set — fetchall/auto-poller on' if effective_user_token else 'NOT SET — add to config/tokens.env to enable fetchall'}")
         # Reload fetchall config so we use current settings.json (same as DataManagerBot at startup)
         if _FETCHALL_AVAILABLE:
             try:
                 _fetchall_cfg.init(_fetchall_cfg.load_fetchall_settings())
             except Exception as e:
                 print(f"[WARN] [FETCHALL] Config reload failed: {e}")
-            if USER_TOKEN:
-                print(f"[FETCHALL] User token set — prefix commands !fetchall / !fetchsync and auto-poller enabled.")
-                print(f"[INFO] Fetchall prefix commands: !fetchsync [source_guild_id]  !fetchall [source_guild_id]  (no slash registration needed)")
-            else:
-                print(f"[FETCHALL] User token NOT set — !fetchall/!fetchsync and auto-poller disabled. Set DISCUM_USER_DISCUMBOT in config/tokens.env.")
         startup_clear_enabled = bool(getattr(_fetchall_cfg, "FETCHALL_STARTUP_CLEAR_ENABLED", False))
         cat_ids = list(getattr(_fetchall_cfg, "FETCHALL_STARTUP_CLEAR_CATEGORY_IDS", set()) or set())
         if not cat_ids and _FETCHALL_AVAILABLE:
@@ -1145,13 +1143,16 @@ class DiscumCommandBot(commands.Bot):
                 print(f"[WARN] [FETCHALL] Startup clear failed: {e}")
                 import traceback
                 traceback.print_exc()
-        # Fetchall auto-poller (runs fetchsync every N seconds, same as DataManagerBot before)
+        # Fetchall auto-poller (runs fetchsync every N seconds); needs user token to read from source guilds
         poll_s = int(getattr(_fetchall_cfg, "FETCHSYNC_AUTO_POLL_SECONDS", 0) or 0)
-        if _FETCHALL_AVAILABLE and poll_s > 0 and USER_TOKEN and getattr(self, "_fetchsync_auto_task", None) is None:
-            print(f"[FETCHALL] Auto-poller uses DISCUM_USER_DISCUMBOT (user token) to read from source guilds; bot token is only for this server (commands + create/delete channels here).")
+        if _FETCHALL_AVAILABLE and poll_s > 0 and effective_user_token and getattr(self, "_fetchsync_auto_task", None) is None:
             async def _auto_fetchsync_loop() -> None:
                 await self.wait_until_ready()
+                first_tick = True
                 while not self.is_closed():
+                    if first_tick:
+                        print(f"[FETCHALL] Auto-poller first tick (fetchsync running)", flush=True)
+                        first_tick = False
                     started = time.time()
                     try:
                         entries = list(iter_fetchall_entries())
@@ -1168,7 +1169,7 @@ class DiscumCommandBot(commands.Bot):
                                 bot=self,
                                 entry=entry,
                                 destination_guild=dest_guild,
-                                source_user_token=USER_TOKEN,
+                                source_user_token=effective_user_token,
                                 dryrun=False,
                                 progress_cb=None,
                             )
@@ -1182,9 +1183,11 @@ class DiscumCommandBot(commands.Bot):
                     await asyncio.sleep(sleep_for)
             try:
                 self._fetchsync_auto_task = asyncio.create_task(_auto_fetchsync_loop())
-                print(f"[INFO] Fetchsync auto-poller enabled: every {poll_s}s")
+                print(f"[FETCHALL] Auto-poller started: every {poll_s}s", flush=True)
             except Exception as e:
                 print(f"[WARN] Fetchsync auto-poller failed to start: {e}")
+        elif _FETCHALL_AVAILABLE and poll_s > 0 and not effective_user_token:
+            print(f"[FETCHALL] Auto-poller skipped: DISCUM_USER_DISCUMBOT not set in config/tokens.env", flush=True)
 
 # Log once at import so deploy can confirm this file is the one running (Channel Mappings use "1. <#id>")
 print("[discum_command_bot] loaded — Channel Mappings format: 1. <#id>, 2. <#id> ...")
@@ -1202,7 +1205,7 @@ if _FETCHALL_AVAILABLE and run_fetchsync is not None and run_fetchall is not Non
         """Pull and mirror messages from source servers into this server. Usage: !fetchsync [source_guild_id] (0 = all mappings)."""
         user_tok = USER_TOKEN or _get_browse_user_token()
         if not user_tok:
-            await ctx.send("[FETCHALL] User token not set. Add DISCUM_USER_DISCUMBOT (user account token) to MWDiscumBot/config/tokens.env and restart. Prefix commands use the **bot token** to receive your message; fetchall uses the **user token** to read from source servers.")
+            await ctx.send("[FETCHALL] Set DISCUM_USER_DISCUMBOT (user account token) in config/tokens.env and restart.")
             return
         entries = list(iter_fetchall_entries())
         if not entries:
@@ -1251,7 +1254,7 @@ if _FETCHALL_AVAILABLE and run_fetchsync is not None and run_fetchall is not Non
         """Create/update mirror channels from fetchall mappings. Usage: !fetchall [source_guild_id] (0 = all)."""
         user_tok = USER_TOKEN or _get_browse_user_token()
         if not user_tok:
-            await ctx.send("[FETCHALL] User token not set. Add DISCUM_USER_DISCUMBOT (user account token) to MWDiscumBot/config/tokens.env and restart. Prefix commands use the **bot token** to receive your message; fetchall uses the **user token** to read from source servers.")
+            await ctx.send("[FETCHALL] Set DISCUM_USER_DISCUMBOT (user account token) in config/tokens.env and restart.")
             return
         entries = list(iter_fetchall_entries())
         if not entries:
