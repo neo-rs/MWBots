@@ -1918,33 +1918,39 @@ def _fetch_and_cache_channels():
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                 }
                 
-                # First get guild info
+                # First get guild info (if 403, skip this guild and continue with others)
                 guild_resp = requests.get(
                     f'https://discord.com/api/v9/guilds/{guild_id}?with_counts=false',
                     headers=headers,
                     timeout=10
                 )
-                
+                if guild_resp.status_code == 403:
+                    print(f"[WARN] No access to source guild {guild_id}: Discum user not in guild or lacks permission; skipping and continuing.")
+                    continue
+                if guild_resp.status_code != 200:
+                    if VERBOSE:
+                        print(f"[WARN] Failed to fetch guild {guild_id} info: HTTP {guild_resp.status_code}; skipping.")
+                    continue
+
                 guild_name = f"Guild {guild_id}"
                 guild_icon = None
-                if guild_resp.status_code == 200:
-                    guild_info = guild_resp.json()
+                guild_info = guild_resp.json() if hasattr(guild_resp, "json") else None
+                if isinstance(guild_info, dict):
                     guild_name = guild_info.get("name", guild_name)
                     guild_icon = guild_info.get("icon")
-                
+
                 # Fetch channels via REST API
                 channels_resp = requests.get(
                     f'https://discord.com/api/v9/guilds/{guild_id}/channels',
                     headers=headers,
                     timeout=10
                 )
-                
+                if channels_resp.status_code == 403:
+                    print(f"[WARN] No access to source guild {guild_id}: Discum user not in guild or lacks permission; skipping and continuing.")
+                    continue
                 if channels_resp.status_code != 200:
                     if VERBOSE:
-                        if channels_resp.status_code == 403:
-                            print(f"[WARN] Failed to fetch channels from source guild {guild_id}: HTTP 403 — Discum user not in this guild or lacks permission; skipping. Remove this guild from source_guild_ids or fetchall_mappings if you don't need it.")
-                        else:
-                            print(f"[WARN] Failed to fetch channels from source guild {guild_id}: HTTP {channels_resp.status_code}")
+                        print(f"[WARN] Failed to fetch channels from source guild {guild_id}: HTTP {channels_resp.status_code}; skipping.")
                     continue
                 
                 channels_data = channels_resp.json()

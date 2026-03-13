@@ -1139,12 +1139,20 @@ class DiscumCommandBot(commands.Bot):
         token_status = "set" if effective_user_token else "NOT_SET"
         print(f"[FETCHALL] on_ready: DISCUM_USER_DISCUMBOT={token_status} startup_clear_enabled={startup_clear_enabled} category_ids={cat_ids[:5]}{'...' if len(cat_ids) > 5 else ''} destination_guild_ids={dest_gids}", flush=True)
         # Fetchall startup clear (same as DataManagerBot before transfer)
-        have_startup_clear = bool(_FETCHALL_AVAILABLE and run_startup_clear is not None and startup_clear_enabled)
+        # Resolve run_startup_clear at runtime if missing at import (e.g. different sys.path at import time)
+        _run_startup_clear = run_startup_clear
+        if _run_startup_clear is None and _FETCHALL_AVAILABLE:
+            try:
+                import fetchall as _fm
+                _run_startup_clear = getattr(_fm, "run_startup_clear", None)
+            except Exception:
+                pass
+        have_startup_clear = bool(_FETCHALL_AVAILABLE and _run_startup_clear is not None and startup_clear_enabled)
         print(f"[FETCHALL] startup_clear will run: {have_startup_clear} (run_startup_clear is None: {run_startup_clear is None})", flush=True)
         if have_startup_clear:
             try:
                 print("[FETCHALL] run_startup_clear: calling", flush=True)
-                await run_startup_clear(self)
+                await _run_startup_clear(self)
                 print("[FETCHALL] run_startup_clear: done", flush=True)
             except Exception as e:
                 print(f"[WARN] [FETCHALL] Startup clear failed: {e}", flush=True)
