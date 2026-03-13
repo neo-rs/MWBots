@@ -3720,7 +3720,14 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
                     signature=signature,
                 )
                 if VERBOSE:
-                    log_d2d("Edited mirror message", channel_name=channelName, dest_channel_name=dest_channel_name)
+                    edit_dest_name = "Webhook"
+                    try:
+                        meta = _resolve_webhook_destination_metadata(webhook) if webhook else {}
+                        if isinstance(meta, dict) and meta.get("channel_id"):
+                            edit_dest_name = _resolve_destination_channel_name(int(meta["channel_id"])) or edit_dest_name
+                    except Exception:
+                        pass
+                    log_d2d("Edited mirror message", channel_name=channelName, dest_channel_name=edit_dest_name)
                 return
             # Patch failed → fall back to replace
             needs_replace = True
