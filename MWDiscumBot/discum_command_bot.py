@@ -1142,12 +1142,15 @@ class DiscumCommandBot(commands.Bot):
         # Resolve run_startup_clear at runtime if missing at import (server may load different fetchall)
         _run_startup_clear = run_startup_clear
         if _run_startup_clear is None and _FETCHALL_AVAILABLE:
+            print("[FETCHALL] Resolving run_startup_clear at runtime...", flush=True)
             try:
                 import sys
                 import importlib.util
                 _bot_dir = Path(__file__).resolve().parent
                 _fetchall_path = _bot_dir / "fetchall.py"
-                if _fetchall_path.is_file():
+                if not _fetchall_path.is_file():
+                    print(f"[WARN] [FETCHALL] fetchall.py not found at {_fetchall_path}", flush=True)
+                else:
                     _spec = importlib.util.spec_from_file_location("fetchall_ondemand", _fetchall_path)
                     if _spec and _spec.loader:
                         _fm = importlib.util.module_from_spec(_spec)
