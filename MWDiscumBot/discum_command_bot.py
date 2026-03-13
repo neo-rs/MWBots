@@ -1148,6 +1148,7 @@ class DiscumCommandBot(commands.Bot):
         # Fetchall auto-poller (runs fetchsync every N seconds, same as DataManagerBot before)
         poll_s = int(getattr(_fetchall_cfg, "FETCHSYNC_AUTO_POLL_SECONDS", 0) or 0)
         if _FETCHALL_AVAILABLE and poll_s > 0 and USER_TOKEN and getattr(self, "_fetchsync_auto_task", None) is None:
+            print(f"[FETCHALL] Auto-poller uses DISCUM_USER_DISCUMBOT (user token) to read from source guilds; bot token is only for this server (commands + create/delete channels here).")
             async def _auto_fetchsync_loop() -> None:
                 await self.wait_until_ready()
                 while not self.is_closed():

@@ -1941,7 +1941,10 @@ def _fetch_and_cache_channels():
                 
                 if channels_resp.status_code != 200:
                     if VERBOSE:
-                        print(f"[WARN] Failed to fetch channels from source guild {guild_id}: HTTP {channels_resp.status_code}")
+                        if channels_resp.status_code == 403:
+                            print(f"[WARN] Failed to fetch channels from source guild {guild_id}: HTTP 403 — Discum user not in this guild or lacks permission; skipping. Remove this guild from source_guild_ids or fetchall_mappings if you don't need it.")
+                        else:
+                            print(f"[WARN] Failed to fetch channels from source guild {guild_id}: HTTP {channels_resp.status_code}")
                     continue
                 
                 channels_data = channels_resp.json()
