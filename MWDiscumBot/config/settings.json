@@ -37,5 +37,8 @@
     "fetchall_startup_clear_only_mirror_channels": true,
     "fetchall_startup_clear_all_channels": true,
     "fetchall_startup_clear_delay_seconds": 2,
-    "fetchsync_auto_poll_seconds": 60
+    "fetchsync_auto_poll_seconds": 60,
+
+    "fetchsync_only_recent_message_days": 0,
+    "fetchall_only_channels_with_recent_activity_days": 0
 }

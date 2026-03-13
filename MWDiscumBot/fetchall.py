@@ -34,6 +34,34 @@ FETCHALL_MAINTENANCE_LOCK: asyncio.Lock = asyncio.Lock()
 FETCHALL_MAINTENANCE_EVENT: asyncio.Event = asyncio.Event()
 
 
+def _is_message_within_recent_days(message: Dict[str, Any], *, days: int) -> bool:
+    """True if message timestamp is within the last `days` days (inclusive). Used when fetchsync_only_recent_message_days > 0."""
+    if not message or days <= 0:
+        return True
+    try:
+        ts = message.get("timestamp")
+        if ts:
+            if isinstance(ts, (int, float)):
+                dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
+            else:
+                dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            delta = (datetime.now(timezone.utc) - dt).total_seconds()
+            return delta <= (days * 86400)
+        mid = str(message.get("id") or "").strip()
+        if mid.isdigit():
+            snowflake = int(mid)
+            discord_epoch = 1420070400000
+            ms = (snowflake >> 22) + discord_epoch
+            dt = datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+            delta = (datetime.now(timezone.utc) - dt).total_seconds()
+            return delta <= (days * 86400)
+    except Exception:
+        pass
+    return True
+
+
 def _is_substantive_fetched_message(*, content: str, embeds: List[Dict[str, Any]], attachments: List[Dict[str, Any]], min_chars: int) -> bool:
     """
     Fetchsync filter:
@@ -724,6 +752,9 @@ async def run_startup_clear(bot) -> None:
                             if only_mirror:
                                 if not (topic.startswith(MIRROR_TOPIC_PREFIX) or topic.lower().startswith("separator for")):
                                     skipped += 1
+                                    ch_id = getattr(ch, "id", None) or "?"
+                                    ch_name = getattr(ch, "name", None) or "?"
+                                    log_warn(f"[FETCHALL] startup clear: ignoring channel id={ch_id} name={ch_name} (not a mirror channel)")
                                     continue
                         try:
                             ch_id = getattr(ch, "id", None) or "?"
@@ -1505,6 +1536,8 @@ async def run_fetchall(
         ignored_ids = {int(x) for x in raw_ignored if int(x) > 0}
     except Exception:
         ignored_ids = set()
+    if ignored_ids:
+        log_fetchall(f"source={source_guild_id} ignored_channel_ids={len(ignored_ids)} channels (excluded from fetch): {sorted(ignored_ids)[:15]}{'...' if len(ignored_ids) > 15 else ''}")
 
     src_channels_to_mirror: List[Tuple[int, str]] = []
     mode = "bot"
@@ -1598,6 +1631,23 @@ async def run_fetchall(
             ignored_channel_ids=ignored_ids,
         )
         src_channels_to_mirror.extend(selected)
+
+        # Optional: only keep channels that have at least one message in the last N days
+        activity_days = int(getattr(cfg, "FETCHALL_ONLY_CHANNELS_WITH_RECENT_ACTIVITY_DAYS", 0) or 0)
+        if activity_days > 0 and token and src_channels_to_mirror:
+            filtered: List[Tuple[int, str]] = []
+            for ch_id, ch_name in src_channels_to_mirror:
+                ok, msgs, _ = await _fetch_channel_messages_page(
+                    source_channel_id=ch_id, user_token=token, limit=1, after=None
+                )
+                if ok and msgs and _is_message_within_recent_days(msgs[0], days=activity_days):
+                    filtered.append((ch_id, ch_name))
+                else:
+                    log_fetchall(f"source={source_guild_id} channel {ch_id} ({ch_name}) excluded (no recent activity in {activity_days}d)")
+            dropped = len(src_channels_to_mirror) - len(filtered)
+            if dropped > 0:
+                log_warn(f"[FETCHALL] source={source_guild_id} filtered to channels with recent activity: kept={len(filtered)} dropped={dropped} (fetchall_only_channels_with_recent_activity_days={activity_days})")
+            src_channels_to_mirror = filtered
 
     # Build existing mirror index by topic (scan across ALL destination channels, including overflow categories)
     existing_by_source: dict[int, discord.TextChannel] = {}
@@ -1944,6 +1994,8 @@ async def run_fetchsync(
         ignored_ids = {int(x) for x in raw_ignored if int(x) > 0}
     except Exception:
         ignored_ids = set()
+    if ignored_ids:
+        log_fetchall(f"fetchsync source={source_guild_id} ignored_channel_ids={len(ignored_ids)} channels (excluded)")
 
     # Always enumerate channels via user token (source access is assumed to be via user token).
     status, api_channels = await _fetch_guild_channels_via_user_token(source_guild_id=source_guild_id, user_token=token)
@@ -2126,6 +2178,12 @@ async def run_fetchsync(
                 i += 1
                 continue
             mid = str(m.get("id") or "").strip()
+            only_recent_days = int(getattr(cfg, "FETCHSYNC_ONLY_RECENT_MESSAGE_DAYS", 0) or 0)
+            if only_recent_days > 0 and not _is_message_within_recent_days(m, days=only_recent_days):
+                if mid:
+                    cursor_id = mid
+                i += 1
+                continue
             content = str(m.get("content") or "")
             attachments = m.get("attachments") if isinstance(m.get("attachments"), list) else []
             embeds = m.get("embeds") if isinstance(m.get("embeds"), list) else []

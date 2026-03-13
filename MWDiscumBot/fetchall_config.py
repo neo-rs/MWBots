@@ -31,6 +31,12 @@ FETCHALL_STARTUP_CLEAR_ONLY_MIRROR_CHANNELS: bool = True
 FETCHALL_STARTUP_CLEAR_ALL_CHANNELS: bool = False
 FETCHALL_STARTUP_CLEAR_DELAY_SECONDS: int = 0
 
+# Optional filters (0 = disabled): only fetch/sync recent content
+# fetchsync_only_recent_message_days: skip messages older than N days when mirroring
+FETCHSYNC_ONLY_RECENT_MESSAGE_DAYS: int = 0
+# fetchall_only_channels_with_recent_activity_days: only create/sync channels that have at least one message in the last N days
+FETCHALL_ONLY_CHANNELS_WITH_RECENT_ACTIVITY_DAYS: int = 0
+
 
 def _parse_int_set(values: Any) -> Set[int]:
     out: Set[int] = set()
@@ -99,6 +105,7 @@ def init(settings: Dict[str, Any]) -> None:
     global FORWARD_ATTACHMENTS_AS_FILES, FORWARD_ATTACHMENTS_MAX_FILES, FORWARD_ATTACHMENTS_MAX_BYTES
     global FETCHALL_STARTUP_CLEAR_ENABLED, FETCHALL_STARTUP_CLEAR_CATEGORY_IDS
     global FETCHALL_STARTUP_CLEAR_ONLY_MIRROR_CHANNELS, FETCHALL_STARTUP_CLEAR_ALL_CHANNELS, FETCHALL_STARTUP_CLEAR_DELAY_SECONDS
+    global FETCHSYNC_ONLY_RECENT_MESSAGE_DAYS, FETCHALL_ONLY_CHANNELS_WITH_RECENT_ACTIVITY_DAYS
 
     DESTINATION_GUILD_IDS = _parse_int_set(settings.get("destination_guild_ids"))
     FETCHALL_DEFAULT_DEST_CATEGORY_ID = _get_int(settings, "fetchall_default_destination_category_id", 0)
@@ -131,3 +138,5 @@ def init(settings: Dict[str, Any]) -> None:
     FETCHALL_STARTUP_CLEAR_ONLY_MIRROR_CHANNELS = bool(settings.get("fetchall_startup_clear_only_mirror_channels", True))
     FETCHALL_STARTUP_CLEAR_ALL_CHANNELS = bool(settings.get("fetchall_startup_clear_all_channels", False))
     FETCHALL_STARTUP_CLEAR_DELAY_SECONDS = _get_int(settings, "fetchall_startup_clear_delay_seconds", 0)
+    FETCHSYNC_ONLY_RECENT_MESSAGE_DAYS = _get_int(settings, "fetchsync_only_recent_message_days", 0)
+    FETCHALL_ONLY_CHANNELS_WITH_RECENT_ACTIVITY_DAYS = _get_int(settings, "fetchall_only_channels_with_recent_activity_days", 0)
