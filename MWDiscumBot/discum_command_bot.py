@@ -1135,7 +1135,9 @@ class DiscumCommandBot(commands.Bot):
         token_status = "set" if effective_user_token else "NOT_SET"
         print(f"[FETCHALL] on_ready: DISCUM_USER_DISCUMBOT={token_status} startup_clear_enabled={startup_clear_enabled} category_ids={cat_ids[:5]}{'...' if len(cat_ids) > 5 else ''} destination_guild_ids={dest_gids}", flush=True)
         # Fetchall startup clear (same as DataManagerBot before transfer)
-        if _FETCHALL_AVAILABLE and run_startup_clear is not None and startup_clear_enabled:
+        have_startup_clear = bool(_FETCHALL_AVAILABLE and run_startup_clear is not None and startup_clear_enabled)
+        print(f"[FETCHALL] startup_clear will run: {have_startup_clear} (run_startup_clear is None: {run_startup_clear is None})", flush=True)
+        if have_startup_clear:
             try:
                 print("[FETCHALL] run_startup_clear: calling", flush=True)
                 await run_startup_clear(self)
