@@ -11,9 +11,9 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
-from logging_utils import log_fetchall, log_warn
-import settings_store as cfg
-from utils import append_image_attachments_as_embeds, chunk_text, format_embeds_for_forwarding, is_image_attachment
+from fetchall_logging import log_fetchall, log_warn
+import fetchall_config as cfg
+from fetchall_utils import append_image_attachments_as_embeds, chunk_text, format_embeds_for_forwarding, is_image_attachment
 
 _BOT_DIR = Path(__file__).resolve().parent
 _CONFIG_DIR = _BOT_DIR / "config"
@@ -423,7 +423,7 @@ async def _prune_separators_with_no_mirrors(destination_guild, *, source_guild_i
         if not hasattr(ch, "delete"):
             continue
         try:
-            await ch.delete(reason="MWDataManagerBot fetchall: remove separator (no mirror channels left)")
+            await ch.delete(reason="MWDiscumBot fetchall: remove separator (no mirror channels left)")
             deleted += 1
             await asyncio.sleep(0.35)
         except Exception as e:
@@ -538,7 +538,7 @@ async def _ensure_separator(dest_category, *, source_guild_id: int, source_guild
         created = await dest_category.create_text_channel(
             desired,
             topic=f"separator for {source_guild_name} ({source_guild_id})",
-            reason="MWDataManagerBot fetchall separator",
+            reason="MWDiscumBot fetchall separator",
         )
         return int(created.id)
     except Exception:
@@ -589,7 +589,7 @@ async def _get_or_create_overflow_category(destination_guild, *, base_category, 
     try:
         created = await destination_guild.create_category(
             name,
-            reason="MWDataManagerBot fetchall overflow category",
+            reason="MWDiscumBot fetchall overflow category",
         )
         try:
             # place it right after base for readability
@@ -679,7 +679,7 @@ async def delete_empty_overflow_categories(guild, category_objects: List[Any]) -
                 continue
             if not hasattr(cat, "delete"):
                 continue
-            await cat.delete(reason="MWDataManagerBot fetchclear: delete empty overflow category")
+            await cat.delete(reason="MWDiscumBot fetchclear: delete empty overflow category")
             deleted += 1
             await asyncio.sleep(0.35)
         except Exception as e:
@@ -849,7 +849,7 @@ async def _discord_api_get_json(
         return 0, None
     headers = {
         "Authorization": str(user_token).strip(),
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MWDataManagerBot/Fetchall",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MWDiscumBot/Fetchall",
         "Accept": "application/json",
     }
     timeout = aiohttp.ClientTimeout(total=25)
@@ -1201,7 +1201,7 @@ async def _send_message_to_channel(
             except Exception:
                 continue
 
-    from webhook_sender import send_via_webhook_or_bot
+    from fetchall_webhook_sender import send_via_webhook_or_bot
 
     chunks = chunk_text(content, 2000)
     for i, chunk in enumerate(chunks):
@@ -1213,7 +1213,7 @@ async def _send_message_to_channel(
                 attachments=attachments,
                 username=webhook_username,
                 avatar_url=webhook_avatar_url,
-                reason=reason or "MWDataManagerBot fetchsync mirror",
+                reason=reason or "MWDiscumBot fetchsync mirror",
             )
         else:
             await send_via_webhook_or_bot(
@@ -1223,7 +1223,7 @@ async def _send_message_to_channel(
                 attachments=None,
                 username=webhook_username,
                 avatar_url=webhook_avatar_url,
-                reason=reason or "MWDataManagerBot fetchsync mirror (chunk)",
+                reason=reason or "MWDiscumBot fetchsync mirror (chunk)",
             )
 
 
@@ -1579,7 +1579,7 @@ async def run_fetchall(
                 final_name,
                 category=dest_cat,
                 topic=full_topic,
-                reason="MWDataManagerBot fetchall mirror channel",
+                reason="MWDiscumBot fetchall mirror channel",
             )
             created += 1
         except Exception as e:
@@ -1593,7 +1593,7 @@ async def run_fetchall(
                             final_name,
                             category=dest_cat2,
                             topic=full_topic,
-                            reason="MWDataManagerBot fetchall mirror channel (overflow retry)",
+                            reason="MWDiscumBot fetchall mirror channel (overflow retry)",
                         )
                         created += 1
                         continue
@@ -1644,7 +1644,7 @@ async def run_fetchall(
             if should_delete:
                 try:
                     await mirror_ch.delete(
-                        reason="MWDataManagerBot fetchall prune (orphaned, date-expired, or inactive 2d)"
+                        reason="MWDiscumBot fetchall prune (orphaned, date-expired, or inactive 2d)"
                     )
                     pruned += 1
                     await asyncio.sleep(0.35)
@@ -1892,7 +1892,7 @@ async def run_fetchsync(
                     final_name,
                     category=dest_cat,
                     topic=full_topic,
-                    reason="MWDataManagerBot fetchsync mirror channel",
+                    reason="MWDiscumBot fetchsync mirror channel",
                 )
                 mirror_by_source[sid] = created
                 created_source_channel_ids.add(int(sid))
@@ -1911,7 +1911,7 @@ async def run_fetchsync(
                                 final_name,
                                 category=dest_cat2,
                                 topic=full_topic,
-                                reason="MWDataManagerBot fetchsync mirror channel (overflow retry)",
+                                reason="MWDiscumBot fetchsync mirror channel (overflow retry)",
                             )
                             mirror_by_source[sid] = created
                             created_source_channel_ids.add(int(sid))
@@ -2101,7 +2101,7 @@ async def run_fetchsync(
                         attachments=bundle_attachments if use_files else None,
                         webhook_username=wh_username,
                         webhook_avatar_url=wh_avatar,
-                        reason="MWDataManagerBot fetchsync bundle",
+                        reason="MWDiscumBot fetchsync bundle",
                     )
                     sent_inc += 1
                     if bundle_last_id:
@@ -2184,7 +2184,7 @@ async def run_fetchsync(
                     attachments=attachments if use_files else None,
                     webhook_username=wh_username,
                     webhook_avatar_url=wh_avatar,
-                    reason="MWDataManagerBot fetchsync",
+                    reason="MWDiscumBot fetchsync",
                 )
                 sent_inc += 1
                 if mid:

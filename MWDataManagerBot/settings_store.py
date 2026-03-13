@@ -70,22 +70,6 @@ LINK_TRACKING_TTL_SECONDS: int = 24 * 60 * 60
 
 FALLBACK_CHANNEL_ID: int = 0
 
-# Fetch-all defaults (kept even if fetchall is disabled)
-FETCHALL_DEFAULT_DEST_CATEGORY_ID: int = 0
-FETCHALL_MAX_MESSAGES_PER_CHANNEL: int = 400
-FETCHSYNC_INITIAL_BACKFILL_LIMIT: int = 20
-# Fetchsync mirrors into "fetchall" channels. Default should be permissive so short updates aren't dropped.
-FETCHSYNC_MIN_CONTENT_CHARS: int = 1
-# Safety default: OFF. Enable explicitly in config/settings.json.
-FETCHSYNC_AUTO_POLL_SECONDS: int = 0
-
-# Startup maintenance: optionally delete stale mirror channels so updated naming/topic rules apply.
-# Safety: only deletes channels whose topic starts with "MIRROR:" or "separator for".
-FETCHALL_STARTUP_CLEAR_ENABLED: bool = False
-FETCHALL_STARTUP_CLEAR_CATEGORY_IDS: Set[int] = set()
-FETCHALL_STARTUP_CLEAR_ONLY_MIRROR_CHANNELS: bool = True
-FETCHALL_STARTUP_CLEAR_DELAY_SECONDS: int = 0
-
 EDIT_COOLDOWN_SECONDS: int = 30
 
 
@@ -164,10 +148,6 @@ def init(settings: Dict[str, Any]) -> None:
     global SMARTFILTER_FLIPS_LUNCHMONEY_CHANNEL_ID, SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID
     global RECENT_TTL_SECONDS, GLOBAL_DUPLICATE_TTL_SECONDS, MONITOR_EMBED_TTL_SECONDS, LINK_TRACKING_TTL_SECONDS
     global FALLBACK_CHANNEL_ID
-    global FETCHALL_DEFAULT_DEST_CATEGORY_ID, FETCHALL_MAX_MESSAGES_PER_CHANNEL
-    global FETCHSYNC_INITIAL_BACKFILL_LIMIT, FETCHSYNC_MIN_CONTENT_CHARS, FETCHSYNC_AUTO_POLL_SECONDS
-    global FETCHALL_STARTUP_CLEAR_ENABLED, FETCHALL_STARTUP_CLEAR_CATEGORY_IDS
-    global FETCHALL_STARTUP_CLEAR_ONLY_MIRROR_CHANNELS, FETCHALL_STARTUP_CLEAR_DELAY_SECONDS
     global EDIT_COOLDOWN_SECONDS
 
     VERBOSE = bool(settings.get("verbose", True))
@@ -272,21 +252,6 @@ def init(settings: Dict[str, Any]) -> None:
     except Exception:
         FALLBACK_CHANNEL_ID = 0
 
-    FETCHALL_DEFAULT_DEST_CATEGORY_ID = _get_int(settings, "fetchall_default_destination_category_id", 0)
-    FETCHALL_MAX_MESSAGES_PER_CHANNEL = _get_int(settings, "fetchall_max_messages_per_channel", 400)
-    FETCHSYNC_INITIAL_BACKFILL_LIMIT = _get_int(settings, "fetchsync_initial_backfill_limit", 20)
-    FETCHSYNC_MIN_CONTENT_CHARS = _get_int(settings, "fetchsync_min_content_chars", 1)
-    if FETCHSYNC_MIN_CONTENT_CHARS < 0:
-        FETCHSYNC_MIN_CONTENT_CHARS = 0
-    if FETCHSYNC_MIN_CONTENT_CHARS > 500:
-        FETCHSYNC_MIN_CONTENT_CHARS = 500
-    # Default OFF unless explicitly enabled (prevents surprise background mirroring + channel creation).
-    FETCHSYNC_AUTO_POLL_SECONDS = _get_int(settings, "fetchsync_auto_poll_seconds", 0)
-
-    FETCHALL_STARTUP_CLEAR_ENABLED = bool(settings.get("fetchall_startup_clear_enabled", False))
-    FETCHALL_STARTUP_CLEAR_CATEGORY_IDS = _parse_int_set(settings.get("fetchall_startup_clear_category_ids"))
-    FETCHALL_STARTUP_CLEAR_ONLY_MIRROR_CHANNELS = bool(settings.get("fetchall_startup_clear_only_mirror_channels", True))
-    FETCHALL_STARTUP_CLEAR_DELAY_SECONDS = _get_int(settings, "fetchall_startup_clear_delay_seconds", 0)
     EDIT_COOLDOWN_SECONDS = _get_int(settings, "edit_cooldown_seconds", 30)
 
 

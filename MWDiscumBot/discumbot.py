@@ -101,6 +101,7 @@ def _colorize_line(text: str) -> str:
     s = _re.sub(r"^\[WARN(?:ING)?\]", f"{_F.YELLOW}[WARN]{_S.RESET_ALL}", s)
     s = _re.sub(r"^\[ERROR\]", f"{_F.RED}[ERROR]{_S.RESET_ALL}", s)
     s = _re.sub(r"^\[DEBUG\]", f"{_F.WHITE}[DEBUG]{_S.RESET_ALL}", s)
+    s = _re.sub(r"^\[FETCHALL\]", f"{_F.CYAN}[FETCHALL]{_S.RESET_ALL}", s)
     # Channel-like tokens (#channel-name) to blue
     s = _re.sub(r"(?P<prefix>\s|^)#([a-z0-9\-_]+)", lambda m: f"{m.group('prefix')}{_F.BLUE}#{m.group(2)}{_S.RESET_ALL}", s, flags=_re.IGNORECASE)
     # User-like tokens (@name) to magenta (avoid emails)
@@ -453,6 +454,28 @@ if VERBOSE:
     print(f"[INFO] Channel map: {CHANNEL_MAP_PATH} ({len(CHANNEL_MAP)} mapping(s))")
 if len(CHANNEL_MAP) == 0 and VERBOSE:
     print("[INFO] No channel mappings yet. Use /discum browse (slash command bot) or edit channel_map.json to add mappings.")
+
+# Fetchall: load config from settings.json and log mappings (journal/terminal + fetchalllogs.json)
+if VERBOSE:
+    try:
+        import fetchall_config as _fetchall_cfg
+        import fetchall_logging as _fetchall_log
+        _fetchall_settings = _fetchall_cfg.load_fetchall_settings()
+        _fetchall_cfg.init(_fetchall_settings)
+        _fetchall_mappings_path = os.path.join(_CONFIG_DIR, "fetchall_mappings.json")
+        if os.path.exists(_fetchall_mappings_path):
+            try:
+                with open(_fetchall_mappings_path, "r", encoding="utf-8") as _f:
+                    _data = json.load(_f)
+                _guilds = _data.get("guilds") or []
+                _n = len(_guilds)
+                _fetchall_log.log_info(f"fetchall_mappings: {_n} mapping(s) at {_fetchall_mappings_path}", event="startup")
+            except Exception as _e:
+                _fetchall_log.log_warn(f"fetchall_mappings: could not load {_fetchall_mappings_path}: {_e}", event="startup")
+        else:
+            _fetchall_log.log_info(f"fetchall_mappings: no file at {_fetchall_mappings_path} (optional)", event="startup")
+    except Exception:
+        pass
 
 # Standalone log writers (compatible paths)
 _LOGS_DIR = os.path.join(_project_root, "logs")

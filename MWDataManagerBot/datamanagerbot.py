@@ -9,8 +9,7 @@ Responsibilities (kept, but modularized for easier debugging):
     - classify messages (local routing) + detect global triggers
     - dedupe and forward to destination channels/webhooks
     - handle edits (on_raw_message_edit) without spam
-  - Fetch-all + scheduler (kept)
-  - Commands (kept)
+  - Commands (kept). Fetch-all/fetchsync run in MWDiscumBot only (single user-token consumer).
 
 Config (standalone, local-only):
   - config/tokens.env     (secrets only)
@@ -66,9 +65,7 @@ def main() -> int:
     startup_banner(proof_lines, bot_name="MWDataManagerBot (Standalone)")
 
     # ---------------- Canonical tokens (standalone) ----------------
-    # One source of truth:
-    # - DATAMANAGER_BOT: discord.py bot token (runs MWDataManagerBot in Mirror World)
-    # - FETCHALL_USER_TOKEN: Discum/user token used ONLY for fetchall source discovery
+    # DATAMANAGER_BOT only: no user token. Fetchall/fetchsync run in MWDiscumBot only (single user-token consumer).
     bot_token = str(tokens.get("DATAMANAGER_BOT") or "").strip()
     if not bot_token:
         legacy = str(tokens.get("DISCORD_BOT_DATAMANAGER") or "").strip()
@@ -79,28 +76,6 @@ def main() -> int:
         log_error("Missing bot token. Set DATAMANAGER_BOT in MWDataManagerBot/config/tokens.env")
         return 2
 
-    # Discum/user token for fetchall against source servers the bot is not in.
-    fetchall_source_token = str(tokens.get("FETCHALL_USER_TOKEN") or "").strip()
-    if not fetchall_source_token:
-        legacy = (
-            str(tokens.get("DISCUM_USER_DISCUMBOT") or "").strip()
-            or str(tokens.get("DISCUM_BOT") or "").strip()
-            or str(tokens.get("DISCUM_USER_NEO") or "").strip()
-            or str(tokens.get("NEOBOT_DISCORD_USER_TOKEN") or "").strip()
-        )
-        if legacy:
-            log_warn(
-                "Using legacy Discum token key (DISCUM_USER_DISCUMBOT / DISCUM_BOT / DISCUM_USER_NEO / NEOBOT_DISCORD_USER_TOKEN). "
-                "Rename it to FETCHALL_USER_TOKEN (canonical)."
-            )
-            fetchall_source_token = legacy
-    if not fetchall_source_token:
-        log_warn(
-            "Fetchall source token not found. "
-            "Set FETCHALL_USER_TOKEN in MWDataManagerBot/config/tokens.env "
-            "(fetchall will only work for guilds the bot is in)."
-        )
-
     try:
         from live_forwarder import run_bot
     except Exception as e:
@@ -108,11 +83,7 @@ def main() -> int:
         return 2
 
     log_info("Starting MWDataManagerBot...")
-    # Pass canonical tokens through in-memory only (not written to disk).
-    settings["_tokens"] = {
-        "DATAMANAGER_BOT": bot_token,
-        "FETCHALL_USER_TOKEN": fetchall_source_token,
-    }
+    settings["_tokens"] = {"DATAMANAGER_BOT": bot_token}
     return int(run_bot(settings=settings, token=bot_token) or 0)
 
 

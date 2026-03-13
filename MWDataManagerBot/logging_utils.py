@@ -51,7 +51,6 @@ def _colorize_line(text: str) -> str:
     s = _re.sub(r"^\[WARN(?:ING)?\]", f"{_F.YELLOW}[WARN]{_S.RESET_ALL}", s)
     s = _re.sub(r"^\[ERROR\]", f"{_F.RED}[ERROR]{_S.RESET_ALL}", s)
     s = _re.sub(r"^\[DEBUG\]", f"{_F.WHITE}[DEBUG]{_S.RESET_ALL}", s)
-    s = _re.sub(r"^\[FETCHALL\]", f"{_F.CYAN}[FETCHALL]{_S.RESET_ALL}", s)
     s = _re.sub(r"^\[FORWARD\]", f"{_F.MAGENTA}[FORWARD]{_S.RESET_ALL}", s)
     s = _re.sub(r"^\[GLOBAL\]", f"{_F.BLUE}[GLOBAL]{_S.RESET_ALL}", s)
     s = _re.sub(r"^\[FILTER\]", f"{_F.YELLOW}[FILTER]{_S.RESET_ALL}", s)

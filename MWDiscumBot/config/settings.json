@@ -19,5 +19,16 @@
     "rewrite_user_mentions": false,
     "short_embed_char_threshold":  50,
     "short_embed_retry_delay_seconds":  5,
-    "short_embed_max_wait_seconds":  35
+    "short_embed_max_wait_seconds":  35,
+
+    "destination_guild_ids": [ "1431314516364230689" ],
+    "fetchall_default_destination_category_id": 1437856372300451851,
+    "fetchall_max_messages_per_channel": 400,
+    "fetchsync_initial_backfill_limit": 20,
+    "fetchsync_min_content_chars": 1,
+    "send_min_interval_seconds": 0.75,
+    "use_webhooks_for_forwarding": true,
+    "forward_attachments_as_files": true,
+    "forward_attachments_max_files": 10,
+    "forward_attachments_max_bytes": 7500000
 }

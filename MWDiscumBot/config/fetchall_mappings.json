@@ -1,0 +1,92 @@
+{
+  "guilds": [
+    {
+      "name": "FLIPFLUENCE",
+      "source_guild_id": 1081282387507429387,
+      "require_date": true,
+      "separator_order": 0,
+      "destination_category_id": 1437856372300451851,
+      "source_category_ids": [
+        1377464451275690144
+      ],
+      "ignored_channel_ids": [
+        1251781549037326468,
+        1377465833999171715,
+        1377466440239550555,
+        1377534750436098129,
+        1384603207971373106
+      ],
+      "separator_channel_id": 1439245751728214150
+    },
+    {
+      "name": "Divine",
+      "source_guild_id": 667532381376217089,
+      "destination_category_id": 1437856372300451851,
+      "require_date": true,
+      "separator_order": 1,
+      "source_category_ids": [
+        755222653299851385
+      ],
+      "ignored_channel_ids": [
+        744273597706534952,
+        1095374127650586634,
+        1299492224945488004
+      ],
+      "separator_channel_id": 1439245850495815702
+    },
+    {
+      "name": "Strike Access",
+      "source_guild_id": 493898302178197505,
+      "destination_category_id": 1437856372300451851,
+      "require_date": true,
+      "separator_order": 2,
+      "source_category_ids": [
+        1402101527291891742,
+        1383007061117505576
+      ],
+      "ignored_channel_ids": [
+        1402101661769404528,
+        1402101686180511895,
+        1402101864476053545,
+        1402101905710256180
+      ],
+      "separator_channel_id": 1439246014430183457
+    },
+    {
+      "name": "Deal Soldier",
+      "source_guild_id": 1202423534891311176,
+      "destination_category_id": 1437856372300451851,
+      "require_date": true,
+      "separator_order": 3,
+      "ignored_channel_ids": []
+    },
+    {
+      "name": "FlipFlip",
+      "source_guild_id": 521154543195521025,
+      "destination_category_id": 1437856372300451851,
+      "require_date": true,
+      "separator_order": 4,
+      "source_category_ids": [
+        1229853635962339338
+      ],
+      "separator_channel_id": 1439246475984109609,
+      "ignored_channel_ids": []
+    },
+    {
+      "name": "GFNF",
+      "source_guild_id": 663388213964046336,
+      "destination_category_id": 1437856372300451851,
+      "require_date": true,
+      "separator_order": 5,
+      "source_category_ids": [
+        663389141832040449
+      ],
+      "ignored_channel_ids": [
+        663389292281856015,
+        698233618971099226
+      ],
+      "separator_channel_id": 1439247300701585578
+    }
+  ],
+  "channel_update_channel_id": 1439193466012958720
+}
