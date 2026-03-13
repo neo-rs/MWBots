@@ -45,8 +45,12 @@ _CONFIG_RAW: Dict[str, str] = load_env_file(TOKENS_ENV_PATH)
 # Fetchall (prefix commands; startup clear; auto-poller)
 try:
     import fetchall_config as _fetchall_cfg
-    from fetchall import run_fetchall, run_fetchsync, iter_fetchall_entries, run_startup_clear
-    _FETCHALL_AVAILABLE = True
+    import fetchall as _fetchall_mod
+    run_fetchall = getattr(_fetchall_mod, "run_fetchall", None)
+    run_fetchsync = getattr(_fetchall_mod, "run_fetchsync", None)
+    iter_fetchall_entries = getattr(_fetchall_mod, "iter_fetchall_entries", None)
+    run_startup_clear = getattr(_fetchall_mod, "run_startup_clear", None)
+    _FETCHALL_AVAILABLE = bool(run_fetchall and run_fetchsync and iter_fetchall_entries)
 except Exception as _e:
     _FETCHALL_AVAILABLE = False
     run_fetchall = run_fetchsync = iter_fetchall_entries = run_startup_clear = None  # type: ignore
