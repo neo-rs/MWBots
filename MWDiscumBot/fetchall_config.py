@@ -15,11 +15,18 @@ FETCHALL_DEFAULT_DEST_CATEGORY_ID: int = 0
 FETCHALL_MAX_MESSAGES_PER_CHANNEL: int = 400
 FETCHSYNC_INITIAL_BACKFILL_LIMIT: int = 20
 FETCHSYNC_MIN_CONTENT_CHARS: int = 25
+FETCHSYNC_AUTO_POLL_SECONDS: int = 0
 SEND_MIN_INTERVAL_SECONDS: float = 0.0
 USE_WEBHOOKS_FOR_FORWARDING: bool = False
 FORWARD_ATTACHMENTS_AS_FILES: bool = True
 FORWARD_ATTACHMENTS_MAX_FILES: int = 10
 FORWARD_ATTACHMENTS_MAX_BYTES: int = 7_500_000
+
+# Startup clear (optional): remove stale mirror/separator channels at bot ready
+FETCHALL_STARTUP_CLEAR_ENABLED: bool = False
+FETCHALL_STARTUP_CLEAR_CATEGORY_IDS: Set[int] = set()
+FETCHALL_STARTUP_CLEAR_ONLY_MIRROR_CHANNELS: bool = True
+FETCHALL_STARTUP_CLEAR_DELAY_SECONDS: int = 0
 
 
 def _parse_int_set(values: Any) -> Set[int]:
@@ -84,9 +91,11 @@ def init(settings: Dict[str, Any]) -> None:
     """Apply settings dict to module-level config (fetchall only)."""
     global DESTINATION_GUILD_IDS, FETCHALL_DEFAULT_DEST_CATEGORY_ID
     global FETCHALL_MAX_MESSAGES_PER_CHANNEL, FETCHSYNC_INITIAL_BACKFILL_LIMIT
-    global FETCHSYNC_MIN_CONTENT_CHARS, SEND_MIN_INTERVAL_SECONDS
-    global USE_WEBHOOKS_FOR_FORWARDING, FORWARD_ATTACHMENTS_AS_FILES
-    global FORWARD_ATTACHMENTS_MAX_FILES, FORWARD_ATTACHMENTS_MAX_BYTES
+    global FETCHSYNC_MIN_CONTENT_CHARS, FETCHSYNC_AUTO_POLL_SECONDS
+    global SEND_MIN_INTERVAL_SECONDS, USE_WEBHOOKS_FOR_FORWARDING
+    global FORWARD_ATTACHMENTS_AS_FILES, FORWARD_ATTACHMENTS_MAX_FILES, FORWARD_ATTACHMENTS_MAX_BYTES
+    global FETCHALL_STARTUP_CLEAR_ENABLED, FETCHALL_STARTUP_CLEAR_CATEGORY_IDS
+    global FETCHALL_STARTUP_CLEAR_ONLY_MIRROR_CHANNELS, FETCHALL_STARTUP_CLEAR_DELAY_SECONDS
 
     DESTINATION_GUILD_IDS = _parse_int_set(settings.get("destination_guild_ids"))
     FETCHALL_DEFAULT_DEST_CATEGORY_ID = _get_int(settings, "fetchall_default_destination_category_id", 0)
@@ -113,3 +122,8 @@ def init(settings: Dict[str, Any]) -> None:
         FORWARD_ATTACHMENTS_MAX_FILES = 10
     if FORWARD_ATTACHMENTS_MAX_BYTES < 0:
         FORWARD_ATTACHMENTS_MAX_BYTES = 0
+    FETCHSYNC_AUTO_POLL_SECONDS = _get_int(settings, "fetchsync_auto_poll_seconds", 0)
+    FETCHALL_STARTUP_CLEAR_ENABLED = bool(settings.get("fetchall_startup_clear_enabled", False))
+    FETCHALL_STARTUP_CLEAR_CATEGORY_IDS = _parse_int_set(settings.get("fetchall_startup_clear_category_ids"))
+    FETCHALL_STARTUP_CLEAR_ONLY_MIRROR_CHANNELS = bool(settings.get("fetchall_startup_clear_only_mirror_channels", True))
+    FETCHALL_STARTUP_CLEAR_DELAY_SECONDS = _get_int(settings, "fetchall_startup_clear_delay_seconds", 0)

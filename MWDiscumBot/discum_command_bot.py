@@ -42,14 +42,14 @@ from discum_config import (
 )
 _CONFIG_RAW: Dict[str, str] = load_env_file(TOKENS_ENV_PATH)
 
-# Fetchall (prefix commands; no slash registration)
+# Fetchall (prefix commands; startup clear; auto-poller)
 try:
     import fetchall_config as _fetchall_cfg
-    from fetchall import run_fetchall, run_fetchsync, iter_fetchall_entries
+    from fetchall import run_fetchall, run_fetchsync, iter_fetchall_entries, run_startup_clear
     _FETCHALL_AVAILABLE = True
 except Exception as _e:
     _FETCHALL_AVAILABLE = False
-    run_fetchall = run_fetchsync = iter_fetchall_entries = None  # type: ignore
+    run_fetchall = run_fetchsync = iter_fetchall_entries = run_startup_clear = None  # type: ignore
 
 # Cache from source_channels.json (written by discumbot) for guild name only. Channel display is always <#channel_id>.
 _SOURCE_CHANNEL_FULL: Dict[int, Tuple[int, str]] = {}  # channel_id -> (guild_id, guild_name)
@@ -1086,6 +1086,51 @@ class DiscumCommandBot(commands.Bot):
         print(f"[INFO] Channel Mappings display: numbered list (1. <#id>, 2. <#id>...) — if you see 'Channel-XXXXX' the wrong code path is running")
         if _FETCHALL_AVAILABLE and USER_TOKEN:
             print(f"[INFO] Fetchall prefix commands: !fetchsync [source_guild_id]  !fetchall [source_guild_id]  (no slash registration needed)")
+        # Fetchall startup clear (same as DataManagerBot before transfer)
+        if _FETCHALL_AVAILABLE and run_startup_clear is not None and getattr(_fetchall_cfg, "FETCHALL_STARTUP_CLEAR_ENABLED", False):
+            try:
+                await run_startup_clear(self)
+            except Exception as e:
+                print(f"[WARN] Fetchall startup clear failed: {e}")
+        # Fetchall auto-poller (runs fetchsync every N seconds, same as DataManagerBot before)
+        poll_s = int(getattr(_fetchall_cfg, "FETCHSYNC_AUTO_POLL_SECONDS", 0) or 0)
+        if _FETCHALL_AVAILABLE and poll_s > 0 and USER_TOKEN and getattr(self, "_fetchsync_auto_task", None) is None:
+            async def _auto_fetchsync_loop() -> None:
+                await self.wait_until_ready()
+                while not self.is_closed():
+                    started = time.time()
+                    try:
+                        entries = list(iter_fetchall_entries())
+                    except Exception:
+                        entries = []
+                    dest_guild = None
+                    for gid in sorted(int(x) for x in (getattr(_fetchall_cfg, "DESTINATION_GUILD_IDS", set()) or set()) if int(x) > 0):
+                        dest_guild = self.get_guild(int(gid))
+                        if dest_guild is not None:
+                            break
+                    for entry in entries or []:
+                        try:
+                            await run_fetchsync(
+                                bot=self,
+                                entry=entry,
+                                destination_guild=dest_guild,
+                                source_user_token=USER_TOKEN,
+                                dryrun=False,
+                                progress_cb=None,
+                            )
+                        except Exception as e:
+                            print(f"[WARN] [FETCHSYNC] auto poll failed: {e}")
+                        await asyncio.sleep(1.0)
+                    elapsed = max(0.0, time.time() - started)
+                    sleep_for = float(poll_s) - float(elapsed)
+                    if sleep_for < 5.0:
+                        sleep_for = 5.0
+                    await asyncio.sleep(sleep_for)
+            try:
+                self._fetchsync_auto_task = asyncio.create_task(_auto_fetchsync_loop())
+                print(f"[INFO] Fetchsync auto-poller enabled: every {poll_s}s")
+            except Exception as e:
+                print(f"[WARN] Fetchsync auto-poller failed to start: {e}")
 
 # Log once at import so deploy can confirm this file is the one running (Channel Mappings use "1. <#id>")
 print("[discum_command_bot] loaded — Channel Mappings format: 1. <#id>, 2. <#id> ...")
