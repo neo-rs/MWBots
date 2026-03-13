@@ -35,6 +35,7 @@
     "fetchall_startup_clear_enabled": true,
     "fetchall_startup_clear_category_ids": [ 1437856372300451851 ],
     "fetchall_startup_clear_only_mirror_channels": true,
+    "fetchall_startup_clear_all_channels": true,
     "fetchall_startup_clear_delay_seconds": 2,
     "fetchsync_auto_poll_seconds": 60
 }

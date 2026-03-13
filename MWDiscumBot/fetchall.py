@@ -636,8 +636,10 @@ def get_fetchall_clear_category_ids(destination_guild, *, base_category_ids: Set
 
 async def run_startup_clear(bot) -> None:
     """
-    Optional startup cleanup for fetchall destination categories.
-    Safety: deletes ONLY channels whose topic starts with MIRROR: or "separator for".
+    Optional startup cleanup for fetchall destination categories. Runs before fetchsync so the
+    category is cleared first, then fetchall repopulates it.
+    - If FETCHALL_STARTUP_CLEAR_ALL_CHANNELS: delete ALL channels in target categories (full clear).
+    - Else if FETCHALL_STARTUP_CLEAR_ONLY_MIRROR_CHANNELS: delete only channels with topic MIRROR: or "separator for".
     Controlled by fetchall_config: FETCHALL_STARTUP_CLEAR_ENABLED, FETCHALL_STARTUP_CLEAR_CATEGORY_IDS, etc.
     """
     try:
@@ -670,6 +672,7 @@ async def run_startup_clear(bot) -> None:
     if not cat_ids:
         return
     only_mirror = bool(getattr(cfg, "FETCHALL_STARTUP_CLEAR_ONLY_MIRROR_CHANNELS", True))
+    clear_all = bool(getattr(cfg, "FETCHALL_STARTUP_CLEAR_ALL_CHANNELS", False))
     async with FETCHALL_MAINTENANCE_LOCK:
         try:
             FETCHALL_MAINTENANCE_EVENT.set()
@@ -680,7 +683,7 @@ async def run_startup_clear(bot) -> None:
             dest_guild_ids = sorted(int(x) for x in (getattr(cfg, "DESTINATION_GUILD_IDS", set()) or set()) if int(x) > 0)
         except Exception:
             dest_guild_ids = []
-        log_warn(f"[FETCHALL] startup clear begin categories={sorted(cat_ids)} only_mirror={only_mirror}")
+        log_warn(f"[FETCHALL] startup clear begin categories={sorted(cat_ids)} only_mirror={only_mirror} clear_all={clear_all}")
         for gid in dest_guild_ids:
             guild = bot.get_guild(int(gid))
             if guild is None:
@@ -706,11 +709,12 @@ async def run_startup_clear(bot) -> None:
                 except Exception:
                     pass
                 for ch in candidates:
-                    topic = str(getattr(ch, "topic", "") or "").strip()
-                    if only_mirror:
-                        if not (topic.startswith(MIRROR_TOPIC_PREFIX) or topic.lower().startswith("separator for")):
-                            skipped += 1
-                            continue
+                    if not clear_all:
+                        topic = str(getattr(ch, "topic", "") or "").strip()
+                        if only_mirror:
+                            if not (topic.startswith(MIRROR_TOPIC_PREFIX) or topic.lower().startswith("separator for")):
+                                skipped += 1
+                                continue
                     try:
                         await ch.delete(reason="MWDiscumBot startup clear fetchall mirrors")
                         deleted += 1

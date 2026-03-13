@@ -22,10 +22,13 @@ FORWARD_ATTACHMENTS_AS_FILES: bool = True
 FORWARD_ATTACHMENTS_MAX_FILES: int = 10
 FORWARD_ATTACHMENTS_MAX_BYTES: int = 7_500_000
 
-# Startup clear (optional): remove stale mirror/separator channels at bot ready
+# Startup clear (optional): remove channels in fetchall categories at bot ready, before fetchsync runs
 FETCHALL_STARTUP_CLEAR_ENABLED: bool = False
 FETCHALL_STARTUP_CLEAR_CATEGORY_IDS: Set[int] = set()
+# True = delete only channels with topic MIRROR: or "separator for". False = delete ALL channels in category (full clear, e.g. Daily Upcoming Drops).
 FETCHALL_STARTUP_CLEAR_ONLY_MIRROR_CHANNELS: bool = True
+# True = clear ALL channels in target categories (full clear first, then fetchall repopulates). Use for "Daily Upcoming Drops" style.
+FETCHALL_STARTUP_CLEAR_ALL_CHANNELS: bool = False
 FETCHALL_STARTUP_CLEAR_DELAY_SECONDS: int = 0
 
 
@@ -95,7 +98,7 @@ def init(settings: Dict[str, Any]) -> None:
     global SEND_MIN_INTERVAL_SECONDS, USE_WEBHOOKS_FOR_FORWARDING
     global FORWARD_ATTACHMENTS_AS_FILES, FORWARD_ATTACHMENTS_MAX_FILES, FORWARD_ATTACHMENTS_MAX_BYTES
     global FETCHALL_STARTUP_CLEAR_ENABLED, FETCHALL_STARTUP_CLEAR_CATEGORY_IDS
-    global FETCHALL_STARTUP_CLEAR_ONLY_MIRROR_CHANNELS, FETCHALL_STARTUP_CLEAR_DELAY_SECONDS
+    global FETCHALL_STARTUP_CLEAR_ONLY_MIRROR_CHANNELS, FETCHALL_STARTUP_CLEAR_ALL_CHANNELS, FETCHALL_STARTUP_CLEAR_DELAY_SECONDS
 
     DESTINATION_GUILD_IDS = _parse_int_set(settings.get("destination_guild_ids"))
     FETCHALL_DEFAULT_DEST_CATEGORY_ID = _get_int(settings, "fetchall_default_destination_category_id", 0)
@@ -126,4 +129,5 @@ def init(settings: Dict[str, Any]) -> None:
     FETCHALL_STARTUP_CLEAR_ENABLED = bool(settings.get("fetchall_startup_clear_enabled", False))
     FETCHALL_STARTUP_CLEAR_CATEGORY_IDS = _parse_int_set(settings.get("fetchall_startup_clear_category_ids"))
     FETCHALL_STARTUP_CLEAR_ONLY_MIRROR_CHANNELS = bool(settings.get("fetchall_startup_clear_only_mirror_channels", True))
+    FETCHALL_STARTUP_CLEAR_ALL_CHANNELS = bool(settings.get("fetchall_startup_clear_all_channels", False))
     FETCHALL_STARTUP_CLEAR_DELAY_SECONDS = _get_int(settings, "fetchall_startup_clear_delay_seconds", 0)
