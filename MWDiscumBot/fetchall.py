@@ -1384,6 +1384,7 @@ async def run_fetchall(
     destination_guild,
     source_user_token: Optional[str] = None,
     progress_cb: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+    prune_inactive: bool = True,
 ) -> Dict[str, Any]:
     """
     Basic fetch-all (standalone):
@@ -1808,7 +1809,7 @@ async def run_fetchall(
                 should_delete = True
             elif require_date and _is_channel_date_stale(ch_name):
                 should_delete = True
-            elif await _is_mirror_channel_inactive(mirror_ch, days=float(_INACTIVE_PRUNE_DAYS)):
+            elif prune_inactive and await _is_mirror_channel_inactive(mirror_ch, days=float(_INACTIVE_PRUNE_DAYS)):
                 should_delete = True
             if should_delete:
                 try:

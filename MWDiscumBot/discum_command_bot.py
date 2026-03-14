@@ -1192,7 +1192,7 @@ class DiscumCommandBot(commands.Bot):
                 first_tick = True
                 while not self.is_closed():
                     if first_tick:
-                        print(f"[FETCHALL] Auto-poller first tick (fetchsync running)", flush=True)
+                        print(f"[FETCHALL] Auto-poller first tick (fetchall create+prune, then fetchsync)", flush=True)
                         first_tick = False
                     started = time.time()
                     try:
@@ -1206,6 +1206,18 @@ class DiscumCommandBot(commands.Bot):
                             break
                     for entry in entries or []:
                         try:
+                            await run_fetchall(
+                                bot=self,
+                                entry=entry,
+                                destination_guild=dest_guild,
+                                source_user_token=effective_user_token,
+                                progress_cb=None,
+                                prune_inactive=False,
+                            )
+                        except Exception as e:
+                            print(f"[WARN] [FETCHALL] auto poll (create+prune) failed: {e}", flush=True)
+                        await asyncio.sleep(1.0)
+                        try:
                             await run_fetchsync(
                                 bot=self,
                                 entry=entry,
@@ -1215,7 +1227,7 @@ class DiscumCommandBot(commands.Bot):
                                 progress_cb=None,
                             )
                         except Exception as e:
-                            print(f"[WARN] [FETCHSYNC] auto poll failed: {e}")
+                            print(f"[WARN] [FETCHSYNC] auto poll failed: {e}", flush=True)
                         await asyncio.sleep(1.0)
                     elapsed = max(0.0, time.time() - started)
                     sleep_for = float(poll_s) - float(elapsed)
