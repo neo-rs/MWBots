@@ -10,11 +10,14 @@ from patterns import (
     ALL_STORE_PATTERN,
     AMAZON_ASIN_PATTERN,
     AMAZON_LINK_PATTERN,
+    AMAZON_PROFITABLE_INDICATOR_PATTERN,
     CARDS_PATTERN,
     DISCOUNTED_STORE_PATTERN,
     INSTORE_KEYWORDS,
     LABEL_PATTERN,
     MAJOR_STORE_PATTERN,
+    PRICE_ERROR_PATTERN,
+    PROFITABLE_FLIP_PATTERN,
     SEASONAL_PATTERN,
     SNEAKERS_PATTERN,
     STORE_DOMAINS,
@@ -328,9 +331,18 @@ def select_target_channel_id(
         except Exception:
             pass
 
-    # 1) AMAZON (strict)
+    # 0) PRICE_ERROR / glitched (high priority, any store)
+    if cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID and PRICE_ERROR_PATTERN.search(text_blob):
+        if trace is not None:
+            try:
+                trace.setdefault("classifier", {}).setdefault("matches", {})["price_error"] = True
+            except Exception:
+                pass
+        return cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID, "PRICE_ERROR"
+
+    # 1) AMAZON (strict) – profitable flips → AMAZON_PROFITABLE_LEADS
     amazon_match = AMAZON_LINK_PATTERN.search(text_blob) if not skip_amazon else None
-    if amazon_match and cfg.SMARTFILTER_AMAZON_CHANNEL_ID:
+    if amazon_match and (cfg.SMARTFILTER_AMAZON_CHANNEL_ID or cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID):
         matched = amazon_match.group(0).lower()
         if ("amazon." in matched or "amzn.to" in matched or "a.co" in matched or matched.startswith("b0")) and _is_amazon_primary(text_blob):
             if trace is not None:
@@ -338,7 +350,13 @@ def select_target_channel_id(
                     trace.setdefault("classifier", {}).setdefault("matches", {})["amazon"] = matched[:200]
                 except Exception:
                     pass
-            return cfg.SMARTFILTER_AMAZON_CHANNEL_ID, "AMAZON"
+            is_profitable = bool(
+                PROFITABLE_FLIP_PATTERN.search(text_blob) or AMAZON_PROFITABLE_INDICATOR_PATTERN.search(text_blob)
+            )
+            if is_profitable and cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID:
+                return cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID, "AMAZON_PROFITABLE_LEADS"
+            if cfg.SMARTFILTER_AMAZON_CHANNEL_ID:
+                return cfg.SMARTFILTER_AMAZON_CHANNEL_ID, "AMAZON"
 
     # 2) MONITORED_KEYWORD
     keyword_hit = bool(keywords_list and check_keyword_match(text_blob, keywords_list, trace=trace))
@@ -519,13 +537,28 @@ def detect_all_link_types(
         except Exception:
             pass
 
+    # PRICE_ERROR / glitched (add early for order_link_types priority)
+    if cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID and PRICE_ERROR_PATTERN.search(text_blob):
+        results.append((cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID, "PRICE_ERROR"))
+        if trace is not None:
+            try:
+                trace.setdefault("classifier", {}).setdefault("matches", {})["price_error"] = True
+            except Exception:
+                pass
+
     amazon_detected = False
     amazon_match = AMAZON_LINK_PATTERN.search(text_blob) if not skip_amazon else None
-    if amazon_match and cfg.SMARTFILTER_AMAZON_CHANNEL_ID:
+    if amazon_match and (cfg.SMARTFILTER_AMAZON_CHANNEL_ID or cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID):
         matched = amazon_match.group(0).lower()
         if ("amazon." in matched or "amzn.to" in matched or "a.co" in matched or matched.startswith("b0")) and _is_amazon_primary(text_blob):
             amazon_detected = True
-            results.append((cfg.SMARTFILTER_AMAZON_CHANNEL_ID, "AMAZON"))
+            is_profitable = bool(
+                PROFITABLE_FLIP_PATTERN.search(text_blob) or AMAZON_PROFITABLE_INDICATOR_PATTERN.search(text_blob)
+            )
+            if is_profitable and cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID:
+                results.append((cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID, "AMAZON_PROFITABLE_LEADS"))
+            elif cfg.SMARTFILTER_AMAZON_CHANNEL_ID:
+                results.append((cfg.SMARTFILTER_AMAZON_CHANNEL_ID, "AMAZON"))
             if trace is not None:
                 try:
                     trace.setdefault("classifier", {}).setdefault("matches", {})["amazon"] = matched[:200]
@@ -622,9 +655,9 @@ def detect_all_link_types(
                         pass
                 results.append((cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID, "AFFILIATED_LINKS"))
 
-    # If Amazon detected, suppress all other local destinations
-    if any(tag == "AMAZON" for _, tag in results):
-        results = [(cid, tag) for cid, tag in results if tag == "AMAZON"]
+    # If Amazon detected, suppress other store destinations (keep PRICE_ERROR as it can co-exist)
+    if any(tag in ("AMAZON", "AMAZON_PROFITABLE_LEADS") for _, tag in results):
+        results = [(cid, tag) for cid, tag in results if tag in ("AMAZON", "AMAZON_PROFITABLE_LEADS", "PRICE_ERROR")]
 
     # DEFAULT fallback if nothing
     if not results:

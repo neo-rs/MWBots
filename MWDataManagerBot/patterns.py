@@ -280,6 +280,11 @@ PROFITABLE_FLIP_PATTERN = re.compile(
     r"\b(200%|300%|400%|500%|\d{3,}%|3x|4x|5x|\d+x\s*retail|high\s*roi|exceptional\s*margin|great\s*flip|easy\s*money|quick\s*flip)\b",
     re.IGNORECASE,
 )
+# Amazon profitable flip indicators (Keepa-style: avg 30, % drop, etc.)
+AMAZON_PROFITABLE_INDICATOR_PATTERN = re.compile(
+    r"\b(avg\s*30|average\s*30|avg\s*365|\d+%\s*drop|\d+%\s*off|amazon\s*sold|flip\s*alert)\b",
+    re.IGNORECASE,
+)
 
 # Store lists (subset; mirrors global_filters)
 MAJOR_STORES = [
