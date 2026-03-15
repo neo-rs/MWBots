@@ -318,14 +318,12 @@ async def run_report(bot: discord.Client, user_token: str) -> None:
         except Exception as e:
             _progress(f"Could not get output channel: {e}")
             return
-    num_msgs = (len(all_embeds) + 9) // 10
-    _progress(f"Sending {len(all_embeds)} embed(s) in {num_msgs} message(s)...")
-    for i in range(0, len(all_embeds), 10):
-        chunk = all_embeds[i : i + 10]
-        msg_num = (i // 10) + 1
+    # One embed per message so we stay under Discord's 6000 total-embed-size limit per message
+    _progress(f"Sending {len(all_embeds)} embed(s) (1 per message, 1 guild per message)...")
+    for i, embed in enumerate(all_embeds):
         try:
-            await channel.send(embeds=chunk)
-            _progress(f"  sent message {msg_num}/{num_msgs}.")
+            await channel.send(embed=embed)
+            _progress(f"  sent message {i + 1}/{len(all_embeds)}.")
         except Exception as e:
             _progress(f"Send error: {e}")
     _progress(f"Done. Sent {len(all_embeds)} embed(s) to channel {OUTPUT_CHANNEL_ID}.")

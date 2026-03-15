@@ -797,7 +797,7 @@ class WebhookUpdateModal(discord.ui.Modal, title="Update Webhook URL"):
 
 
 class QuickMapModal(discord.ui.Modal, title="Quick channel mapping"):
-    """Modal for g / s / d inputs when user clicks « Map again? »."""
+    """Modal for g / s / d inputs when user clicks « Map again? » or Same guild & dest."""
 
     guild_id_input = discord.ui.TextInput(
         label="Guild ID",
@@ -818,10 +818,24 @@ class QuickMapModal(discord.ui.Modal, title="Quick channel mapping"):
         max_length=22,
     )
 
-    def __init__(self, bot_obj: commands.Bot, owner_id: int):
+    def __init__(
+        self,
+        bot_obj: commands.Bot,
+        owner_id: int,
+        *,
+        default_guild_id: Optional[int] = None,
+        default_source_id: Optional[int] = None,
+        default_dest_id: Optional[int] = None,
+    ):
         super().__init__()
         self.bot_obj = bot_obj
         self.owner_id = owner_id
+        if default_guild_id:
+            self.guild_id_input.default = str(default_guild_id)
+        if default_source_id:
+            self.source_id_input.default = str(default_source_id)
+        if default_dest_id:
+            self.dest_id_input.default = str(default_dest_id)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if int(interaction.user.id) != self.owner_id:
@@ -840,27 +854,143 @@ class QuickMapModal(discord.ui.Modal, title="Quick channel mapping"):
         if not ok:
             await _safe_send_ephemeral(interaction, f"❌ {err}")
             return
-        view = MapAgainView(self.bot_obj, self.owner_id)
+        view = MapAgainView(self.bot_obj, self.owner_id, last_guild_id=gid, last_dest_id=did)
         if _resp_done(interaction):
             await interaction.followup.send(embed=embed, view=view, ephemeral=True)
         else:
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
-class MapAgainView(discord.ui.View):
-    """Single « Map again? » button that opens QuickMapModal."""
+class _GuildSelectMapAgainView(discord.ui.View):
+    """Dropdown of guilds; on select open QuickMapModal with that guild and same destination."""
 
-    def __init__(self, bot_obj: commands.Bot, owner_id: int):
+    def __init__(
+        self,
+        bot_obj: commands.Bot,
+        owner_id: int,
+        guilds: List[Dict[str, Any]],
+        last_dest_id: Optional[int],
+    ):
         super().__init__(timeout=300)
         self.bot_obj = bot_obj
         self.owner_id = owner_id
+        self.last_dest_id = last_dest_id
+        opts = []
+        for g in guilds[:25]:
+            gid = int(g.get("id") or 0)
+            if gid <= 0:
+                continue
+            name = (str(g.get("name") or "") or f"Guild {gid}").strip()[:100]
+            opts.append(discord.SelectOption(label=name, value=str(gid), description=str(gid)))
+        if opts:
+            sel = discord.ui.Select(
+                placeholder="Select a guild (same destination will be pre-filled)",
+                options=opts,
+                row=0,
+            )
+            sel.callback = self._on_select
+            self.add_item(sel)
 
-    @discord.ui.button(label="Map again?", style=discord.ButtonStyle.primary, emoji="🗺️")
+    async def _on_select(self, interaction: discord.Interaction) -> None:
+        if int(interaction.user.id) != self.owner_id:
+            await _safe_send_ephemeral(interaction, "❌ This menu is not for you.")
+            return
+        vals = interaction.data.get("values") or []
+        if not vals:
+            return
+        try:
+            gid = int(vals[0])
+        except (ValueError, TypeError):
+            return
+        modal = QuickMapModal(
+            self.bot_obj,
+            self.owner_id,
+            default_guild_id=gid,
+            default_dest_id=self.last_dest_id,
+        )
+        await interaction.response.send_modal(modal)
+
+
+class MapAgainView(discord.ui.View):
+    """Map again? + Same guild & dest + Choose guild (dropdown)."""
+
+    def __init__(
+        self,
+        bot_obj: commands.Bot,
+        owner_id: int,
+        *,
+        last_guild_id: Optional[int] = None,
+        last_dest_id: Optional[int] = None,
+    ):
+        super().__init__(timeout=300)
+        self.bot_obj = bot_obj
+        self.owner_id = owner_id
+        self.last_guild_id = last_guild_id
+        self.last_dest_id = last_dest_id
+
+    @discord.ui.button(label="Map again?", style=discord.ButtonStyle.primary, emoji="🗺️", row=0)
     async def map_again(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         if int(interaction.user.id) != self.owner_id:
             await _safe_send_ephemeral(interaction, "❌ This button is not for you.")
             return
         await interaction.response.send_modal(QuickMapModal(self.bot_obj, self.owner_id))
+
+    @discord.ui.button(label="Same guild & dest", style=discord.ButtonStyle.secondary, row=0)
+    async def same_guild_dest(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        if int(interaction.user.id) != self.owner_id:
+            await _safe_send_ephemeral(interaction, "❌ This button is not for you.")
+            return
+        if not self.last_guild_id or not self.last_dest_id:
+            await _safe_send_ephemeral(interaction, "❌ No previous guild/destination to reuse.")
+            return
+        modal = QuickMapModal(
+            self.bot_obj,
+            self.owner_id,
+            default_guild_id=self.last_guild_id,
+            default_dest_id=self.last_dest_id,
+        )
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Choose guild…", style=discord.ButtonStyle.secondary, row=0)
+    async def choose_guild(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        if int(interaction.user.id) != self.owner_id:
+            await _safe_send_ephemeral(interaction, "❌ This button is not for you.")
+            return
+        await interaction.response.defer(ephemeral=True)
+        user_token = _get_browse_user_token()
+        if not user_token:
+            await _safe_send_ephemeral(
+                interaction,
+                "❌ Cannot list guilds (missing user token). Use « Map again? » and enter IDs manually.",
+            )
+            return
+        try:
+            from discord_user_api import list_user_guilds
+            info = await list_user_guilds(user_token=user_token)
+        except Exception as e:
+            await _safe_send_ephemeral(interaction, f"❌ Failed to load guilds: {e}")
+            return
+        if not info.get("ok"):
+            await _safe_send_ephemeral(interaction, f"❌ Could not list guilds: {info.get('reason', 'unknown')}")
+            return
+        guilds = info.get("guilds") or []
+        if not guilds:
+            await _safe_send_ephemeral(interaction, "❌ No guilds found for the user token.")
+            return
+        view = _GuildSelectMapAgainView(
+            self.bot_obj,
+            self.owner_id,
+            guilds,
+            self.last_dest_id,
+        )
+        if not view.children:
+            await _safe_send_ephemeral(interaction, "❌ No guilds to show.")
+            return
+        await interaction.followup.send(
+            "Select a guild (destination will be pre-filled from previous mapping):",
+            view=view,
+            ephemeral=True,
+        )
 
 
 def _ui_embed(title: str, description: str = "", *, color: int = 0x5865F2) -> discord.Embed:
@@ -1268,7 +1398,12 @@ class DiscumCommandBot(commands.Bot):
             _log_channel_mapping(f"Quick map: g={guild_id} s={source_id} d={dest_id}")
             ok, err, embed = await _do_quick_map(self, guild_id, source_id, dest_id)
             if ok and embed is not None:
-                view = MapAgainView(self, message.author.id)
+                view = MapAgainView(
+                    self,
+                    message.author.id,
+                    last_guild_id=guild_id,
+                    last_dest_id=dest_id,
+                )
                 await message.reply(embed=embed, view=view)
             else:
                 await message.reply(f"❌ {err}" if err else "❌ Mapping failed.")
