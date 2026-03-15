@@ -355,6 +355,8 @@ def select_target_channel_id(
             )
             if is_profitable and cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID:
                 return cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID, "AMAZON_PROFITABLE_LEADS"
+            if cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID:
+                return cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID, "AMAZON_FALLBACK"
             if cfg.SMARTFILTER_AMAZON_CHANNEL_ID:
                 return cfg.SMARTFILTER_AMAZON_CHANNEL_ID, "AMAZON"
 
@@ -557,6 +559,8 @@ def detect_all_link_types(
             )
             if is_profitable and cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID:
                 results.append((cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID, "AMAZON_PROFITABLE_LEADS"))
+            elif cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID:
+                results.append((cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID, "AMAZON_FALLBACK"))
             elif cfg.SMARTFILTER_AMAZON_CHANNEL_ID:
                 results.append((cfg.SMARTFILTER_AMAZON_CHANNEL_ID, "AMAZON"))
             if trace is not None:
@@ -656,8 +660,8 @@ def detect_all_link_types(
                 results.append((cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID, "AFFILIATED_LINKS"))
 
     # If Amazon detected, suppress other store destinations (keep PRICE_ERROR as it can co-exist)
-    if any(tag in ("AMAZON", "AMAZON_PROFITABLE_LEADS") for _, tag in results):
-        results = [(cid, tag) for cid, tag in results if tag in ("AMAZON", "AMAZON_PROFITABLE_LEADS", "PRICE_ERROR")]
+    if any(tag in ("AMAZON", "AMAZON_PROFITABLE_LEADS", "AMAZON_FALLBACK") for _, tag in results):
+        results = [(cid, tag) for cid, tag in results if tag in ("AMAZON", "AMAZON_PROFITABLE_LEADS", "AMAZON_FALLBACK", "PRICE_ERROR")]
 
     # DEFAULT fallback if nothing
     if not results:

@@ -301,16 +301,11 @@ def detect_global_triggers(
                     {**sf_ctx, "reason": "amazon_content_blocked_from_flips"},
                 )
             else:
-                # Log as a skip so you can see why flips didn't fire.
+                # Log once: Amazon content is excluded from both flip channels.
                 log_smartfilter(
-                    "PROFITABLE_FLIP",
+                    "FLIP_CHANNELS",
                     "SKIP",
-                    {**sf_ctx, "reason": "amazon_content_excluded"},
-                )
-                log_smartfilter(
-                    "LUNCHMONEY_FLIP",
-                    "SKIP",
-                    {**sf_ctx, "reason": "amazon_content_excluded"},
+                    {**sf_ctx, "reason": "amazon_content_excluded", "affected": ["PROFITABLE_FLIP", "LUNCHMONEY_FLIP"]},
                 )
             # Always skip flip evaluation for Amazon content.
             pass

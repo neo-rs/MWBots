@@ -262,11 +262,7 @@ THEATRE_CONTEXT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Global triggers
-FULL_SEND_PATTERN = re.compile(
-    r"\b(price\s+error|glitch|instant\s+sellout|live\s+early|went\s+live\s+again|surprise\s+drop|surprise\s+release)\b",
-    re.IGNORECASE,
-)
+# Global triggers (FULL_SEND removed; PRICE_ERROR is the canonical glitch/price-error trigger)
 PRICE_ERROR_PATTERN = re.compile(
     r"\b(bugged|wrong\s+price|accidental\s+drop|underpriced|checkout\s+working|error\s+price|"
     r"price\s+error|messed\s+up|mispriced|glitched\s+price|stack(?:ed|ing)\s+glitch|glitch(?:ed)?)\b",

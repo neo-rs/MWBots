@@ -42,7 +42,7 @@
   "fetchall_startup_clear_only_mirror_channels": true,
   "fetchall_startup_clear_delay_seconds": 2,
   "send_min_interval_seconds": 0.75,
-  "enable_default_fallback": false,
+  "enable_default_fallback": true,
   "enable_raw_link_unwrap": true,
   "mirrorworld_route_online": {
     "1438969997178306661": 1438969997178306661,
@@ -60,7 +60,7 @@
   "smartfilter_destinations": {
     "AMAZON": 1435066421133443174,
     "AMAZON_FALLBACK": 1438433667067150416,
-    "AFFILIATED_LINKS": 1435308472639160522,
+    "AFFILIATED_LINKS": 1438969997178306661,
     "UPCOMING": 1434974811695747173,
     "INSTORE_LEADS": 1438433642408841329,
     "INSTORE_SEASONAL": 1435984551217205309,
@@ -70,7 +70,7 @@
     "MAJOR_STORES": 1434974833019457707,
     "DISCOUNTED_STORES": 1434974822311661719,
     "MONITORED_KEYWORD": 1434974878833967227,
-    "DEFAULT": 1435066509860012073
+    "DEFAULT": 1438970053352751215
   },
   "global_trigger_destinations": {
     "PRICE_ERROR": 1435985494356918333,
@@ -85,5 +85,5 @@
   "fetchall_max_messages_per_channel": 400,
   "fetchsync_auto_poll_seconds": 60,
   "edit_cooldown_seconds": 30,
-  "fallback_channel_id": 1435066509860012073
+  "fallback_channel_id": 1438970053352751215
 }
