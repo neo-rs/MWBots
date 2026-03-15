@@ -261,6 +261,94 @@ def _parse_channel_id(text: str) -> int:
     return int(m.group(1)) if m else 0
 
 
+def _parse_id_from_text(text: str) -> int:
+    """Extract first numeric ID from text (e.g. from modal inputs). Accepts any length of digits."""
+    s = str(text or "").strip()
+    if not s:
+        return 0
+    m = re.search(r"(\d+)", s)
+    return int(m.group(1)) if m else 0
+
+
+# Quick-map message pattern: !g<gid> s<sid> d<did> (IDs as numbers or <#id>)
+_QUICK_MAP_PATTERN = re.compile(
+    r"^!\s*g\s*(?:<#)?(\d+)>?\s+s\s*(?:<#)?(\d+)>?\s+d\s*(?:<#)?(\d+)>?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _parse_quick_map_message(content: str) -> Optional[Tuple[int, int, int]]:
+    """Parse !g<gid> s<sid> d<did> from message. Returns (guild_id, source_channel_id, dest_channel_id) or None."""
+    if not content or not content.strip().lower().startswith("!g"):
+        return None
+    m = _QUICK_MAP_PATTERN.match(str(content).strip())
+    if not m:
+        return None
+    try:
+        gid, sid, did = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if gid <= 0 or sid <= 0 or did <= 0:
+            return None
+        return (gid, sid, did)
+    except (ValueError, TypeError):
+        return None
+
+
+async def _do_quick_map(
+    bot_obj: commands.Bot,
+    guild_id: int,
+    source_channel_id: int,
+    dest_channel_id: int,
+) -> Tuple[bool, str, Optional[discord.Embed]]:
+    """
+    Add one channel mapping: source_channel_id -> webhook in dest_channel_id.
+    Returns (success, error_message_or_empty, success_embed_or_None).
+    """
+    dest = bot_obj.get_channel(dest_channel_id)
+    if dest is None:
+        try:
+            dest = await bot_obj.fetch_channel(dest_channel_id)
+        except Exception:
+            return (False, "Destination channel not found or bot has no access.", None)
+    if dest is None or not hasattr(dest, "create_webhook"):
+        return (False, "Destination is not a text channel or webhooks are not allowed.", None)
+    try:
+        wh_list = await dest.webhooks()
+        wh_url = None
+        for w in wh_list:
+            if getattr(w, "name", None) == "MWDiscumBot":
+                wh_url = getattr(w, "url", None)
+                break
+        if not wh_url:
+            wh = await dest.create_webhook(name="MWDiscumBot", reason="Quick channel mapping")
+            wh_url = wh.url if wh else None
+        if not wh_url:
+            return (False, "Could not create or reuse webhook (need Manage Webhooks).", None)
+        channel_map = _load_channel_map()
+        channel_map[int(source_channel_id)] = str(wh_url)
+        if not _save_channel_map(channel_map):
+            return (False, "Failed to save channel_map.json.", None)
+        ensure_discum_source_guild_id(guild_id)
+    except discord.Forbidden as e:
+        return (False, f"Permission denied: {e}", None)
+    except Exception as e:
+        return (False, str(e), None)
+    _load_source_channel_names()
+    guild_name = _SOURCE_GUILD_NAMES.get(guild_id) or (bot_obj.get_guild(guild_id) and bot_obj.get_guild(guild_id).name) or f"Guild {guild_id}"
+    dest_name = getattr(dest, "name", None) or f"channel-{dest_channel_id}"
+    embed = discord.Embed(
+        title="✅ Mapping added",
+        description=(
+            f"**Guild:** {guild_name}\n"
+            f"**Source:** {_format_channel_mention(source_channel_id)}\n"
+            f"**Destination:** {_format_channel_mention(dest_channel_id)} ({dest_name})\n\n"
+            "DiscumBot will forward messages from the source channel to the destination."
+        ),
+        color=0x57F287,
+    )
+    embed.set_footer(text="Click « Map again? » to add another mapping.")
+    return (True, "", embed)
+
+
 def _preview_line_from_message(msg: Dict[str, Any]) -> str:
     content = str(msg.get("content") or "").strip()
     content = re.sub(r"\s+", " ", content).strip()
@@ -707,6 +795,74 @@ class WebhookUpdateModal(discord.ui.Modal, title="Update Webhook URL"):
         except Exception as e:
             await _safe_send_ephemeral(interaction, f"❌ Error: {e}")
 
+
+class QuickMapModal(discord.ui.Modal, title="Quick channel mapping"):
+    """Modal for g / s / d inputs when user clicks « Map again? »."""
+
+    guild_id_input = discord.ui.TextInput(
+        label="Guild ID",
+        placeholder="e.g. 1234567890123456789",
+        required=True,
+        max_length=22,
+    )
+    source_id_input = discord.ui.TextInput(
+        label="Source channel ID",
+        placeholder="e.g. 9876543210987654321",
+        required=True,
+        max_length=22,
+    )
+    dest_id_input = discord.ui.TextInput(
+        label="Destination channel ID",
+        placeholder="e.g. 1111222233334444555",
+        required=True,
+        max_length=22,
+    )
+
+    def __init__(self, bot_obj: commands.Bot, owner_id: int):
+        super().__init__()
+        self.bot_obj = bot_obj
+        self.owner_id = owner_id
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if int(interaction.user.id) != self.owner_id:
+            await _safe_send_ephemeral(interaction, "❌ This form is not for you.")
+            return
+        gid = _parse_id_from_text(str(self.guild_id_input.value or ""))
+        sid = _parse_id_from_text(str(self.source_id_input.value or ""))
+        did = _parse_id_from_text(str(self.dest_id_input.value or ""))
+        if gid <= 0 or sid <= 0 or did <= 0:
+            await _safe_send_ephemeral(
+                interaction,
+                "❌ Please enter valid numeric IDs (Guild, Source channel, Destination channel).",
+            )
+            return
+        ok, err, embed = await _do_quick_map(self.bot_obj, gid, sid, did)
+        if not ok:
+            await _safe_send_ephemeral(interaction, f"❌ {err}")
+            return
+        view = MapAgainView(self.bot_obj, self.owner_id)
+        if _resp_done(interaction):
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+class MapAgainView(discord.ui.View):
+    """Single « Map again? » button that opens QuickMapModal."""
+
+    def __init__(self, bot_obj: commands.Bot, owner_id: int):
+        super().__init__(timeout=300)
+        self.bot_obj = bot_obj
+        self.owner_id = owner_id
+
+    @discord.ui.button(label="Map again?", style=discord.ButtonStyle.primary, emoji="🗺️")
+    async def map_again(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        if int(interaction.user.id) != self.owner_id:
+            await _safe_send_ephemeral(interaction, "❌ This button is not for you.")
+            return
+        await interaction.response.send_modal(QuickMapModal(self.bot_obj, self.owner_id))
+
+
 def _ui_embed(title: str, description: str = "", *, color: int = 0x5865F2) -> discord.Embed:
     return discord.Embed(title=str(title or "Discum"), description=(str(description) or None), color=int(color))
 
@@ -1100,6 +1256,24 @@ class DiscumCommandBot(commands.Bot):
                 await ctx.send(f"[FETCHALL] Command failed: {msg[:400]}")
         except Exception:
             pass
+
+    async def on_message(self, message: discord.Message) -> None:
+        """Handle quick channel mapping: !g<gid> s<sid> d<did>."""
+        if message.author.bot:
+            await self.process_commands(message)
+            return
+        parsed = _parse_quick_map_message(message.content or "")
+        if parsed is not None:
+            guild_id, source_id, dest_id = parsed
+            _log_channel_mapping(f"Quick map: g={guild_id} s={source_id} d={dest_id}")
+            ok, err, embed = await _do_quick_map(self, guild_id, source_id, dest_id)
+            if ok and embed is not None:
+                view = MapAgainView(self, message.author.id)
+                await message.reply(embed=embed, view=view)
+            else:
+                await message.reply(f"❌ {err}" if err else "❌ Mapping failed.")
+            return
+        await self.process_commands(message)
 
     async def on_ready(self) -> None:
         global run_fetchsync, run_fetchall, iter_fetchall_entries, _FETCHALL_AVAILABLE
