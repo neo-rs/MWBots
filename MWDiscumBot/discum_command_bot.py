@@ -270,25 +270,32 @@ def _parse_id_from_text(text: str) -> int:
     return int(m.group(1)) if m else 0
 
 
-# Quick-map message pattern: !g<gid> s<sid> d<did> (IDs as numbers or <#id>)
-_QUICK_MAP_PATTERN = re.compile(
-    r"^!\s*g\s*(?:<#)?(\d+)>?\s+s\s*(?:<#)?(\d+)>?\s+d\s*(?:<#)?(\d+)>?\s*$",
-    re.IGNORECASE,
+# Quick-map: !g <gid> s <sid> [sid ...] d <did>  (multiple sources → one destination)
+_QUICK_MAP_MULTI_PATTERN = re.compile(
+    r"^!\s*g\s*(?:<#)?(\d+)>?\s+s\s+(.+?)\s+d\s*(?:<#)?(\d+)>?\s*$",
+    re.IGNORECASE | re.DOTALL,
 )
 
 
-def _parse_quick_map_message(content: str) -> Optional[Tuple[int, int, int]]:
-    """Parse !g<gid> s<sid> d<did> from message. Returns (guild_id, source_channel_id, dest_channel_id) or None."""
+def _parse_quick_map_message(content: str) -> Optional[Tuple[int, List[int], int]]:
+    """Parse !g<gid> s<sid> [sid ...] d<did>. Returns (guild_id, [source_channel_ids], dest_channel_id) or None."""
     if not content or not content.strip().lower().startswith("!g"):
         return None
-    m = _QUICK_MAP_PATTERN.match(str(content).strip())
+    raw = str(content).strip()
+    m = _QUICK_MAP_MULTI_PATTERN.match(raw)
     if not m:
         return None
     try:
-        gid, sid, did = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        if gid <= 0 or sid <= 0 or did <= 0:
+        gid = int(m.group(1))
+        did = int(m.group(3))
+        if gid <= 0 or did <= 0:
             return None
-        return (gid, sid, did)
+        # Middle part: one or more IDs (space-separated or <#id>)
+        middle = m.group(2).strip()
+        ids = [int(x) for x in re.findall(r"\d+", middle) if int(x) > 0]
+        if not ids:
+            return None
+        return (gid, ids, did)
     except (ValueError, TypeError):
         return None
 
@@ -342,6 +349,66 @@ async def _do_quick_map(
             f"**Source:** {_format_channel_mention(source_channel_id)}\n"
             f"**Destination:** {_format_channel_mention(dest_channel_id)} ({dest_name})\n\n"
             "DiscumBot will forward messages from the source channel to the destination."
+        ),
+        color=0x57F287,
+    )
+    embed.set_footer(text="Click « Map again? » to add another mapping.")
+    return (True, "", embed)
+
+
+async def _do_quick_map_multi(
+    bot_obj: commands.Bot,
+    guild_id: int,
+    source_channel_ids: List[int],
+    dest_channel_id: int,
+) -> Tuple[bool, str, Optional[discord.Embed]]:
+    """
+    Map multiple source channels to one destination. Gets webhook once, adds all sources.
+    Returns (success, error_message_or_empty, success_embed_or_None).
+    """
+    if not source_channel_ids:
+        return (False, "No source channels.", None)
+    dest = bot_obj.get_channel(dest_channel_id)
+    if dest is None:
+        try:
+            dest = await bot_obj.fetch_channel(dest_channel_id)
+        except Exception:
+            return (False, "Destination channel not found or bot has no access.", None)
+    if dest is None or not hasattr(dest, "create_webhook"):
+        return (False, "Destination is not a text channel or webhooks are not allowed.", None)
+    try:
+        wh_list = await dest.webhooks()
+        wh_url = None
+        for w in wh_list:
+            if getattr(w, "name", None) == "MWDiscumBot":
+                wh_url = getattr(w, "url", None)
+                break
+        if not wh_url:
+            wh = await dest.create_webhook(name="MWDiscumBot", reason="Quick channel mapping")
+            wh_url = wh.url if wh else None
+        if not wh_url:
+            return (False, "Could not create or reuse webhook (need Manage Webhooks).", None)
+        channel_map = _load_channel_map()
+        for sid in source_channel_ids:
+            channel_map[int(sid)] = str(wh_url)
+        if not _save_channel_map(channel_map):
+            return (False, "Failed to save channel_map.json.", None)
+        ensure_discum_source_guild_id(guild_id)
+    except discord.Forbidden as e:
+        return (False, f"Permission denied: {e}", None)
+    except Exception as e:
+        return (False, str(e), None)
+    _load_source_channel_names()
+    guild_name = _SOURCE_GUILD_NAMES.get(guild_id) or (bot_obj.get_guild(guild_id) and bot_obj.get_guild(guild_id).name) or f"Guild {guild_id}"
+    dest_name = getattr(dest, "name", None) or f"channel-{dest_channel_id}"
+    sources_line = " ".join(_format_channel_mention(sid) for sid in source_channel_ids)
+    embed = discord.Embed(
+        title="✅ Mapping added",
+        description=(
+            f"**Guild:** {guild_name}\n"
+            f"**Source(s):** {sources_line}\n"
+            f"**Destination:** {_format_channel_mention(dest_channel_id)} ({dest_name})\n\n"
+            "DiscumBot will forward messages from the source channel(s) to the destination."
         ),
         color=0x57F287,
     )
@@ -1394,9 +1461,9 @@ class DiscumCommandBot(commands.Bot):
             return
         parsed = _parse_quick_map_message(message.content or "")
         if parsed is not None:
-            guild_id, source_id, dest_id = parsed
-            _log_channel_mapping(f"Quick map: g={guild_id} s={source_id} d={dest_id}")
-            ok, err, embed = await _do_quick_map(self, guild_id, source_id, dest_id)
+            guild_id, source_ids, dest_id = parsed
+            _log_channel_mapping(f"Quick map: g={guild_id} s={source_ids} d={dest_id}")
+            ok, err, embed = await _do_quick_map_multi(self, guild_id, source_ids, dest_id)
             if ok and embed is not None:
                 view = MapAgainView(
                     self,
