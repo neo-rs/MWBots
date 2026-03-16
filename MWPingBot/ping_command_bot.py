@@ -23,6 +23,7 @@ from discord.ext import commands
 from ping_config import (
     SETTINGS_PATH,
     TOKENS_ENV_PATH,
+    append_pingbot_journal,
     load_env_file,
     load_settings,
     save_settings,
@@ -84,6 +85,20 @@ bot = PingCommandBot()
 
 async def _ping_settings_impl(interaction: discord.Interaction, action: app_commands.Choice[str], bot_obj: commands.Bot):
     """Shared handler for /ping settings (used by standalone bot or when registered on main pingbot)."""
+    try:
+        append_pingbot_journal({
+            "event": "command_invoked",
+            "command": "ping",
+            "action": getattr(action, "value", str(action)),
+            "user_id": interaction.user.id,
+            "user_name": str(interaction.user),
+            "guild_id": interaction.guild.id if interaction.guild else None,
+            "guild_name": interaction.guild.name if interaction.guild else None,
+            "channel_id": interaction.channel_id,
+            "bot_type": "pingbot",
+        })
+    except Exception:
+        pass
     if action.value != "settings":
         await interaction.response.send_message("❌ Unknown action.", ephemeral=True)
         return
@@ -365,6 +380,15 @@ def register_ping_commands_to_bot(bot_instance: commands.Bot) -> None:
 
 async def sync_ping_commands(bot_instance: commands.Bot, guild_id: int) -> None:
     """Sync /ping to guild. Call from main bot's setup_hook."""
+    try:
+        append_pingbot_journal({
+            "event": "command_sync_run",
+            "guild_id": guild_id,
+            "scope": "guild" if guild_id else "global",
+            "bot_type": "pingbot",
+        })
+    except Exception:
+        pass
     if guild_id:
         guild_obj = discord.Object(id=guild_id)
         bot_instance.tree.copy_global_to(guild=guild_obj)

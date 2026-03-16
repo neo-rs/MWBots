@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -20,6 +21,19 @@ _ROOT = Path(__file__).resolve().parent
 CONFIG_DIR = str(_ROOT / "config")
 SETTINGS_PATH = str(_ROOT / "config" / "settings.json")
 TOKENS_ENV_PATH = str(_ROOT / "config" / "tokens.env")
+PINGBOT_JOURNAL_PATH = _ROOT / "logs" / "Botlogs" / "pingbotlogs.json"
+
+
+def append_pingbot_journal(entry: Dict[str, Any]) -> None:
+    """Append one JSONL line to the shared PingBot journal (command registration, sync, invocations)."""
+    if "timestamp" not in entry:
+        entry = {**entry, "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    try:
+        PINGBOT_JOURNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(PINGBOT_JOURNAL_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        pass
 
 # Same schema as live pingbot.py
 DEFAULT_SETTINGS: Dict[str, Any] = {

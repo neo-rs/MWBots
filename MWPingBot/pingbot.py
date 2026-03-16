@@ -573,7 +573,12 @@ def _main() -> None:
     # Register /ping slash command (same bot, same token) and sync to guild
     try:
         import ping_command_bot as _ping_cmd
+        log_info("Registering slash commands with tree...")
+        write_pingbot_log({"event": "command_register_start", "bot_type": "pingbot", "message": "registering /ping with bot tree"})
         _ping_cmd.register_ping_commands_to_bot(bot)
+        _registered = [getattr(c, "name", str(c)) for c in bot.tree.walk_commands()]
+        log_info(f"Slash commands on tree: {_registered}")
+        write_pingbot_log({"event": "command_register_done", "bot_type": "pingbot", "commands": _registered})
         _gid = int(MIRRORWORLD_SERVER_ID or "0") or 0
         _orig_setup = getattr(bot, "setup_hook", None)
 
@@ -581,15 +586,23 @@ def _main() -> None:
             if _orig_setup and asyncio.iscoroutinefunction(_orig_setup):
                 await _orig_setup()
             if _gid:
+                write_pingbot_log({"event": "command_sync_start", "bot_type": "pingbot", "guild_id": _gid, "guild_id_str": str(_gid)})
+                log_info(f"Syncing slash commands to guild (mirror-world server) id={_gid}")
                 try:
                     await _ping_cmd.sync_ping_commands(bot, _gid)
                     log_info("Slash /ping: synced to guild (use /ping settings in Discord)")
+                    write_pingbot_log({"event": "command_sync_ok", "bot_type": "pingbot", "guild_id": _gid})
                 except Exception as e:
                     log_error("Slash /ping sync failed", error=e)
+                    write_pingbot_log({"event": "command_sync_failed", "bot_type": "pingbot", "guild_id": _gid, "error": str(e), "error_type": type(e).__name__})
+            else:
+                log_warn("mirrorworld_server_id not set; slash commands not synced to guild (global sync only)")
+                write_pingbot_log({"event": "command_sync_skipped", "bot_type": "pingbot", "reason": "guild_id_empty"})
 
         bot.setup_hook = _setup_hook
     except Exception as e:
         log_warn(f"Could not register /ping slash command: {e}")
+        write_pingbot_log({"event": "command_register_failed", "bot_type": "pingbot", "error": str(e), "error_type": type(e).__name__})
 
     bot.run(PING_BOT_TOKEN)
 
