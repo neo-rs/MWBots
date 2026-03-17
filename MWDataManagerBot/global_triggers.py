@@ -203,11 +203,10 @@ def detect_global_triggers(
     embed_text = " ".join(collect_embed_strings(embeds or []))
     embed_normalized = normalize_message(embed_text)
 
-    # Only these channels should be treated as instore for filtering purposes
-    INSTORE_ALLOWED_CHANNELS = {1434967990406873169, 1435277398886060073}
-    
     source_is_online = bool(source_channel_id and (int(source_channel_id) in cfg.SMART_SOURCE_CHANNELS_ONLINE))
-    source_is_instore = bool(source_channel_id and (int(source_channel_id) in INSTORE_ALLOWED_CHANNELS))
+    source_is_instore = bool(
+        source_channel_id and int(source_channel_id) in cfg.SMART_SOURCE_CHANNELS_INSTORE
+    )
 
     sf_ctx: Dict[str, Any] = {
         "source_channel_id": int(source_channel_id or 0),

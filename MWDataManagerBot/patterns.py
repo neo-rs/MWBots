@@ -333,6 +333,7 @@ MAJOR_STORES = [
     "dunkin",
     "dunkin donuts",
     "kohl's",
+    "kohls",
     "jcpennys",
     "jc penney",
     "jcpenney",

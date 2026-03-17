@@ -37,6 +37,8 @@ def main() -> int:
     print(f"monitored_channels={len(cfg.SMART_SOURCE_CHANNELS)}")
     print()
 
+    instore_ch = next(iter(cfg.SMART_SOURCE_CHANNELS_INSTORE), 0)
+
     for i, text in enumerate(samples, 1):
         attachments = []
         embeds = []
@@ -49,6 +51,13 @@ def main() -> int:
         print(f"    fallback={fallback}")
         print(f"    global={global_tr}")
         print(f"    sig={sig}")
+        print()
+
+    if instore_ch:
+        t = "NeeDoh retail $12.99 resell $36 Kohls Walmart Target"
+        r = detect_all_link_types(t, [], keywords_list=[], source_channel_id=int(instore_ch))
+        print(f"[instore source ch={instore_ch}] {t[:50]}...")
+        print(f"    local={r}")
         print()
 
     return 0

@@ -14,7 +14,7 @@ Source = which message origins are used; destinations are from `config/settings.
 | **Clearance** | `source_channel_ids_clearance` | 1435308747416141857, 1435308842387767356, 1435308770128298044, 1435308863795626014 |
 | **Misc** | `source_channel_ids_misc` | 744273602924511283 |
 
-**Instore classification** (seasonal, sneakers, cards, theatre, major, discounted, instore_leads) only runs when the message is from **instore-allowed** channels: `1434967990406873169`, `1435277398886060073`.
+**Instore classification** (major / discounted / theatre / sneakers / seasonal / instore_leads) runs **only** for channels in **`source_channel_ids_instore`**. **Clearance** sources are excluded from this pipeline (they still skip Amazon routing where configured).
 
 ---
 
@@ -29,13 +29,13 @@ Evaluated in order; first match wins (except multi-destination path which collec
 | **1b** | **AMAZON_FALLBACK** | Amazon link/ASIN + primary Amazon, not profitable | Any except clearance | **1438433667067150416** |
 | **1c** | **AMAZON** | Amazon link/ASIN + primary Amazon (used if no AMAZON_FALLBACK configured) | Any except clearance | **1435066421133443174** |
 | **2** | **MONITORED_KEYWORD** | Message matches a keyword from the loaded keywords list; optional per-keyword channel overrides via `/keywordchannel` | Any | **1434974878833967227** (or override channel) |
-| **3** | **INSTORE_SEASONAL** | Instore source + Retail/Resell/Where fields + SEASONAL_PATTERN (christmas, halloween, thanksgiving, holiday, black friday, etc.) | Instore-allowed only | **1435984551217205309** |
-| **4** | **INSTORE_SNEAKERS** | Instore + required fields + SNEAKERS_PATTERN (nike, jordan, yeezy, adidas, sneakers, etc.) | Instore-allowed only | **1435986120574894130** |
-| **5** | **INSTORE_CARDS** | Instore + required fields + CARDS_PATTERN (pokemon, mtg, sports cards, etc.) | Instore-allowed only | **1435990107747516586** |
-| **6** | **INSTORE_THEATRE** | Instore + required fields + theatre store (e.g. AMC, Regal) + theatre/merch context | Instore-allowed only | **1438996999793021008** |
-| **7** | **MAJOR_STORES** | Instore + required fields + MAJOR_STORE_PATTERN or Where in major list (walmart, target, best buy, etc.) | Instore-allowed only | **1434974833019457707** |
-| **8** | **DISCOUNTED_STORES** | Instore + required fields + DISCOUNTED_STORE_PATTERN or Where in discounted list (tj maxx, marshalls, ollie's, etc.) | Instore-allowed only | **1434974822311661719** |
-| **9** | **INSTORE_LEADS** | Instore + required fields + no seasonal/sneakers/cards/theatre/major/discounted match | Instore-allowed only | **1438433642408841329** |
+| **3** | **INSTORE_SEASONAL** | Instore source + flip-lead shape + SEASONAL_PATTERN | **`source_channel_ids_instore` only** | **1435984551217205309** |
+| **4** | **INSTORE_SNEAKERS** | Instore + flip-lead shape + SNEAKERS_PATTERN | **instore only** | **1435986120574894130** |
+| **5** | **INSTORE_CARDS** | Instore + flip-lead shape + CARDS_PATTERN | **instore only** | **1435990107747516586** |
+| **6** | **INSTORE_THEATRE** | Instore + flip-lead shape + theatre store + context | **instore only** | **1438996999793021008** |
+| **7** | **MAJOR_STORES** | Instore + flip-lead shape + major retailer in text or Where | **instore only** | **1434974833019457707** |
+| **8** | **DISCOUNTED_STORES** | Instore + flip-lead shape + discounted retailer (Ross, Ollie's, etc.) | **instore only** | **1434974822311661719** |
+| **9** | **INSTORE_LEADS** | Instore + flip-lead shape + no higher-priority instore match | **instore only** | **1438433642408841329** |
 | **10** | **UPCOMING** | Source = online + TIMESTAMP_PATTERN in text + `is_truly_upcoming` (future indicators like “coming soon”, “drops on”, “pre-order”, etc.; excludes “price drop”, “restock”, etc.) | Online only | **1434974811695747173** |
 | **11** | **AFFILIATED_LINKS** | Source = online + `http` in (content + attachment URLs); store domain or mavely.app → AFFILIATED_LINKS; else any `http` → AFFILIATED_LINKS. Not applied if already instore-classified or Amazon. | Online only | **1435308472639160522** |
 | **12** | **AMAZON** (fallback step) | No prior match + Amazon ASIN in text + primary Amazon + AMAZON channel configured | Any except clearance | **1435066421133443174** |
@@ -46,7 +46,7 @@ Evaluated in order; first match wins (except multi-destination path which collec
 
 ## 2. Global triggers (global_triggers.py)
 
-Run after classifier; results are merged. **Source = online only**, and **not** from instore-allowed channels (1434967990406873169, 1435277398886060073).
+Run after classifier; results are merged. **Source = online only**, and **not** from any **`source_channel_ids_instore`** channel.
 
 | Filter / tag | Trigger (rule) | Source restriction | Destination channel ID |
 |--------------|----------------|--------------------|------------------------|

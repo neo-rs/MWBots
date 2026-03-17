@@ -26,11 +26,11 @@ from patterns import (
 from utils import matches_instore_theatre
 
 
-_FIELD_DELIMITER_PATTERN = r"[:\-]"
+_FIELD_DELIMITER_PATTERN = r"[:\-/]"
 _INSTORE_PRIMARY_FIELD_PATTERNS = [
-    re.compile(rf"retail\s*{_FIELD_DELIMITER_PATTERN}", re.IGNORECASE),
-    re.compile(rf"resell\s*{_FIELD_DELIMITER_PATTERN}", re.IGNORECASE),
-    re.compile(rf"where\s*{_FIELD_DELIMITER_PATTERN}", re.IGNORECASE),
+    re.compile(rf"\bretail(?:\s+price)?\s*{_FIELD_DELIMITER_PATTERN}", re.IGNORECASE),
+    re.compile(rf"\bresell(?:\s+price)?\s*{_FIELD_DELIMITER_PATTERN}", re.IGNORECASE),
+    re.compile(rf"\bwhere\s*{_FIELD_DELIMITER_PATTERN}", re.IGNORECASE),
 ]
 _INSTORE_OPTIONAL_FIELD_PATTERNS = [
     re.compile(rf"product\s*title\s*{_FIELD_DELIMITER_PATTERN}", re.IGNORECASE),
@@ -56,11 +56,52 @@ def determine_source_group(channel_id: Optional[int]) -> str:
 
 
 def has_instore_required_fields(text: str) -> bool:
-    """Require Retail + Resell + Where headers for instore routing."""
-    if not text:
+    """
+    Detect in-store / flip lead shape. Discord embeds often split labels and values
+    (e.g. field name 'Retail' + value '$12.99'), so strict 'Retail:' on one line fails.
+    """
+    if not text or not str(text).strip():
         return False
-    # Strict: must include all three primary headers to be treated as an in-store formatted lead.
-    return all(pattern.search(text) for pattern in _INSTORE_PRIMARY_FIELD_PATTERNS)
+    raw = str(text)
+    tl = raw.lower()
+    # Legacy: Retail:/Resell:/Where: on one line each
+    if all(pattern.search(raw) for pattern in _INSTORE_PRIMARY_FIELD_PATTERNS):
+        return True
+    has_retail = bool(
+        re.search(rf"\bretail(?:\s+price)?\s*{_FIELD_DELIMITER_PATTERN}", tl)
+        or re.search(r"\bretail(?:\s+price)?\b", tl)
+    )
+    has_resell = bool(
+        re.search(rf"\bresell(?:\s+price)?\s*{_FIELD_DELIMITER_PATTERN}", tl)
+        or re.search(r"\bresell\b", tl)
+    )
+    has_where = bool(
+        re.search(rf"\bwhere\s*{_FIELD_DELIMITER_PATTERN}", tl)
+        or re.search(r"\blocation\s*:", tl)
+        or re.search(rf"\bstores?\s*{_FIELD_DELIMITER_PATTERN}", tl)
+    )
+    price_tokens = re.findall(r"\$\s*[\d,]+(?:\.\d{2})?(?:\s*[-–]\s*\$?\s*[\d,]+(?:\.\d{2})?)?", tl)
+    n_prices = len(price_tokens)
+    if has_retail and has_resell and has_where and n_prices >= 1:
+        return True
+    # Embed-style: label tokens + multiple dollar amounts + at least one known retailer
+    if n_prices >= 2 and ALL_STORE_PATTERN.search(tl) and (has_retail or has_resell):
+        return True
+    if n_prices >= 2 and ALL_STORE_PATTERN.search(tl) and (has_where or bool(MAJOR_STORE_PATTERN.search(tl) or DISCOUNTED_STORE_PATTERN.search(tl))):
+        return True
+    return False
+
+
+def _instore_source_obvious_lead(text: str) -> bool:
+    """Thin embeds from source_channel_ids_instore only (not clearance)."""
+    if not text or len(text.strip()) < 8:
+        return False
+    tl = text.lower()
+    if len(re.findall(r"\$\s*[\d,]+(?:\.\d{1,2})?", tl)) >= 2:
+        return True
+    if ALL_STORE_PATTERN.search(tl) and re.search(r"\$\s*[\d,]", tl):
+        return True
+    return False
 
 
 def store_category_from_location(where_location: str) -> Optional[str]:
@@ -279,15 +320,12 @@ def select_target_channel_id(
     trace: Optional[Dict[str, Any]] = None,
 ) -> Optional[Tuple[int, str]]:
     """Single-target classifier (used as fallback if multi-type detection returns nothing)."""
-    # Only allow instore classification for these specific source channels
-    INSTORE_ALLOWED_CHANNELS = {1434967990406873169, 1435277398886060073}
-    
     source_group = determine_source_group(source_channel_id)
-    is_instore_source = source_group in {"instore", "clearance"}
+    # Instore smart-filters (major/discounted/theatre/etc.) only for source_channel_ids_instore — not clearance.
+    is_instore_source = source_group == "instore"
     instore_required = has_instore_required_fields(text_to_check)
-    # Only treat as instore source if it's from an allowed instore channel
-    # Remove the override that allowed non-instore channels to be treated as instore
-    is_instore_source = bool(is_instore_source and source_channel_id and int(source_channel_id) in INSTORE_ALLOWED_CHANNELS)
+    if is_instore_source and not instore_required:
+        instore_required = _instore_source_obvious_lead(text_to_check or "")
     normalized_lower = (text_to_check or "").lower()
 
     instore_context = False
@@ -302,8 +340,10 @@ def select_target_channel_id(
     if not instore_required:
         instore_context = False
 
-    # Extract location from either "Where:" or "Location:" fields
-    where_match = re.search(r"(?:where|location)\s*:\s*([^\n]+)", text_to_check or "", re.IGNORECASE)
+    # Where / location (tolerate markdown bold around colons)
+    where_match = re.search(
+        r"(?:where|location)\s*\*?\s*[:\-]\s*\*?\s*([^\n]+)", text_to_check or "", re.IGNORECASE
+    )
     where_location = where_match.group(1).strip() if where_match else ""
     store_category = store_category_from_location(where_location)
     text_blob = text_to_check or ""
@@ -486,16 +526,13 @@ def detect_all_link_types(
     trace: Optional[Dict[str, Any]] = None,
 ) -> List[Tuple[int, str]]:
     """Multi-type classifier used by live forwarder for multi-destination routing."""
-    # Only allow instore classification for these specific source channels
-    INSTORE_ALLOWED_CHANNELS = {1434967990406873169, 1435277398886060073}
-    
     results: List[Tuple[int, str]] = []
     source_group = determine_source_group(source_channel_id)
-    is_instore_source = source_group in {"instore", "clearance"}
+    # Instore smart-filters (major/discounted/theatre/etc.) only for source_channel_ids_instore — not clearance.
+    is_instore_source = source_group == "instore"
     instore_required = has_instore_required_fields(text_to_check)
-    # Only treat as instore source if it's from an allowed instore channel
-    # Remove the override that allowed non-instore channels to be treated as instore
-    is_instore_source = bool(is_instore_source and source_channel_id and int(source_channel_id) in INSTORE_ALLOWED_CHANNELS)
+    if is_instore_source and not instore_required:
+        instore_required = _instore_source_obvious_lead(text_to_check or "")
     normalized_lower = (text_to_check or "").lower()
 
     instore_context = False
@@ -510,8 +547,10 @@ def detect_all_link_types(
     if not instore_required:
         instore_context = False
 
-    # Extract location from either "Where:" or "Location:" fields
-    where_match = re.search(r"(?:where|location)\s*:\s*([^\n]+)", text_to_check or "", re.IGNORECASE)
+    # Where / location (tolerate markdown bold around colons)
+    where_match = re.search(
+        r"(?:where|location)\s*\*?\s*[:\-]\s*\*?\s*([^\n]+)", text_to_check or "", re.IGNORECASE
+    )
     where_location = where_match.group(1).strip() if where_match else ""
     store_category = store_category_from_location(where_location)
     text_blob = text_to_check or ""
