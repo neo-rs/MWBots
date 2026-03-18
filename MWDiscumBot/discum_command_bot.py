@@ -216,6 +216,64 @@ if not USER_TOKEN:
 if not MIRRORWORLD_SERVER_ID:
     print("[WARN] mirrorworld_server_id not set. Commands will be global (may take up to 1 hour to sync)")
 
+
+def _cfg_bool(key: str, default: bool) -> bool:
+    raw = str(cfg_get(key, str(default))).strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "y", "on")
+
+
+MIRROR_CHANNEL_MAP_AUTOPOST_ENABLED = _cfg_bool("MIRROR_CHANNEL_MAP_AUTOPOST_ENABLED", True)
+MIRROR_CHANNEL_MAP_AUTOPOST_DELAY_SECONDS = float(cfg_get("MIRROR_CHANNEL_MAP_AUTOPOST_DELAY_SECONDS", "600") or "600")
+MIRROR_CHANNEL_MAP_HISTORY_LIMIT = int(cfg_get("MIRROR_CHANNEL_MAP_HISTORY_LIMIT", "200") or "200")
+
+# Debounce mirror updates per guild: newest mapping wins; we update once after the delay.
+_MIRROR_CHANNEL_MAP_REFRESH_TASKS: Dict[int, asyncio.Task] = {}
+
+
+async def _mirror_channel_map_refresh_job(bot_obj: commands.Bot, guild_id: int) -> None:
+    try:
+        await asyncio.sleep(MIRROR_CHANNEL_MAP_AUTOPOST_DELAY_SECONDS)
+        import post_mirror_channel_map as _post_mirror
+        await _post_mirror.run_report(
+            bot_obj,
+            USER_TOKEN,
+            guild_id=guild_id,
+            upsert=True,
+            history_limit=MIRROR_CHANNEL_MAP_HISTORY_LIMIT,
+        )
+    except asyncio.CancelledError:
+        return
+    except Exception as e:
+        print(f"[WARN] [MirrorChannelMap] refresh failed guild={guild_id}: {e}", flush=True)
+    finally:
+        try:
+            t = asyncio.current_task()
+            if _MIRROR_CHANNEL_MAP_REFRESH_TASKS.get(int(guild_id)) == t:
+                _MIRROR_CHANNEL_MAP_REFRESH_TASKS.pop(int(guild_id), None)
+        except Exception:
+            pass
+
+
+def _schedule_mirror_channel_map_refresh(bot_obj: commands.Bot, guild_id: int) -> None:
+    """Schedule (debounced) mirror channel map update for the given source guild."""
+    try:
+        gid = int(guild_id or 0)
+    except (TypeError, ValueError):
+        return
+    if gid <= 0:
+        return
+    if not MIRROR_CHANNEL_MAP_AUTOPOST_ENABLED:
+        return
+
+    existing = _MIRROR_CHANNEL_MAP_REFRESH_TASKS.get(gid)
+    if existing is not None and not existing.done():
+        existing.cancel()
+
+    _MIRROR_CHANNEL_MAP_REFRESH_TASKS[gid] = asyncio.create_task(_mirror_channel_map_refresh_job(bot_obj, gid))
+
+
 def _load_channel_map() -> Dict[int, str]:
     """Load channel map from canonical path."""
     return load_channel_map(_CHANNEL_MAP_PATH)
@@ -926,6 +984,7 @@ class QuickMapModal(discord.ui.Modal, title="Quick channel mapping"):
             await interaction.followup.send(embed=embed, view=view, ephemeral=True)
         else:
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        _schedule_mirror_channel_map_refresh(self.bot_obj, gid)
 
 
 class _GuildSelectMapAgainView(discord.ui.View):
@@ -1472,6 +1531,7 @@ class DiscumCommandBot(commands.Bot):
                     last_dest_id=dest_id,
                 )
                 await message.reply(embed=embed, view=view)
+                _schedule_mirror_channel_map_refresh(self, guild_id)
             else:
                 await message.reply(f"❌ {err}" if err else "❌ Mapping failed.")
             return

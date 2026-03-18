@@ -262,7 +262,42 @@ def _progress(msg: str) -> None:
     print(f"[post_mirror_channel_map] {msg}", flush=True)
 
 
-async def run_report(bot: discord.Client, user_token: str) -> None:
+def _parse_guild_id_from_embed(embed: discord.Embed) -> Optional[int]:
+    """Extract Guild ID from embed footer text (matches build_embeds footer format)."""
+    try:
+        footer_text = getattr(getattr(embed, "footer", None), "text", None) or ""
+        m = re.search(r"Guild ID:\s*(\d+)", str(footer_text))
+        return int(m.group(1)) if m else None
+    except Exception:
+        return None
+
+
+async def _find_existing_guild_message(
+    channel: Any,
+    guild_id: int,
+    *,
+    history_limit: int,
+) -> Optional[discord.Message]:
+    """Find an existing mirror-channel-map message for a given guild by scanning recent history."""
+    try:
+        async for msg in channel.history(limit=history_limit):
+            for emb in getattr(msg, "embeds", []) or []:
+                parsed_gid = _parse_guild_id_from_embed(emb)
+                if parsed_gid == int(guild_id):
+                    return msg
+    except Exception:
+        return None
+    return None
+
+
+async def run_report(
+    bot: discord.Client,
+    user_token: str,
+    *,
+    guild_id: Optional[int] = None,
+    upsert: bool = False,
+    history_limit: int = 200,
+) -> None:
     _progress("Loading channel_map.json and source info...")
     channel_map = load_channel_map()
     ch_to_guild, ch_to_name, guild_to_name = load_source_channel_info()
@@ -281,6 +316,11 @@ async def run_report(bot: discord.Client, user_token: str) -> None:
             guild_to_name,
         )
         _progress("Done fetching missing names.")
+
+    target_guild_id: Optional[int] = int(guild_id or 0) if guild_id is not None else None
+    if target_guild_id and target_guild_id > 0:
+        # Filter to only the target guild for efficiency + avoids updating unrelated guilds.
+        channel_map = {cid: url for cid, url in channel_map.items() if ch_to_guild.get(cid, 0) == target_guild_id}
 
     # Resolve webhook URLs in executor (avoid blocking event loop / heartbeat). Rate-limit.
     unique_urls = list(dict.fromkeys(channel_map.values()))
@@ -304,10 +344,18 @@ async def run_report(bot: discord.Client, user_token: str) -> None:
 
     _progress("Building embeds by guild...")
     by_guild = build_by_guild(channel_map, ch_to_guild, ch_to_name, guild_to_name, webhook_cache)
-    if not by_guild:
-        _progress("No mappings in channel_map.json.")
-        return
-    all_embeds = build_embeds(by_guild)
+    if target_guild_id and target_guild_id > 0 and not by_guild:
+        # If we were asked for one guild but it currently has no mappings, still upsert an explicit "no mappings" card.
+        gname = guild_to_name.get(target_guild_id, f"Guild-{target_guild_id}") or f"Guild-{target_guild_id}"
+        embed = discord.Embed(title=f"📁 {gname}", description="_No mappings_", color=0x5865F2)
+        embed.set_footer(text=f"Guild ID: {target_guild_id}  •  0 channel(s)")
+        all_embeds = [embed]
+        by_guild = [(target_guild_id, gname, [])]  # for progress logging only
+    else:
+        if not by_guild:
+            _progress("No mappings in channel_map.json.")
+            return
+        all_embeds = build_embeds(by_guild)
     _progress(f"Built {len(all_embeds)} embed(s) for {len(by_guild)} guild(s).")
 
     _progress("Getting output channel...")
@@ -318,15 +366,32 @@ async def run_report(bot: discord.Client, user_token: str) -> None:
         except Exception as e:
             _progress(f"Could not get output channel: {e}")
             return
-    # One embed per message so we stay under Discord's 6000 total-embed-size limit per message
-    _progress(f"Sending {len(all_embeds)} embed(s) (1 per message, 1 guild per message)...")
-    for i, embed in enumerate(all_embeds):
-        try:
-            await channel.send(embed=embed)
-            _progress(f"  sent message {i + 1}/{len(all_embeds)}.")
-        except Exception as e:
-            _progress(f"Send error: {e}")
-    _progress(f"Done. Sent {len(all_embeds)} embed(s) to channel {OUTPUT_CHANNEL_ID}.")
+    if upsert:
+        _progress(f"Upserting {len(all_embeds)} embed(s) into channel {OUTPUT_CHANNEL_ID}...")
+        for i, embed in enumerate(all_embeds):
+            gid = _parse_guild_id_from_embed(embed) or target_guild_id
+            if not gid:
+                # Fallback: if we can't determine which guild this belongs to, send a new message.
+                await channel.send(embed=embed)
+                continue
+            existing = await _find_existing_guild_message(channel, int(gid), history_limit=history_limit)
+            if existing is None:
+                await channel.send(embed=embed)
+                _progress(f"  sent (guild={gid}) {i + 1}/{len(all_embeds)}.")
+            else:
+                await existing.edit(embed=embed)
+                _progress(f"  edited (guild={gid}) {i + 1}/{len(all_embeds)}.")
+        _progress(f"Done. Upserted {len(all_embeds)} embed(s) into channel {OUTPUT_CHANNEL_ID}.")
+    else:
+        # One embed per message so we stay under Discord's 6000 total-embed-size limit per message
+        _progress(f"Sending {len(all_embeds)} embed(s) (1 per message, 1 guild per message)...")
+        for i, embed in enumerate(all_embeds):
+            try:
+                await channel.send(embed=embed)
+                _progress(f"  sent message {i + 1}/{len(all_embeds)}.")
+            except Exception as e:
+                _progress(f"Send error: {e}")
+        _progress(f"Done. Sent {len(all_embeds)} embed(s) to channel {OUTPUT_CHANNEL_ID}.")
 
 
 def main() -> None:
