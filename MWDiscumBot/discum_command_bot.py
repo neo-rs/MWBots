@@ -235,14 +235,7 @@ _MIRROR_CHANNEL_MAP_REFRESH_TASKS: Dict[int, asyncio.Task] = {}
 async def _mirror_channel_map_refresh_job(bot_obj: commands.Bot, guild_id: int) -> None:
     try:
         await asyncio.sleep(MIRROR_CHANNEL_MAP_AUTOPOST_DELAY_SECONDS)
-        import post_mirror_channel_map as _post_mirror
-        await _post_mirror.run_report(
-            bot_obj,
-            USER_TOKEN,
-            guild_id=guild_id,
-            upsert=True,
-            history_limit=MIRROR_CHANNEL_MAP_HISTORY_LIMIT,
-        )
+        await _upsert_mirror_channel_map_summary(bot_obj)
     except asyncio.CancelledError:
         return
     except Exception as e:
@@ -272,6 +265,228 @@ def _schedule_mirror_channel_map_refresh(bot_obj: commands.Bot, guild_id: int) -
         existing.cancel()
 
     _MIRROR_CHANNEL_MAP_REFRESH_TASKS[gid] = asyncio.create_task(_mirror_channel_map_refresh_job(bot_obj, gid))
+
+
+# ---- MIRROR WORLD mapping summary (persistent inside MWDiscumBot runtime) ----
+
+MIRROR_CHANNEL_MAP_SUMMARY_CHANNEL_ID = int("1482374889594818681")
+MIRROR_CHANNEL_MAP_SUMMARY_TITLE = "MIRROR WORLD MAPPING"
+
+# Cache webhook_url -> (dest_channel_id, dest_display)
+_WEBHOOK_DEST_CACHE: Dict[str, Tuple[Optional[int], str]] = {}
+
+# Track the summary message we last edited/sent (best effort; re-found on errors)
+_MIRROR_SUMMARY_MESSAGE_ID: Optional[int] = None
+_MIRROR_SUMMARY_REFRESH_LOCK = asyncio.Lock()
+
+
+def _guild_id_from_source_channel(source_channel_id: int) -> int:
+    """Return guild_id for a source channel from local caches (0 if unknown)."""
+    try:
+        info = _SOURCE_CHANNEL_FULL.get(int(source_channel_id))
+        if info:
+            return int(info[0] or 0)
+    except Exception:
+        pass
+    return 0
+
+
+async def _find_existing_mirror_summary_message(
+    channel: discord.abc.Messageable,
+    bot_user_id: int,
+    *,
+    history_limit: int,
+) -> Optional[discord.Message]:
+    """Find the most recent message authored by this bot with title MIRROR WORLD MAPPING."""
+    try:
+        async for msg in channel.history(limit=history_limit):
+            try:
+                if int(getattr(getattr(msg, "author", None), "id", 0) or 0) != int(bot_user_id):
+                    continue
+                for emb in getattr(msg, "embeds", []) or []:
+                    title = getattr(emb, "title", None) or ""
+                    if str(title).strip() == MIRROR_CHANNEL_MAP_SUMMARY_TITLE:
+                        return msg
+            except Exception:
+                continue
+    except Exception:
+        return None
+    return None
+
+
+def _build_guild_counts(channel_map: Dict[int, str]) -> Dict[int, Tuple[str, int]]:
+    """
+    Returns guild_id -> (guild_name, channel_count).
+    Names are from _SOURCE_GUILD_NAMES/_SOURCE_CHANNEL_FULL caches (source_channels.json + channel_map_info.json).
+    """
+    counts: Dict[int, Tuple[str, int]] = {}
+    _load_source_channel_names()
+    for src_cid in (channel_map or {}).keys():
+        info = _SOURCE_CHANNEL_FULL.get(int(src_cid))
+        if info:
+            gid = int(info[0] or 0)
+            gname = str(info[1] or "").strip() or f"Guild-{gid}"
+        else:
+            gid = 0
+            gname = "Unknown guild"
+        if gid not in counts:
+            counts[gid] = (gname, 0)
+        counts[gid] = (counts[gid][0], counts[gid][1] + 1)
+    return counts
+
+
+def _truncate_description(text: str, limit: int = 3500) -> str:
+    t = text or ""
+    if len(t) <= limit:
+        return t
+    return t[: max(0, limit - 1)] + "…"
+
+
+async def _resolve_webhook_destination(webhook_url: str, bot_obj: commands.Bot) -> Tuple[Optional[int], str]:
+    """Resolve webhook url -> destination channel id/name (cached per runtime)."""
+    if webhook_url in _WEBHOOK_DEST_CACHE:
+        return _WEBHOOK_DEST_CACHE[webhook_url]
+    dest_id, dest_name = await asyncio.to_thread(resolve_webhook_destination, webhook_url, bot_obj)
+    # resolve_webhook_destination can return (None, None); normalize
+    if dest_id is None and not dest_name:
+        dest_name = "Unknown destination"
+    _WEBHOOK_DEST_CACHE[webhook_url] = (dest_id, dest_name or "Unknown destination")
+    return _WEBHOOK_DEST_CACHE[webhook_url]
+
+
+async def _build_guild_detail_embed(
+    bot_obj: commands.Bot,
+    guild_id: int,
+    channel_map: Dict[int, str],
+) -> discord.Embed:
+    """Build ephemeral embed: destinations under a guild, and their source channels."""
+    _load_source_channel_names()
+
+    guild_name = _SOURCE_GUILD_NAMES.get(int(guild_id)) or f"Guild-{guild_id}"
+    # Group sources by webhook url within the guild
+    dest_groups: Dict[str, List[int]] = {}
+    for src_cid, wh_url in (channel_map or {}).items():
+        info = _SOURCE_CHANNEL_FULL.get(int(src_cid))
+        if not info:
+            continue
+        src_gid = int(info[0] or 0)
+        if src_gid != int(guild_id):
+            continue
+        wh = str(wh_url or "").strip()
+        if not wh:
+            continue
+        dest_groups.setdefault(wh, []).append(int(src_cid))
+
+    # Resolve each destination (name/id)
+    parts: List[str] = []
+    for wh_url, src_ids in dest_groups.items():
+        dest_cid, dest_disp = await _resolve_webhook_destination(wh_url, bot_obj)
+        dest_line = f"<#{int(dest_cid)}>" if dest_cid else str(dest_disp or "Unknown destination")
+        src_ids_sorted = sorted(src_ids, key=lambda cid: (_source_guild_name_only(bot_obj, cid).lower(), cid))
+        parts.append(dest_line)
+        for cid in src_ids_sorted:
+            parts.append(f"• <#{cid}>")
+        parts.append("")
+
+    desc = "\n".join(parts) if parts else "_No mappings_"
+    desc = _truncate_description(desc, limit=3500)
+    embed = discord.Embed(
+        title=f"{guild_name} - `{int(guild_id)}`",
+        description=desc,
+        color=0x5865F2,
+    )
+    embed.set_footer(text=f"Guild ID: {int(guild_id)}  •  {len([k for k in (channel_map or {}).keys() if _guild_id_from_source_channel(k) == int(guild_id)])} channel(s)")
+    return embed
+
+
+def _build_guild_summary_lines(guild_counts: Dict[int, Tuple[str, int]]) -> Tuple[List[int], List[str]]:
+    """Return (guild_ids_sorted, summary_lines)."""
+    items: List[Tuple[int, str, int]] = []
+    for gid, (gname, cnt) in guild_counts.items():
+        items.append((gid, gname, cnt))
+    # Sort by count desc then name
+    items.sort(key=lambda x: (-x[2], str(x[1]).lower()))
+    guild_ids = [int(x[0]) for x in items]
+    lines: List[str] = []
+    for gid, gname, cnt in items:
+        if gid > 0:
+            lines.append(f"- {gname} - `{gid}` — {cnt} channel(s)")
+        else:
+            lines.append(f"- {gname} — {cnt} channel(s)")
+    return guild_ids, lines
+
+
+async def _upsert_mirror_channel_map_summary(bot_obj: commands.Bot) -> None:
+    """Edit or send the one MIRROR WORLD MAPPING summary message and its persistent guild buttons."""
+    async with _MIRROR_SUMMARY_REFRESH_LOCK:
+        channel_map = _load_channel_map()
+        if not channel_map:
+            # Still upsert an empty summary
+            guild_counts: Dict[int, Tuple[str, int]] = {0: ("Unknown guild", 0)}
+        else:
+            guild_counts = _build_guild_counts(channel_map)
+
+        guild_ids_sorted, summary_lines = _build_guild_summary_lines(guild_counts)
+
+        summary_embed = discord.Embed(
+            title=MIRROR_CHANNEL_MAP_SUMMARY_TITLE,
+            description="\n".join(summary_lines) if summary_lines else "_No mappings_",
+            color=0x5865F2,
+        )
+        summary_embed.set_footer(text="Click a guild button for details (ephemeral).")
+
+        # Cap buttons to 25 (2 rows of 5x5 would be nicer, but simplest is 1 row)
+        max_buttons = 25
+        button_guild_ids = [gid for gid in guild_ids_sorted if gid > 0][:max_buttons]
+        if not button_guild_ids:
+            # Fallback: show up to 25 unknown guild? (rare)
+            button_guild_ids = [gid for gid in guild_ids_sorted][:max_buttons]
+
+        class _GuildDetailView(discord.ui.View):
+            def __init__(self) -> None:
+                super().__init__(timeout=None)
+                for idx, gid in enumerate(button_guild_ids):
+                    gname = _SOURCE_GUILD_NAMES.get(int(gid)) or f"Guild-{gid}"
+                    label = (gname or str(gid))[:80]
+                    row = idx // 5
+                    btn = discord.ui.Button(label=label, style=discord.ButtonStyle.secondary, row=row)
+
+                    async def _cb(interaction: discord.Interaction, _gid: int = int(gid)) -> None:
+                        try:
+                            embed = await _build_guild_detail_embed(bot_obj, _gid, _load_channel_map())
+                            await interaction.response.send_message(embeds=[embed], ephemeral=True)
+                        except Exception as e:
+                            await interaction.response.send_message(f"❌ Failed to build details: {e}", ephemeral=True)
+
+                    btn.callback = _cb
+                    self.add_item(btn)
+
+        view = _GuildDetailView()
+
+        out_channel = bot_obj.get_channel(MIRROR_CHANNEL_MAP_SUMMARY_CHANNEL_ID)
+        if out_channel is None:
+            out_channel = await bot_obj.fetch_channel(MIRROR_CHANNEL_MAP_SUMMARY_CHANNEL_ID)
+
+        bot_uid = int(getattr(bot_obj.user, "id", 0) or 0)
+        existing = await _find_existing_mirror_summary_message(
+            out_channel,
+            bot_uid,
+            history_limit=MIRROR_CHANNEL_MAP_HISTORY_LIMIT,
+        )
+        if existing is None:
+            msg = await out_channel.send(embed=summary_embed, view=view)
+            global _MIRROR_SUMMARY_MESSAGE_ID
+            _MIRROR_SUMMARY_MESSAGE_ID = getattr(msg, "id", None)
+            try:
+                bot_obj.add_view(view, message_id=_MIRROR_SUMMARY_MESSAGE_ID)
+            except Exception:
+                pass
+        else:
+            await existing.edit(embed=summary_embed, view=view)
+            try:
+                bot_obj.add_view(view, message_id=getattr(existing, "id", None))
+            except Exception:
+                pass
 
 
 def _load_channel_map() -> Dict[int, str]:
@@ -856,6 +1071,9 @@ class MappingViewView(discord.ui.View):
         if cid in self.channel_map:
             del self.channel_map[cid]
             if _save_channel_map(self.channel_map):
+                gid = _guild_id_from_source_channel(cid)
+                if gid > 0:
+                    _schedule_mirror_channel_map_refresh(self.bot, gid)
                 await _safe_send_ephemeral(interaction, f"✅ Removed mapping for {_format_channel_mention(cid)}")
                 self.selected_source_id = None
                 self._build_pages()
@@ -914,6 +1132,9 @@ class WebhookUpdateModal(discord.ui.Modal, title="Update Webhook URL"):
             # Update mapping
             self.channel_map[self.channel_id] = new_url
             if _save_channel_map(self.channel_map):
+                gid = _guild_id_from_source_channel(self.channel_id)
+                if gid > 0:
+                    _schedule_mirror_channel_map_refresh(self.bot, gid)
                 await _safe_send_ephemeral(interaction, f"✅ Updated webhook URL for channel `{self.channel_id}`")
             else:
                 await _safe_send_ephemeral(interaction, "❌ Failed to save changes.")
@@ -979,6 +1200,8 @@ class QuickMapModal(discord.ui.Modal, title="Quick channel mapping"):
         if not ok:
             await _safe_send_ephemeral(interaction, f"❌ {err}")
             return
+        if gid and int(gid) > 0:
+            _schedule_mirror_channel_map_refresh(self.bot_obj, int(gid))
         view = MapAgainView(self.bot_obj, self.owner_id, last_guild_id=gid, last_dest_id=did)
         if _resp_done(interaction):
             await interaction.followup.send(embed=embed, view=view, ephemeral=True)
@@ -1428,6 +1651,8 @@ async def _discum_browse_for_guild(interaction: discord.Interaction, *, source_g
                         mapped_ids.add(int(src_cid))
                     _save_channel_map(m)
                     ensure_discum_source_guild_id(sgid)
+                    if sgid and int(sgid) > 0:
+                        _schedule_mirror_channel_map_refresh(bot, int(sgid))
                     await ii.response.send_message(
                         embed=_ui_embed(
                             "Discum mapping saved",
@@ -1455,6 +1680,8 @@ async def _discum_browse_for_guild(interaction: discord.Interaction, *, source_g
                     removed += 1
                 mapped_ids.discard(int(src_cid))
             _save_channel_map(m)
+            if sgid and int(sgid) > 0:
+                _schedule_mirror_channel_map_refresh(bot, int(sgid))
             await i.response.send_message(
                 embed=_ui_embed("Discum mapping updated", f"Unmapped `{removed}` channel(s).", color=0xFEE75C),
                 ephemeral=True,
@@ -1677,6 +1904,15 @@ class DiscumCommandBot(commands.Bot):
                 print(f"[WARN] Fetchsync auto-poller failed to start: {e}")
         elif _FETCHALL_AVAILABLE and poll_s > 0 and not effective_user_token:
             print(f"[FETCHALL] Auto-poller skipped: DISCUM_USER_DISCUMBOT not set in config/tokens.env", flush=True)
+
+        # Upsert the persistent mirror-channel-map summary immediately on bot startup.
+        # (Buttons will be functional as long as this bot process stays running.)
+        try:
+            if MIRROR_CHANNEL_MAP_AUTOPOST_ENABLED:
+                await _upsert_mirror_channel_map_summary(self)
+                print("[MirrorChannelMap] summary upserted on startup.", flush=True)
+        except Exception as e:
+            print(f"[WARN] [MirrorChannelMap] startup summary upsert failed: {e}", flush=True)
 
 # Log once at import so deploy can confirm this file is the one running (Channel Mappings use "1. <#id>")
 print("[discum_command_bot] loaded — Channel Mappings format: 1. <#id>, 2. <#id> ...")

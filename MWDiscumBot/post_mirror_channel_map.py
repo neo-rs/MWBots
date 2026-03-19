@@ -251,50 +251,27 @@ def _build_guild_embed_parts(
     Build one or more embeds for a single guild using compact destination-grouped layout.
     The layout places two destination groups side-by-side using padded text rows.
     """
-    # Build textual rows first, then chunk into 4096-safe embed descriptions.
-    rows: List[str] = []
-    # Spacing between the two destination columns on the same line.
-    # Avoid lots of padding because markdown/link text is already long.
-    dest_gap = " " * 18
-    # Spacing between the two source link columns on the same line.
-    link_gap = " " * 16
-    for i in range(0, len(destination_buckets), 2):
-        left = destination_buckets[i]
-        right = destination_buckets[i + 1] if i + 1 < len(destination_buckets) else None
-
-        left_header = left[1]
-        right_header = right[1] if right else ""
-        if right:
-            rows.append(f"{left_header}{dest_gap}{right_header}")
+    # Vertical layout: one destination per block, sources listed underneath.
+    # Destination header uses only `<#dest_id>` (Discord resolves name automatically).
+    lines: List[str] = []
+    for dest_cid, dest_display, srcs in destination_buckets:
+        dest_header = dest_display if dest_cid else (dest_display or "?")
+        lines.append(dest_header)
+        if not srcs:
+            lines.append("_No mappings_")
         else:
-            rows.append(left_header)
+            for src_name, src_id in srcs:
+                # Clickable source channel name.
+                lines.append(f"• [{src_name}](https://discord.com/channels/{guild_id}/{src_id})")
+        lines.append("")
 
-        # Source channels are rendered as markdown links so the user can click without extra "-#" prefixes.
-        left_lines = [
-            f"[{src_name}](https://discord.com/channels/{guild_id}/{src_id})"
-            for src_name, src_id in left[2]
-        ]
-        right_lines = [
-            f"[{src_name}](https://discord.com/channels/{guild_id}/{src_id})"
-            for src_name, src_id in (right[2] if right else [])
-        ]
-        max_len = max(len(left_lines), len(right_lines), 1)
-        for j in range(max_len):
-            ltxt = left_lines[j] if j < len(left_lines) else ""
-            rtxt = right_lines[j] if j < len(right_lines) else ""
-            if ltxt and rtxt:
-                rows.append(f"{ltxt}{link_gap}{rtxt}".rstrip())
-            else:
-                rows.append(ltxt or rtxt)
-        rows.append("")
-
-    if not rows:
-        rows = ["_No mappings_"]
+    if not lines:
+        lines = ["_No mappings_"]
 
     # Split into multiple embeds for large guilds.
     parts: List[str] = []
     current = ""
-    for line in rows:
+    for line in lines:
         candidate = f"{current}\n{line}" if current else line
         if len(candidate) > 3900:
             parts.append(current)
@@ -382,7 +359,11 @@ async def _cleanup_existing_mapping_messages(
             is_mapping_card = False
             for emb in getattr(msg, "embeds", []) or []:
                 footer_text = getattr(getattr(emb, "footer", None), "text", None) or ""
+                title = getattr(emb, "title", None) or ""
                 if "Guild ID:" in str(footer_text):
+                    is_mapping_card = True
+                    break
+                if str(title).strip() == "MIRROR WORLD MAPPING":
                     is_mapping_card = True
                     break
             if not is_mapping_card:
@@ -405,6 +386,7 @@ async def run_report(
     upsert: bool = False,
     cleanup_before_send: bool = True,
     history_limit: int = 200,
+    view_timeout_seconds: int = 180,
 ) -> None:
     _progress("Loading channel_map.json and source info...")
     channel_map = load_channel_map()
@@ -503,15 +485,63 @@ async def run_report(
                 _progress(f"  edited (guild={gid}) {i + 1}/{len(all_embeds)}.")
         _progress(f"Done. Upserted {len(all_embeds)} embed(s) into channel {OUTPUT_CHANNEL_ID}.")
     else:
-        # One embed per message so we stay under Discord's 6000 total-embed-size limit per message
-        _progress(f"Sending {len(all_embeds)} embed(s) (1 per message, 1 guild per message)...")
-        for i, embed in enumerate(all_embeds):
-            try:
-                await channel.send(embed=embed)
-                _progress(f"  sent message {i + 1}/{len(all_embeds)}.")
-            except Exception as e:
-                _progress(f"Send error: {e}")
-        _progress(f"Done. Sent {len(all_embeds)} embed(s) to channel {OUTPUT_CHANNEL_ID}.")
+        # Summary + buttons (ephemeral detailed view per guild).
+        guild_cards: Dict[int, Tuple[str, List[Tuple[Optional[int], str, List[Tuple[str, int]]]]]] = {}
+        by_guild_full = build_by_guild(channel_map, ch_to_guild, ch_to_name, guild_to_name, webhook_cache)
+        for gid, gname, buckets in by_guild_full:
+            guild_cards[int(gid)] = (gname, buckets)
+
+        # Build summary embed.
+        summary_lines: List[str] = []
+        guild_ids_sorted = sorted(guild_cards.keys())
+        for gid in guild_ids_sorted:
+            gname, buckets = guild_cards[gid]
+            total_sources = sum(len(b[2]) for b in buckets)
+            summary_lines.append(f"- {gname} - `{gid}` — {total_sources} channel(s)")
+
+        summary_embed = discord.Embed(
+            title="MIRROR WORLD MAPPING",
+            description="\n".join(summary_lines) if summary_lines else "_No mappings_",
+            color=0x5865F2,
+        )
+        summary_embed.set_footer(text=f"Click a guild button for details (ephemeral).")
+
+        # Limit buttons to 25 per view.
+        max_buttons = 25
+        buttons_guild_ids = guild_ids_sorted[:max_buttons]
+        if len(guild_ids_sorted) > max_buttons:
+            _progress(f"Note: {len(guild_ids_sorted)} guild(s) detected, showing first {max_buttons} buttons only.")
+
+        class _GuildDetailView(discord.ui.View):
+            def __init__(self) -> None:
+                super().__init__(timeout=view_timeout_seconds)
+
+                for idx, gid in enumerate(buttons_guild_ids):
+                    gname, buckets = guild_cards[gid]
+                    label = gname[:80] if gname else str(gid)
+                    row = idx // 5
+                    btn = discord.ui.Button(label=label, style=discord.ButtonStyle.secondary, row=row)
+
+                    async def _cb(interaction: discord.Interaction, _gid: int = gid) -> None:
+                        try:
+                            gname2, buckets2 = guild_cards[_gid]
+                        except Exception:
+                            await interaction.response.send_message("❌ Unknown guild selection.", ephemeral=True)
+                            return
+                        embeds = _build_guild_embed_parts(gname2, _gid, buckets2)
+                        # Cap embeds shown per ephemeral message.
+                        embeds = embeds[:10] if embeds else []
+                        await interaction.response.send_message(embeds=embeds, ephemeral=True)
+
+                    btn.callback = _cb
+                    self.add_item(btn)
+
+        _progress(f"Sending summary + {len(buttons_guild_ids)} guild button(s)...")
+        view = _GuildDetailView()
+        await channel.send(embed=summary_embed, view=view)
+        _progress("Done. Summary message sent; waiting briefly for button interactions...")
+        # Keep the client alive so buttons work.
+        await asyncio.sleep(view_timeout_seconds)
 
 
 def main() -> None:
