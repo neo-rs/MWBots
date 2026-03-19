@@ -76,7 +76,8 @@
     "PRICE_ERROR": 1435985494356918333,
     "PROFITABLE_FLIP": 1435998778871119942,
     "LUNCHMONEY_FLIP": 1439912388555182151,
-    "AMAZON_PROFITABLE_LEADS": 1438969997178306661
+    "AMAZON_PROFITABLE_LEADS": 1438969997178306661,
+    "MAJOR_CLEARANCE": 1484118129402450041
   },
   "recent_ttl_seconds": 10,
   "global_duplicate_ttl_seconds": 300,
@@ -86,5 +87,7 @@
   "fetchall_max_messages_per_channel": 400,
   "fetchsync_auto_poll_seconds": 60,
   "edit_cooldown_seconds": 30,
+  "major_clearance_pair_ttl_seconds": 180,
+  "major_clearance_send_single_on_timeout": true,
   "fallback_channel_id": 1438970053352751215
 }

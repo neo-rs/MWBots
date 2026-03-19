@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -60,6 +61,7 @@ class MessageForwarder:
 
         self.global_content_cache: Dict[str, float] = {}
         self.global_content_ttl_seconds: int = int(cfg.GLOBAL_DUPLICATE_TTL_SECONDS or 300)
+        self.pending_major_clearance: Dict[Tuple[int, str], Dict[str, Any]] = {}
 
     def _is_global_duplicate(self, signature: str) -> bool:
         now = asyncio.get_event_loop().time()
@@ -141,6 +143,51 @@ class MessageForwarder:
             "attachments": attachments,
             "author": author_dict,
         }
+
+    def _sender_key(self, message, payload: Dict[str, Any]) -> str:
+        try:
+            wh = str(getattr(message, "webhook_id", "") or "").strip()
+            if wh:
+                return f"wh:{wh}"
+        except Exception:
+            pass
+        try:
+            aid = str(((payload.get("author") or {}).get("id") or "")).strip()
+            if aid:
+                return f"aid:{aid}"
+        except Exception:
+            pass
+        try:
+            an = str(((payload.get("author") or {}).get("username") or "")).strip().lower()
+            if an:
+                return f"an:{an}"
+        except Exception:
+            pass
+        return "unknown"
+
+    def _looks_like_major_clearance_embed(self, text: str) -> bool:
+        tl = (text or "").lower()
+        if not tl:
+            return False
+        # TempoMonitors stock-monitor embed shape (not Retail:/Resell:/Where: template).
+        has_msrp = "msrp" in tl
+        has_as_low = ("as low as" in tl) or ("as-low-as" in tl)
+        has_upc = "upc" in tl and bool(re.search(r"\b\d{11,14}\b", tl))
+        has_tempo = "tempomonitors.com" in tl or "powered by tempomonitors" in tl
+        return bool(has_msrp and has_as_low and has_upc and has_tempo)
+
+    def _looks_like_major_clearance_followup(self, text: str) -> bool:
+        tl = (text or "").lower()
+        if not tl:
+            return False
+        hints = [
+            "would look for this",
+            "lots of stock",
+            "sold",
+            "save up to",
+            "sell one like this",
+        ]
+        return any(h in tl for h in hints)
 
     async def _send_to_destination(
         self,
@@ -376,6 +423,7 @@ class MessageForwarder:
         _add("PROFITABLE_FLIP", cfg.SMARTFILTER_FLIPS_PROFITABLE_CHANNEL_ID, "Global • Profitable flip")
         _add("LUNCHMONEY_FLIP", cfg.SMARTFILTER_FLIPS_LUNCHMONEY_CHANNEL_ID, "Global • Lunchmoney flip")
         _add("AMAZON_PROFITABLE_LEAD", cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID, "Global • Amazon profitable lead")
+        _add("MAJOR_CLEARANCE", int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0), "Global • Major clearance")
 
         # Discord select supports max 25 options.
         return out[:25]
@@ -1042,6 +1090,142 @@ class MessageForwarder:
             wh_username = ""
             wh_avatar_url = ""
 
+        # Special paired-flow: "major clearance" stock-monitor embeds + follow-up message.
+        # This is intentionally separate from normal instore filters (Retail/Resell/Where).
+        try:
+            major_clearance_dest = int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0)
+        except Exception:
+            major_clearance_dest = 0
+        is_instore_or_clearance_source = bool(
+            int(channel_id or 0) in getattr(cfg, "SMART_SOURCE_CHANNELS_INSTORE", set())
+            or int(channel_id or 0) in getattr(cfg, "SMART_SOURCE_CHANNELS_CLEARANCE", set())
+        )
+        if major_clearance_dest > 0 and is_instore_or_clearance_source:
+            now_ts = asyncio.get_event_loop().time()
+            sender_key = self._sender_key(message, payload)
+            pair_key = (int(channel_id or 0), str(sender_key))
+            try:
+                ttl_s = float(getattr(cfg, "MAJOR_CLEARANCE_PAIR_TTL_SECONDS", 180) or 180)
+            except Exception:
+                ttl_s = 180.0
+            if ttl_s < 10:
+                ttl_s = 10.0
+            send_single_on_timeout = bool(getattr(cfg, "MAJOR_CLEARANCE_SEND_SINGLE_ON_TIMEOUT", False))
+
+            # Flush expired pending candidates (optional single-send fallback).
+            expired_items: List[Tuple[Tuple[int, str], Dict[str, Any]]] = []
+            try:
+                for k, v in (self.pending_major_clearance or {}).items():
+                    if (now_ts - float(v.get("timestamp", 0.0))) > ttl_s:
+                        expired_items.append((k, v))
+            except Exception:
+                expired_items = []
+            for k, _v in expired_items:
+                try:
+                    self.pending_major_clearance.pop(k, None)
+                except Exception:
+                    pass
+            if send_single_on_timeout and expired_items:
+                try:
+                    import discord
+
+                    allowed_mentions = discord.AllowedMentions.none()
+                    for _k, pending_item in expired_items[:20]:
+                        src_ch = int(pending_item.get("source_channel_id") or 0)
+                        src_group = "instore" if src_ch in getattr(cfg, "SMART_SOURCE_CHANNELS_INSTORE", set()) else (
+                            "instore" if src_ch in getattr(cfg, "SMART_SOURCE_CHANNELS_CLEARANCE", set()) else "unknown"
+                        )
+                        dest_after_exp = self._apply_route_map(source_group=src_group, dest_channel_id=major_clearance_dest)
+                        if dest_after_exp <= 0:
+                            continue
+                        await self._send_to_destination(
+                            dest_channel_id=dest_after_exp,
+                            content=str(pending_item.get("formatted_content") or ""),
+                            embeds=list(pending_item.get("embeds_out") or []),
+                            attachments=list(pending_item.get("attachments") or []) if isinstance(pending_item.get("attachments"), list) else None,
+                            webhook_username=str(pending_item.get("webhook_username") or ""),
+                            webhook_avatar_url=str(pending_item.get("webhook_avatar_url") or ""),
+                            allowed_mentions=allowed_mentions,
+                        )
+                        if cfg.VERBOSE:
+                            try:
+                                log_forward(
+                                    "major-clearance timeout fallback "
+                                    f"msg={int(pending_item.get('source_message_id') or 0)} {src_ch} -> {dest_after_exp}"
+                                )
+                            except Exception:
+                                pass
+                except Exception as e:
+                    if cfg.VERBOSE:
+                        log_warn(f"major-clearance timeout fallback failed: {type(e).__name__}: {e}")
+
+            is_candidate_embed = self._looks_like_major_clearance_embed(text_to_check)
+            if is_candidate_embed:
+                self.pending_major_clearance[pair_key] = {
+                    "timestamp": now_ts,
+                    "formatted_content": formatted_content,
+                    "embeds_out": embeds_out,
+                    "attachments": attachments if use_files else None,
+                    "webhook_username": wh_username,
+                    "webhook_avatar_url": wh_avatar_url,
+                    "source_jump_url": str(getattr(message, "jump_url", "") or ""),
+                    "source_channel_id": int(channel_id or 0),
+                    "source_message_id": int(getattr(message, "id", 0) or 0),
+                }
+                trace["decision"] = {"action": "pending_major_clearance", "reason": "waiting_followup_same_sender"}
+                try:
+                    write_trace_log(trace)
+                except Exception:
+                    pass
+                if cfg.VERBOSE:
+                    log_filter(f"cached major-clearance candidate msg={message.id} ch={channel_id}")
+                return
+
+            pending = (self.pending_major_clearance or {}).get(pair_key)
+            if pending and self._looks_like_major_clearance_followup(text_to_check):
+                try:
+                    import discord
+
+                    allowed_mentions = discord.AllowedMentions.none()
+                    dest_after = self._apply_route_map(source_group=source_group, dest_channel_id=major_clearance_dest)
+                    first_msg = await self._send_to_destination(
+                        dest_channel_id=dest_after,
+                        content=str(pending.get("formatted_content") or ""),
+                        embeds=list(pending.get("embeds_out") or []),
+                        attachments=list(pending.get("attachments") or []) if isinstance(pending.get("attachments"), list) else None,
+                        webhook_username=str(pending.get("webhook_username") or ""),
+                        webhook_avatar_url=str(pending.get("webhook_avatar_url") or ""),
+                        allowed_mentions=allowed_mentions,
+                        return_first_message=True,
+                    )
+                    followup_embed = discord.Embed(title="Follow-up", color=0xE67E22)
+                    src_jump = str(pending.get("source_jump_url") or "").strip()
+                    if src_jump:
+                        followup_embed.add_field(name="Source message", value=f"[Jump to original]({src_jump})", inline=False)
+                    await self._send_to_destination(
+                        dest_channel_id=dest_after,
+                        content=formatted_content or "\u200b",
+                        embeds=[followup_embed.to_dict()] + (embeds_out or []),
+                        attachments=attachments if use_files else None,
+                        webhook_username=wh_username,
+                        webhook_avatar_url=wh_avatar_url,
+                        allowed_mentions=allowed_mentions,
+                        reference=first_msg,
+                    )
+                    self.pending_major_clearance.pop(pair_key, None)
+                    trace["decision"] = {"action": "sent_major_clearance_pair", "dest": int(dest_after or 0)}
+                    try:
+                        write_trace_log(trace)
+                    except Exception:
+                        pass
+                    if cfg.VERBOSE:
+                        log_forward(f"major-clearance pair msg={message.id} {channel_id} -> {dest_after}")
+                    return
+                except Exception as e:
+                    if cfg.VERBOSE:
+                        log_warn(f"major-clearance pair send failed (msg={message.id}): {type(e).__name__}: {e}")
+                    # Do not return; if pair-send fails, continue through normal routing.
+
         if not dispatch_link_types:
             trace["decision"] = {"action": "unclassified", "reason": "no_destination"}
             try:
@@ -1146,6 +1330,7 @@ class MessageForwarder:
                     except Exception as e:
                         if cfg.VERBOSE:
                             log_warn(f"Failed to add classification buttons (msg={message.id}): {type(e).__name__}: {e}")
+
                 why = ""
                 try:
                     matches = (trace.get("classifier") or {}).get("matches") or {}
@@ -1337,6 +1522,7 @@ def run_bot(*, settings: Dict[str, Any], token: str) -> Optional[int]:
             int(cfg.SMARTFILTER_FLIPS_PROFITABLE_CHANNEL_ID or 0),
             int(cfg.SMARTFILTER_FLIPS_LUNCHMONEY_CHANNEL_ID or 0),
             int(getattr(cfg, "SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID", 0) or 0),
+            int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0),
         ]
         if not any(x > 0 for x in dest_ids):
             log_warn(
