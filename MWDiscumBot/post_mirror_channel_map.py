@@ -290,12 +290,46 @@ async def _find_existing_guild_message(
     return None
 
 
+async def _cleanup_existing_mapping_messages(
+    channel: Any,
+    *,
+    bot_user_id: int,
+    history_limit: int,
+) -> int:
+    """
+    Delete previous mapping report messages authored by this bot.
+    We only delete messages that have an embed with footer containing 'Guild ID:'.
+    """
+    deleted = 0
+    try:
+        async for msg in channel.history(limit=history_limit):
+            if int(getattr(getattr(msg, "author", None), "id", 0) or 0) != int(bot_user_id):
+                continue
+            is_mapping_card = False
+            for emb in getattr(msg, "embeds", []) or []:
+                footer_text = getattr(getattr(emb, "footer", None), "text", None) or ""
+                if "Guild ID:" in str(footer_text):
+                    is_mapping_card = True
+                    break
+            if not is_mapping_card:
+                continue
+            try:
+                await msg.delete()
+                deleted += 1
+            except Exception:
+                continue
+    except Exception:
+        return deleted
+    return deleted
+
+
 async def run_report(
     bot: discord.Client,
     user_token: str,
     *,
     guild_id: Optional[int] = None,
     upsert: bool = False,
+    cleanup_before_send: bool = True,
     history_limit: int = 200,
 ) -> None:
     _progress("Loading channel_map.json and source info...")
@@ -366,6 +400,18 @@ async def run_report(
         except Exception as e:
             _progress(f"Could not get output channel: {e}")
             return
+    if cleanup_before_send and not upsert:
+        _progress(f"Cleaning existing mapping messages (history limit {history_limit})...")
+        bot_uid = int(getattr(getattr(bot, "user", None), "id", 0) or 0)
+        if bot_uid:
+            deleted = await _cleanup_existing_mapping_messages(
+                channel,
+                bot_user_id=bot_uid,
+                history_limit=history_limit,
+            )
+            _progress(f"Deleted {deleted} old mapping message(s).")
+        else:
+            _progress("Skipped cleanup (bot user id unavailable).")
     if upsert:
         _progress(f"Upserting {len(all_embeds)} embed(s) into channel {OUTPUT_CHANNEL_ID}...")
         for i, embed in enumerate(all_embeds):
@@ -412,6 +458,11 @@ def main() -> None:
         or env.get("DISCORD_TOKEN")
         or ""
     ).strip()
+    # Flags:
+    # --no-cleanup  => keep previous report messages and append new ones
+    # --upsert      => edit/insert per-guild report cards instead of cleanup+send
+    no_cleanup = "--no-cleanup" in sys.argv
+    upsert = "--upsert" in sys.argv
 
     intents = discord.Intents.default()
     intents.guilds = True
@@ -423,7 +474,12 @@ def main() -> None:
             self._user_token = user_tok
 
         async def on_ready(self) -> None:
-            await run_report(self, getattr(self, "_user_token", "") or "")
+            await run_report(
+                self,
+                getattr(self, "_user_token", "") or "",
+                upsert=upsert,
+                cleanup_before_send=(not no_cleanup),
+            )
             await self.close()
 
     client = OneShotClient(user_token, intents=intents)
