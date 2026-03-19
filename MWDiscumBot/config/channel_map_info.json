@@ -1,15 +1,525 @@
 {
-  "last_updated": "2026-03-19T15:10:53.233154Z",
+  "last_updated": "2026-03-15T16:53:39.894079Z",
   "channels": {
     "1159141256778223638": {
       "name": "‼️┃deals-important",
       "guild_id": 667532381376217089,
       "guild_name": "Divine"
     },
+    "1063258762892296192": {
+      "name": "‼️┃online-important",
+      "guild_id": 667532381376217089,
+      "guild_name": "Divine"
+    },
+    "1247959380704366753": {
+      "name": "🃏┃pokemon-important-tcg",
+      "guild_id": 667532381376217089,
+      "guild_name": "Divine"
+    },
+    "744273602924511283": {
+      "name": "❗┃member-important",
+      "guild_id": 667532381376217089,
+      "guild_name": "Divine"
+    },
+    "744273612780994701": {
+      "name": "🏪┃target-clearance",
+      "guild_id": 667532381376217089,
+      "guild_name": "Divine"
+    },
+    "744273614207189172": {
+      "name": "🏪┃walmart-clearance",
+      "guild_id": 667532381376217089,
+      "guild_name": "Divine"
+    },
+    "744273615146582116": {
+      "name": "🏪┃homedepot-clearance",
+      "guild_id": 667532381376217089,
+      "guild_name": "Divine"
+    },
+    "1212881353239040091": {
+      "name": "🏪┃lowes-clearance",
+      "guild_id": 667532381376217089,
+      "guild_name": "Divine"
+    },
+    "1070021673794941049": {
+      "name": "‼️┃instore-important",
+      "guild_id": 667532381376217089,
+      "guild_name": "Divine"
+    },
+    "1212882660318519337": {
+      "name": "🏪┃walmart-flips",
+      "guild_id": 667532381376217089,
+      "guild_name": "Divine"
+    },
+    "1212882930053947392": {
+      "name": "🏪┃target-flips",
+      "guild_id": 667532381376217089,
+      "guild_name": "Divine"
+    },
+    "1248252122026344509": {
+      "name": "🐇┃holiday-flips",
+      "guild_id": 667532381376217089,
+      "guild_name": "Divine"
+    },
+    "744273623245651978": {
+      "name": "🏪┃ross-tj-etc-flips",
+      "guild_id": 667532381376217089,
+      "guild_name": "Divine"
+    },
+    "744273626190315693": {
+      "name": "🏪┃other-stores",
+      "guild_id": 667532381376217089,
+      "guild_name": "Divine"
+    },
+    "1081722147728261231": {
+      "name": "🤑┃amazon-price-errors",
+      "guild_id": 667532381376217089,
+      "guild_name": "Divine"
+    },
+    "1102025169129701487": {
+      "name": "🤑┃deals-extra",
+      "guild_id": 667532381376217089,
+      "guild_name": "Divine"
+    },
+    "1195539972422381588": {
+      "name": "🤑┃amz-price-error-bot",
+      "guild_id": 667532381376217089,
+      "guild_name": "Divine"
+    },
+    "1266550376912650290": {
+      "name": "🤑┃deals-food",
+      "guild_id": 667532381376217089,
+      "guild_name": "Divine"
+    },
+    "1266550492461273149": {
+      "name": "🤑┃deals-freebies",
+      "guild_id": 667532381376217089,
+      "guild_name": "Divine"
+    },
+    "1403474343027019846": {
+      "name": "🚨┃aco-updates",
+      "guild_id": 667532381376217089,
+      "guild_name": "Divine"
+    },
+    "1403062528463868036": {
+      "name": "⭐┃aco-available-now",
+      "guild_id": 667532381376217089,
+      "guild_name": "Divine"
+    },
+    "1202423535822311429": {
+      "name": "🏃・run-deals",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1202423535822311430": {
+      "name": "🔥・hot-deals",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1202423535822311431": {
+      "name": "🪖・base-deals",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1202423536547795019": {
+      "name": "🔖・ross-tjmaxx-marshalls-burlington",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1202423536547795022": {
+      "name": "🏪・other-stores",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1202423536262578213": {
+      "name": "🌐・online-finds",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1202423536547795014": {
+      "name": "🃏・trading-cards",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1211779127699316767": {
+      "name": "amazon-inventory",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1211779484848758844": {
+      "name": "hd-lowes-inventory",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1211779695343833118": {
+      "name": "meijer-biglots-sams-costco-bjs-kroger",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1211780552797982771": {
+      "name": "pokemon-tracker",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1211780614383206400": {
+      "name": "bestbuy-inventory",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1211780662424502363": {
+      "name": "target-inventory",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1211780687019909150": {
+      "name": "walmart-inventory",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1351243689556447334": {
+      "name": "💥・extreme-wm-hits",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1202423536547795018": {
+      "name": "🔆・walmart-clearance",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1249710388111736844": {
+      "name": "🔆・walmart-10-under",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1253718621386178651": {
+      "name": "🏠・walmart-home",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1253718769700704328": {
+      "name": "🍳・walmart-kitchen",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1253718841608114206": {
+      "name": "👶・walmart-baby",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1253718945433911296": {
+      "name": "🧸・walmart-toys",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1253719054091292833": {
+      "name": "💄・walmart-beauty",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1253719165408383017": {
+      "name": "🔨・walmart-tools",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1253719282362355884": {
+      "name": "⛺・walmart-outdoor",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1253719443062915133": {
+      "name": "🔌・walmart-electronics",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1254441524536672267": {
+      "name": "🍔・walmart-food",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1279113602501967933": {
+      "name": "👚・walmart-clothes",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1207751844554866769": {
+      "name": "📦・amazon-finds",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1207833994897661952": {
+      "name": "🎯・target-clearance",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1223634753480298567": {
+      "name": "📈・target-flips",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1238154153197309992": {
+      "name": "💥・extreme-hd-hits",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1202423536547795020": {
+      "name": "🧰・home-depot",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1207834033057308692": {
+      "name": "🛠・lowes",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1253393924626583552": {
+      "name": "🧰・home-depot-more",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1202423535822311426": {
+      "name": "👟・sneaker-raffles",
+      "guild_id": 1202423534891311176,
+      "guild_name": "Deal Soldier"
+    },
+    "1138361251358056458": {
+      "name": "🔥・major-deals",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1138361252469551144": {
+      "name": "⚡・minor-price-3rrors",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1138361255497834536": {
+      "name": "🤑・frieza-flips",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1138361256793874473": {
+      "name": "💵・amazon-flips",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1138361282760806421": {
+      "name": "🔑・lowkey-flips",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1138361278205800558": {
+      "name": "🛒・outlet-leads",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1138361280932102186": {
+      "name": "🤌🏼・instore-flips",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1138361484389400666": {
+      "name": "⚠・price-errors",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1251780267526455457": {
+      "name": "🗣・sneaker-important",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1251780584594870313": {
+      "name": "📢・instore-alerts",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1251780531956351036": {
+      "name": "🎟・raffles",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1158862520262590586": {
+      "name": "🔆・wm-member-leads",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1340764965660790865": {
+      "name": "🔆・walmart-leads-2",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1394454102141833418": {
+      "name": "🔆・walmart-leads",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1158862674793353237": {
+      "name": "🎯・target-member-leads",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1409006683618938900": {
+      "name": "🎯・target-instore-leads",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1159428939706552340": {
+      "name": "🧰・lowes-member-leads",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1251780642904215643": {
+      "name": "🧰・lowes-leads",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1159429456222494760": {
+      "name": "🧱・hd-member-leads",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1255306873633243208": {
+      "name": "🧱・home-depot-leads-2",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1349948224982745088": {
+      "name": "🧱・home-depot-leads",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1138361457344528454": {
+      "name": "🌯・chipotle-codes",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1384603207971373106": {
+      "name": "🟢other-restocks-important",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1405257517683970158": {
+      "name": "🟢sams-club-important-online∕instore",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1384262983101845557": {
+      "name": "🟢costco-important-online∕instore",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1377466103034548304": {
+      "name": "🔔・pokémon-center-queue",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1377466440239550555": {
+      "name": "🔔・pokémon-news",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1377465833999171715": {
+      "name": "🔔・pokémon-alerts",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1251781549037326468": {
+      "name": "🤖・pokemon-in-store-stock",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1377543006374334484": {
+      "name": "📍・pokémon-vending-machines",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1384262964982583477": {
+      "name": "🟢target-weekly-restocks-instore∕online",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
+    "1384262973995880669": {
+      "name": "🟢walmart-weekly-restocks-online∕instore",
+      "guild_id": 1081282387507429387,
+      "guild_name": "FLIPFLUENCE"
+    },
     "1249725020083589130": {
       "name": "🤑┃chipotle",
       "guild_id": 667532381376217089,
       "guild_name": "Divine"
+    },
+    "1348649989781585991": {
+      "name": "🃏┃card-sports",
+      "guild_id": 667532381376217089,
+      "guild_name": "Divine"
+    },
+    "1361727285073416222": {
+      "name": "🃏┃hot-card-restocks",
+      "guild_id": 667532381376217089,
+      "guild_name": "Divine"
+    },
+    "1042280054249508874": {
+      "name": "❗︱flipflip-important",
+      "guild_id": 521154543195521025,
+      "guild_name": "FlipFlip"
+    },
+    "1200621464378949712": {
+      "name": "❗︱instore-important",
+      "guild_id": 521154543195521025,
+      "guild_name": "FlipFlip"
+    },
+    "729495549425745950": {
+      "name": "🎴︱pokemon-important",
+      "guild_id": 521154543195521025,
+      "guild_name": "FlipFlip"
+    },
+    "1356662719591481404": {
+      "name": "🎴︱sports-cards-important",
+      "guild_id": 521154543195521025,
+      "guild_name": "FlipFlip"
+    },
+    "1401987873414316103": {
+      "name": "🎴︱mtg-riftbound-important",
+      "guild_id": 521154543195521025,
+      "guild_name": "FlipFlip"
+    },
+    "751523805179936788": {
+      "name": "💿︱resell-vinyls",
+      "guild_id": 521154543195521025,
+      "guild_name": "FlipFlip"
+    },
+    "958786232777859092": {
+      "name": "💲︱lowkey-flips",
+      "guild_id": 521154543195521025,
+      "guild_name": "FlipFlip"
+    },
+    "798669984963887124": {
+      "name": "vinyl-kings🎧",
+      "guild_id": 663388213964046336,
+      "guild_name": "FNF"
+    },
+    "862416675873751050": {
+      "name": "pokemon-information🃏",
+      "guild_id": 663388213964046336,
+      "guild_name": "FNF"
+    },
+    "1204961442198069258": {
+      "name": "❗︱price-errors-important",
+      "guild_id": 521154543195521025,
+      "guild_name": "FlipFlip"
+    },
+    "985662278198259842": {
+      "name": "❗︱deals-important",
+      "guild_id": 521154543195521025,
+      "guild_name": "FlipFlip"
+    },
+    "1296182795621634158": {
+      "name": "🛎｜us-important-updates",
+      "guild_id": 1296182793407168614,
+      "guild_name": "PokeNotify"
+    },
+    "1407738759968981012": {
+      "name": "🌍｜pokemon-center-drops",
+      "guild_id": 1296182793407168614,
+      "guild_name": "PokeNotify"
     }
   }
 }
