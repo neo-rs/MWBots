@@ -730,9 +730,31 @@ DISCOUNTED_STORES = [
     "oaktree",
 ]
 
-MAJOR_STORE_PATTERN = re.compile("|".join([re.escape(s) for s in MAJOR_STORES]), re.IGNORECASE)
-DISCOUNTED_STORE_PATTERN = re.compile("|".join([re.escape(s) for s in DISCOUNTED_STORES]), re.IGNORECASE)
-ALL_STORE_PATTERN = re.compile("|".join([re.escape(s) for s in (MAJOR_STORES + DISCOUNTED_STORES)]), re.IGNORECASE)
+def _store_token_to_pattern(token: str) -> str:
+    """
+    Build a safer store-token regex that avoids substring false-positives.
+    Example: token "ea" should not match inside "average".
+    """
+    tok = str(token or "").strip()
+    if not tok:
+        return ""
+    esc = re.escape(tok)
+    # Prevent matching inside other words (letters/digits/underscore).
+    return rf"(?<!\w){esc}(?!\w)"
+
+
+MAJOR_STORE_PATTERN = re.compile(
+    "|".join([p for p in (_store_token_to_pattern(s) for s in MAJOR_STORES) if p]),
+    re.IGNORECASE,
+)
+DISCOUNTED_STORE_PATTERN = re.compile(
+    "|".join([p for p in (_store_token_to_pattern(s) for s in DISCOUNTED_STORES) if p]),
+    re.IGNORECASE,
+)
+ALL_STORE_PATTERN = re.compile(
+    "|".join([p for p in (_store_token_to_pattern(s) for s in (MAJOR_STORES + DISCOUNTED_STORES)) if p]),
+    re.IGNORECASE,
+)
 
 # Domain mapping (used for affiliated link / store-domain routing)
 STORE_DOMAINS = {

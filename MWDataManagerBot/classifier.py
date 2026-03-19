@@ -346,7 +346,12 @@ def _is_amazon_primary(text_blob: str) -> bool:
     return True
 
 
-def _looks_like_conversational_amazon_deal(text_blob: str, *, source_group: str) -> bool:
+def _looks_like_conversational_amazon_deal(
+    text_blob: str,
+    *,
+    source_group: str,
+    source_channel_id: Optional[int] = None,
+) -> bool:
     """
     DealShacks/HiddenDealSociety-style Amazon deal templates can be conversational
     (e.g. "Use code at checkout", "promo stack", "Shipped and Sold by Amazon")
@@ -356,8 +361,23 @@ def _looks_like_conversational_amazon_deal(text_blob: str, *, source_group: str)
         return False
     if source_group != "online":
         return False
+    # Extra safety: only treat as conversational-amazon when the channel is explicitly
+    # configured in source_channel_ids_online.
+    try:
+        if source_channel_id is not None and int(source_channel_id) not in getattr(cfg, "SMART_SOURCE_CHANNELS_ONLINE", set()):
+            return False
+    except Exception:
+        return False
     # These templates almost always include at least one explicit price token.
     if "$" not in text_blob:
+        return False
+    # Exclude stock-monitor / clearance-feed style embeds that can include "Amazon" in comps.
+    if re.search(
+        r"(store\s+clearance\s+deals|clearance\s+deals?\s*-\s*new\s+item|"
+        r"\binternet\s+number\b|\bpercentage\s+off\b|\bdollar\s+off\b|\btotal\s+inventory\b)",
+        text_blob,
+        re.IGNORECASE,
+    ):
         return False
     if not AMAZON_CONVERSATIONAL_DEAL_PATTERN.search(text_blob):
         return False
@@ -472,7 +492,11 @@ def select_target_channel_id(
         not skip_amazon
         and source_group == "online"
         and cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID
-        and _looks_like_conversational_amazon_deal(text_blob, source_group=source_group)
+        and _looks_like_conversational_amazon_deal(
+            text_blob,
+            source_group=source_group,
+            source_channel_id=source_channel_id,
+        )
     ):
         return cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID, "AMZ_DEALS"
 
@@ -708,7 +732,11 @@ def detect_all_link_types(
         and source_group == "online"
         and cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID
         and not amazon_detected
-        and _looks_like_conversational_amazon_deal(text_blob, source_group=source_group)
+        and _looks_like_conversational_amazon_deal(
+            text_blob,
+            source_group=source_group,
+            source_channel_id=source_channel_id,
+        )
     ):
         results.append((cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID, "AMZ_DEALS"))
 

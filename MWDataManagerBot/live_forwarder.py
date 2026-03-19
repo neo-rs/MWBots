@@ -1067,7 +1067,7 @@ class MessageForwarder:
             if int(channel_id) in cfg.SMART_SOURCE_CHANNELS_INSTORE:
                 source_group = "instore"
             elif int(channel_id) in getattr(cfg, "SMART_SOURCE_CHANNELS_CLEARANCE", set()):
-                source_group = "instore"
+                source_group = "clearance"
             elif int(channel_id) in cfg.SMART_SOURCE_CHANNELS_ONLINE:
                 source_group = "online"
             elif int(channel_id) in cfg.SMART_SOURCE_CHANNELS_MISC:
@@ -1167,7 +1167,7 @@ class MessageForwarder:
                             continue
                         src_ch = int(pending_item.get("source_channel_id") or 0)
                         src_group = "instore" if src_ch in getattr(cfg, "SMART_SOURCE_CHANNELS_INSTORE", set()) else (
-                            "instore" if src_ch in getattr(cfg, "SMART_SOURCE_CHANNELS_CLEARANCE", set()) else "unknown"
+                            "clearance" if src_ch in getattr(cfg, "SMART_SOURCE_CHANNELS_CLEARANCE", set()) else "unknown"
                         )
                         dest_after_exp = self._apply_route_map(source_group=src_group, dest_channel_id=major_clearance_dest)
                         if dest_after_exp <= 0:
