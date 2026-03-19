@@ -205,10 +205,10 @@ def build_by_guild(
     ch_to_name: Dict[int, str],
     guild_to_name: Dict[int, str],
     webhook_dest_cache: Dict[str, Tuple[Optional[int], str]],
-) -> List[Tuple[int, str, List[Tuple[str, str, int, Optional[int]]]]]:
+) -> List[Tuple[int, str, List[Tuple[Optional[int], str, List[Tuple[str, int]]]]]]:
     """
-    Returns list of (guild_id, guild_name, [(source_name, dest_name, src_cid, dest_cid), ...]) sorted by guild name.
-    webhook_dest_cache must be pre-filled (url -> (channel_id, channel_name)).
+    Returns list of (guild_id, guild_name, destination_buckets) sorted by guild name.
+    destination_buckets item: (dest_cid, dest_display, [(source_name, source_cid), ...])
     """
     by_guild: Dict[int, List[Tuple[int, str]]] = {}
     for src_cid, wh_url in channel_map.items():
@@ -219,42 +219,101 @@ def build_by_guild(
             gid = 0
         by_guild.setdefault(gid, []).append((src_cid, wh_url))
 
-    result: List[Tuple[int, str, List[Tuple[str, str, int, Optional[int]]]]] = []
+    result: List[Tuple[int, str, List[Tuple[Optional[int], str, List[Tuple[str, int]]]]]] = []
     for gid in sorted(by_guild.keys(), key=lambda x: guild_to_name.get(x, "").lower()):
         gname = guild_to_name.get(gid, f"Guild-{gid}" if gid else "Unknown guild")
-        rows: List[Tuple[str, str, int, Optional[int]]] = []
+        grouped_dest: Dict[str, Tuple[Optional[int], str, List[Tuple[str, int]]]] = {}
         for src_cid, wh_url in by_guild[gid]:
             src_name = ch_to_name.get(src_cid, f"channel-{src_cid}")
             dest_cid, dest_name = webhook_dest_cache.get(wh_url, (None, "?"))
-            rows.append((src_name, dest_name, src_cid, dest_cid))
-        rows.sort(key=lambda r: (r[0].lower(), r[1].lower()))
-        result.append((gid, gname, rows))
+            dest_display = f"<#{dest_cid}>" if dest_cid else (dest_name or "?")
+            key = str(dest_cid) if dest_cid else f"name:{dest_name}"
+            if key not in grouped_dest:
+                grouped_dest[key] = (dest_cid, dest_display, [])
+            grouped_dest[key][2].append((src_name, src_cid))
+
+        buckets = list(grouped_dest.values())
+        # Sort destinations by rendered display; sources by source channel name.
+        buckets.sort(key=lambda b: (str(b[1]).lower(), int(b[0] or 0)))
+        for idx, (dcid, ddisp, srcs) in enumerate(buckets):
+            srcs.sort(key=lambda s: (s[0].lower(), s[1]))
+            buckets[idx] = (dcid, ddisp, srcs)
+        result.append((gid, gname, buckets))
     return result
 
 
-def build_embeds(by_guild: List[Tuple[int, str, List[Tuple[str, str, int, Optional[int]]]]]) -> List[discord.Embed]:
+def _build_guild_embed_parts(
+    guild_name: str,
+    guild_id: int,
+    destination_buckets: List[Tuple[Optional[int], str, List[Tuple[str, int]]]],
+) -> List[discord.Embed]:
     """
-    Build one embed per guild. Each mapping: bold names (no # prefix), then a line with clickable <#id> links.
-    Format: **source-name** → **dest-name**
-            -# <#src_id> → <#dest_id>
+    Build one or more embeds for a single guild using compact destination-grouped layout.
+    The layout places two destination groups side-by-side using padded text rows.
     """
+    # Build textual rows first, then chunk into 4096-safe embed descriptions.
+    rows: List[str] = []
+    # Padding width for the left destination column when rendering two columns.
+    # Discord wraps aggressively in embeds; keeping this smaller reduces total line length.
+    col_width = 46
+    for i in range(0, len(destination_buckets), 2):
+        left = destination_buckets[i]
+        right = destination_buckets[i + 1] if i + 1 < len(destination_buckets) else None
+
+        left_header = left[1]
+        right_header = right[1] if right else ""
+        rows.append(f"{left_header.ljust(col_width)}{right_header}")
+
+        left_lines = [f"-# {src_name} <#{src_id}>" for src_name, src_id in left[2]]
+        right_lines = [f"-# {src_name} <#{src_id}>" for src_name, src_id in (right[2] if right else [])]
+        max_len = max(len(left_lines), len(right_lines), 1)
+        for j in range(max_len):
+            ltxt = left_lines[j] if j < len(left_lines) else ""
+            rtxt = right_lines[j] if j < len(right_lines) else ""
+            rows.append(f"{ltxt.ljust(col_width)}{rtxt}".rstrip())
+        rows.append("")
+
+    if not rows:
+        rows = ["_No mappings_"]
+
+    # Split into multiple embeds for large guilds.
+    parts: List[str] = []
+    current = ""
+    for line in rows:
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > 3900:
+            parts.append(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        parts.append(current)
+    if not parts:
+        parts = ["_No mappings_"]
+
+    total_sources = sum(len(bucket[2]) for bucket in destination_buckets)
     embeds: List[discord.Embed] = []
-    for gid, gname, rows in by_guild:
-        lines: List[str] = []
-        for src_name, dest_name, src_cid, dest_cid in rows:
-            lines.append(f"**{src_name}** → **{dest_name}**")
-            dest_part = f"<#{dest_cid}>" if dest_cid else "?"
-            lines.append(f"-# <#{src_cid}> → {dest_part}")
-        body = "\n".join(lines) if lines else "_No mappings_"
-        if len(body) > 4096:
-            body = body[:4090] + "\n…"
-        embed = discord.Embed(
-            title=f"📁 {gname}",
-            description=body,
+    for idx, part in enumerate(parts):
+        title = f"📁 {guild_name} - `{guild_id}`"
+        if len(parts) > 1:
+            title = f"{title} (part {idx + 1}/{len(parts)})"
+        emb = discord.Embed(
+            title=title,
+            description=part,
             color=0x5865F2,
         )
-        embed.set_footer(text=f"Guild ID: {gid}  •  {len(rows)} channel(s)")
-        embeds.append(embed)
+        emb.set_footer(text=f"Guild ID: {guild_id}  •  {total_sources} channel(s)")
+        embeds.append(emb)
+    return embeds
+
+
+def build_embeds(
+    by_guild: List[Tuple[int, str, List[Tuple[Optional[int], str, List[Tuple[str, int]]]]]]
+) -> List[discord.Embed]:
+    """Build one or more embeds per guild in compact destination-grouped layout."""
+    embeds: List[discord.Embed] = []
+    for gid, gname, destination_buckets in by_guild:
+        embeds.extend(_build_guild_embed_parts(gname, gid, destination_buckets))
     return embeds
 
 
@@ -381,7 +440,7 @@ async def run_report(
     if target_guild_id and target_guild_id > 0 and not by_guild:
         # If we were asked for one guild but it currently has no mappings, still upsert an explicit "no mappings" card.
         gname = guild_to_name.get(target_guild_id, f"Guild-{target_guild_id}") or f"Guild-{target_guild_id}"
-        embed = discord.Embed(title=f"📁 {gname}", description="_No mappings_", color=0x5865F2)
+        embed = discord.Embed(title=f"📁 {gname} - `{target_guild_id}`", description="_No mappings_", color=0x5865F2)
         embed.set_footer(text=f"Guild ID: {target_guild_id}  •  0 channel(s)")
         all_embeds = [embed]
         by_guild = [(target_guild_id, gname, [])]  # for progress logging only
