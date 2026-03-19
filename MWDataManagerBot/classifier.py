@@ -135,7 +135,19 @@ def classify_instore_destination(
     # Check patterns once
     seasonal_hit = bool(SEASONAL_PATTERN.search(text_to_check or ""))
     sneakers_hit = bool(SNEAKERS_PATTERN.search(text_to_check or ""))
-    cards_hit = bool(CARDS_PATTERN.search(text_to_check or ""))
+    # "Cards" detection can get false positives if we only rely on set shorthand.
+    # Require explicit card/trading context words as well.
+    cards_match = CARDS_PATTERN.search(text_to_check or "")
+    card_context_hit = bool(
+        re.search(
+            r"(pokemon|magic\s*the\s*gathering|mtg|yugioh|one\s*piece\s*card|dragon\s*ball\s*card|"
+            r"trading\s*cards?|sports\s*cards?|tcg|ccg|booster\s*(pack|box)?|slab|psa\s*\d+|bgs\s*\d+|cgc\s*\d+|"
+            r"topps|panini|upper\s*deck)",
+            text_to_check or "",
+            re.IGNORECASE,
+        )
+    )
+    cards_hit = bool(cards_match) and card_context_hit
     theatre_hit = bool(matches_instore_theatre(text_to_check or "", where_location))
     major_hit = bool(MAJOR_STORE_PATTERN.search(text_to_check or "") or store_category == "major")
     discounted_hit = bool(DISCOUNTED_STORE_PATTERN.search(text_to_check or "") or store_category == "discounted")
