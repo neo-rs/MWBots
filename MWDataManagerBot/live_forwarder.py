@@ -182,12 +182,13 @@ class MessageForwarder:
         tl = (text or "").lower()
         if not tl:
             return False
+        # Avoid catching normal in-store templates (Retail/Resell/Where) as follow-ups.
+        if re.search(r"\bretail\s*[:\-]|\bresell\s*[:\-]|\bwhere\s*[:\-]|\blocation\s*[:\-]", tl):
+            return False
+        # Keep this strict: only clear "context reply" phrasing should count.
         hints = [
             "would look for this",
             "lots of stock",
-            "sold",
-            "save up to",
-            "sell one like this",
         ]
         if any(h in tl for h in hints):
             return True
