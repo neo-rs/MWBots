@@ -339,7 +339,13 @@ COMMON_REDIRECT_KEYS = ("url", "link", "redirect", "target", "u", "r", "to", "de
 
 AFFILIATE_LINK_DOMAINS_REDIRECT = {"howl.link", "mavely.app.link", "go.magik.ly", "magik.ly"}
 AFFILIATE_LINK_DOMAINS_QUERY = {"galaxydeals.net"}
-AFFILIATE_LINK_DOMAINS_HTML = {"dmflip.com", "ringinthedeals.com"}
+AFFILIATE_LINK_DOMAINS_HTML = {
+    "dmflip.com",
+    "ringinthedeals.com",
+    # Deal wrappers that usually lead to Amazon product pages.
+    "dealshacks.com",
+    "hiddendealsociety.com",
+}
 AFFILIATE_LINK_DOMAINS = AFFILIATE_LINK_DOMAINS_REDIRECT | AFFILIATE_LINK_DOMAINS_QUERY | AFFILIATE_LINK_DOMAINS_HTML
 
 _AMAZON_HOST_RE = re.compile(r"(?:^|\.)amazon\.[a-z.]{2,}$", re.IGNORECASE)
@@ -758,6 +764,153 @@ async def augment_text_with_ringinthedeals(text: str) -> Tuple[str, List[str]]:
             extracted.append(r)
     if extracted:
         text = (text + " " + " ".join(extracted)).strip()
+    return text, extracted
+
+
+async def extract_amazon_link_from_dealshacks_or_hiddendealsociety(url: str) -> Optional[str]:
+    """
+    Resolve DealShacks / HiddenDealSociety deal pages to the first Amazon product link found.
+
+    This is best-effort because the "GO TO DEAL" flow might:
+      - embed the final Amazon link directly in HTML, or
+      - include another wrapper link that then contains the Amazon link.
+    """
+    if not url or not isinstance(url, str):
+        return None
+    u = url.strip()
+    if not u.startswith(("http://", "https://")):
+        u = "https://" + u
+
+    # Precompile patterns once per call (kept local for simplicity).
+    amazon_url_pattern = re.compile(
+        r"https?://[^/\s]*amazon\.[a-z.]{2,}/[^\s<>\'\"\)]+",
+        re.IGNORECASE,
+    )
+    amzn_pattern = re.compile(
+        r"https?://(?:www\.)?(?:amzn\.to|a\.co)/[A-Za-z0-9]+",
+        re.IGNORECASE,
+    )
+    asin_pattern = re.compile(r"\bB0[A-Z0-9]{8}\b", re.IGNORECASE)
+
+    dealshacks_pattern = re.compile(
+        r"https?://(?:www\.)?dealshacks\.com/[^\s<>\'\"\)]+",
+        re.IGNORECASE,
+    )
+    hidden_pattern = re.compile(
+        r"https?://(?:www\.)?hiddendealsociety\.com/deal/[^\s<>\'\"\)]+",
+        re.IGNORECASE,
+    )
+
+    # Two-hop resolution: starting wrapper -> maybe secondary wrapper -> amazon.
+    for _hop in range(2):
+        try:
+            import aiohttp  # type: ignore
+        except Exception:
+            return None
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=10)
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            }
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+                async with session.get(u, allow_redirects=True, max_redirects=10) as response:
+                    if int(getattr(response, "status", 0) or 0) >= 400:
+                        return None
+                    html = await response.text(errors="ignore")
+        except Exception:
+            return None
+
+        candidates: List[str] = []
+        try:
+            candidates.extend(amazon_url_pattern.findall(html)[:50])
+            candidates.extend(amzn_pattern.findall(html)[:20])
+            # As a last resort, grab ASINs.
+            candidates.extend(asin_pattern.findall(html)[:20])
+        except Exception:
+            candidates = []
+
+        for raw in candidates:
+            if not raw or not isinstance(raw, str):
+                continue
+
+            # If we got an ASIN token only, build an amazon URL.
+            if asin_pattern.fullmatch(raw.strip().upper()):
+                try:
+                    return canonicalize_amazon_url_keep_tag(f"https://www.amazon.com/dp/{raw.strip().upper()}")
+                except Exception:
+                    pass
+                continue
+
+            unwrapped = unwrap_single_url(raw, prefer_domains={"amazon.", "amzn.to", "a.co"}) or raw
+            host = (urlparse(unwrapped).netloc or "").lower()
+            if _AMAZON_HOST_RE.search(host) or _AMZN_SHORT_RE.match(unwrapped):
+                try:
+                    return canonicalize_amazon_url_keep_tag(unwrapped)
+                except Exception:
+                    return normalize_url(unwrapped)
+
+        # If we didn't find amazon links, try hopping to another wrapper if present.
+        try:
+            next_hidden = hidden_pattern.search(html)
+            if next_hidden:
+                u = next_hidden.group(0)
+                continue
+            next_dealshacks = dealshacks_pattern.search(html)
+            if next_dealshacks:
+                u = next_dealshacks.group(0)
+                continue
+        except Exception:
+            pass
+
+        break
+
+    return None
+
+
+async def augment_text_with_dealshacks_hiddendealsociety(text: str) -> Tuple[str, List[str]]:
+    """
+    Expand deal wrapper URLs into extracted Amazon URLs.
+
+    We append extracted destination URLs to the text blob so the strict Amazon classifier
+    (AMAZON_LINK_PATTERN) can match real amazon.com/amzn.to links.
+    """
+    if not text:
+        return text, []
+
+    dealshacks_re = re.compile(r"https?://(?:www\.)?dealshacks\.com/[^\s<>\'\"\)]+", re.IGNORECASE)
+    hidden_re = re.compile(r"https?://(?:www\.)?hiddendealsociety\.com/deal/[^\s<>\'\"\)]+", re.IGNORECASE)
+
+    matches: List[str] = []
+    try:
+        matches.extend(dealshacks_re.findall(text)[:5])
+        matches.extend(hidden_re.findall(text)[:5])
+    except Exception:
+        matches = []
+
+    if not matches:
+        return text, []
+
+    # Preserve order but dedupe.
+    seen: Set[str] = set()
+    ordered: List[str] = []
+    for m in matches:
+        if m and m not in seen:
+            seen.add(m)
+            ordered.append(m)
+
+    tasks = [extract_amazon_link_from_dealshacks_or_hiddendealsociety(u) for u in ordered[:5]]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    extracted: List[str] = []
+    for r in results:
+        if isinstance(r, str) and r:
+            extracted.append(r)
+
+    if extracted:
+        # Prepend extracted Amazon links so the classifier sees Amazon as the "primary"
+        # store even when the message also mentions other stores (e.g. Target/Ace).
+        text = (" ".join(extracted) + " " + text).strip()
     return text, extracted
 
 

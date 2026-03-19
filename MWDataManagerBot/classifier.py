@@ -9,6 +9,7 @@ from logging_utils import log_debug, log_smartfilter
 from patterns import (
     ALL_STORE_PATTERN,
     AMAZON_ASIN_PATTERN,
+    AMAZON_CONVERSATIONAL_DEAL_PATTERN,
     AMAZON_LINK_PATTERN,
     AMAZON_PROFITABLE_INDICATOR_PATTERN,
     CARDS_PATTERN,
@@ -21,6 +22,7 @@ from patterns import (
     SEASONAL_PATTERN,
     SNEAKERS_PATTERN,
     STORE_DOMAINS,
+    WOOT_DEALS_PATTERN,
     TIMESTAMP_PATTERN,
 )
 from utils import matches_instore_theatre
@@ -315,13 +317,52 @@ def _primary_store_label_from_blob(text_blob: str) -> str:
     return best_store
 
 
+def _store_label_present_in_blob(text_blob: str, store_label: str) -> bool:
+    """True if any known store-domain mapped to `store_label` exists in the blob."""
+    tl = (text_blob or "").lower()
+    target = str(store_label or "").strip().lower()
+    if not tl or not target:
+        return False
+    for dom, store in (STORE_DOMAINS or {}).items():
+        try:
+            if str(store).strip().lower() != target:
+                continue
+            if str(dom).strip().lower() in tl:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _is_amazon_primary(text_blob: str) -> bool:
+    # If Woot appears anywhere, treat Amazon as NOT primary even if amzn.to exists.
+    if _store_label_present_in_blob(text_blob, "woot") or WOOT_DEALS_PATTERN.search(text_blob or ""):
+        return False
     primary = _primary_store_label_from_blob(text_blob)
     # If we can detect a primary store and it's not amazon, do NOT treat "Amazon" comp links as AMAZON.
     if primary and primary != "amazon":
         return False
     # If no store-domain detected, fall back to existing amazon-match behavior.
     return True
+
+
+def _looks_like_conversational_amazon_deal(text_blob: str, *, source_group: str) -> bool:
+    """
+    DealShacks/HiddenDealSociety-style Amazon deal templates can be conversational
+    (e.g. "Use code at checkout", "promo stack", "Shipped and Sold by Amazon")
+    and may not include an explicit amazon.com/amzn.to link in the text blob.
+    """
+    if not text_blob:
+        return False
+    if source_group != "online":
+        return False
+    # These templates almost always include at least one explicit price token.
+    if "$" not in text_blob:
+        return False
+    if not AMAZON_CONVERSATIONAL_DEAL_PATTERN.search(text_blob):
+        return False
+    # Avoid misrouting Woot content as Amazon.
+    return _is_amazon_primary(text_blob)
 
 
 def select_target_channel_id(
@@ -392,6 +433,19 @@ def select_target_channel_id(
                 pass
         return cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID, "PRICE_ERROR"
 
+    # WOOT: Woot deals can include affiliate Amazon tracking (amzn.to links),
+    # causing them to be detected as Amazon. Route to INSTORE_LEADS instead.
+    if (
+        _store_label_present_in_blob(text_blob, "woot")
+        or WOOT_DEALS_PATTERN.search(text_blob or "")
+    ) and cfg.SMARTFILTER_INSTORE_LEADS_CHANNEL_ID:
+        if trace is not None:
+            try:
+                trace.setdefault("classifier", {}).setdefault("matches", {})["primary_store"] = "woot"
+            except Exception:
+                pass
+        return cfg.SMARTFILTER_INSTORE_LEADS_CHANNEL_ID, "INSTORE_LEADS"
+
     # 1) AMAZON (strict) – profitable flips → AMAZON_PROFITABLE_LEADS
     amazon_match = AMAZON_LINK_PATTERN.search(text_blob) if not skip_amazon else None
     if amazon_match and (cfg.SMARTFILTER_AMAZON_CHANNEL_ID or cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID):
@@ -407,10 +461,20 @@ def select_target_channel_id(
             )
             if is_profitable and cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID:
                 return cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID, "AMAZON_PROFITABLE_LEADS"
-            if cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID:
-                return cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID, "AMAZON_FALLBACK"
             if cfg.SMARTFILTER_AMAZON_CHANNEL_ID:
                 return cfg.SMARTFILTER_AMAZON_CHANNEL_ID, "AMAZON"
+            if cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID:
+                # Last-resort for strict Amazon when AMAZON bucket isn't configured.
+                return cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID, "AMAZON_FALLBACK"
+
+    # Conversational Amazon deal bucket (deal templates without explicit amazon.com/amzn.to).
+    if (
+        not skip_amazon
+        and source_group == "online"
+        and cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID
+        and _looks_like_conversational_amazon_deal(text_blob, source_group=source_group)
+    ):
+        return cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID, "AMZ_DEALS"
 
     # 2) MONITORED_KEYWORD
     keyword_hit = bool(keywords_list and check_keyword_match(text_blob, keywords_list, trace=trace))
@@ -524,6 +588,9 @@ def select_target_channel_id(
     # Avoid false positives from text like "Links: Amazon" (must include an actual Amazon URL/ASIN).
     if (not skip_amazon) and cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID and AMAZON_LINK_PATTERN.search(text_blob) and _is_amazon_primary(text_blob):
         return cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID, "AMAZON_FALLBACK"
+    # Clearance content should not drop into DEFAULT (e.g. #amz-deals).
+    if source_group == "clearance":
+        return None
     if cfg.SMARTFILTER_DEFAULT_CHANNEL_ID and bool(getattr(cfg, "ENABLE_DEFAULT_FALLBACK", False)):
         return cfg.SMARTFILTER_DEFAULT_CHANNEL_ID, "DEFAULT"
     return None
@@ -599,6 +666,20 @@ def detect_all_link_types(
             except Exception:
                 pass
 
+    # WOOT: Woot deals can include affiliate Amazon tracking (amzn.to links),
+    # causing them to be detected as "Amazon". Route them to INSTORE_LEADS
+    # so they go through the in-store classification buttons.
+    if (
+        _store_label_present_in_blob(text_blob, "woot")
+        or WOOT_DEALS_PATTERN.search(text_blob or "")
+    ) and cfg.SMARTFILTER_INSTORE_LEADS_CHANNEL_ID:
+        if trace is not None:
+            try:
+                trace.setdefault("classifier", {}).setdefault("matches", {})["primary_store"] = "woot"
+            except Exception:
+                pass
+        return [(cfg.SMARTFILTER_INSTORE_LEADS_CHANNEL_ID, "INSTORE_LEADS")]
+
     amazon_detected = False
     amazon_match = AMAZON_LINK_PATTERN.search(text_blob) if not skip_amazon else None
     if amazon_match and (cfg.SMARTFILTER_AMAZON_CHANNEL_ID or cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID):
@@ -610,15 +691,26 @@ def detect_all_link_types(
             )
             if is_profitable and cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID:
                 results.append((cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID, "AMAZON_PROFITABLE_LEADS"))
-            elif cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID:
-                results.append((cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID, "AMAZON_FALLBACK"))
             elif cfg.SMARTFILTER_AMAZON_CHANNEL_ID:
                 results.append((cfg.SMARTFILTER_AMAZON_CHANNEL_ID, "AMAZON"))
+            elif cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID:
+                # Last-resort for strict Amazon when AMAZON bucket isn't configured.
+                results.append((cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID, "AMAZON_FALLBACK"))
             if trace is not None:
                 try:
                     trace.setdefault("classifier", {}).setdefault("matches", {})["amazon"] = matched[:200]
                 except Exception:
                     pass
+
+    # Conversational Amazon deal bucket (deal templates without explicit amazon.com/amzn.to).
+    if (
+        (not skip_amazon)
+        and source_group == "online"
+        and cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID
+        and not amazon_detected
+        and _looks_like_conversational_amazon_deal(text_blob, source_group=source_group)
+    ):
+        results.append((cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID, "AMZ_DEALS"))
 
     keyword_hit = bool(keywords_list and check_keyword_match(text_blob, keywords_list, trace=trace))
     if trace is not None:
@@ -711,12 +803,17 @@ def detect_all_link_types(
                 results.append((cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID, "AFFILIATED_LINKS"))
 
     # If Amazon detected, suppress other store destinations (keep PRICE_ERROR as it can co-exist)
-    if any(tag in ("AMAZON", "AMAZON_PROFITABLE_LEADS", "AMAZON_FALLBACK") for _, tag in results):
-        results = [(cid, tag) for cid, tag in results if tag in ("AMAZON", "AMAZON_PROFITABLE_LEADS", "AMAZON_FALLBACK", "PRICE_ERROR")]
+    if any(tag in ("AMAZON", "AMAZON_PROFITABLE_LEADS", "AMAZON_FALLBACK", "AMZ_DEALS") for _, tag in results):
+        results = [(cid, tag) for cid, tag in results if tag in ("AMAZON", "AMAZON_PROFITABLE_LEADS", "AMAZON_FALLBACK", "AMZ_DEALS", "PRICE_ERROR")]
 
     # DEFAULT fallback if nothing
     if not results:
-        if amazon_detected and cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID:
+        # Clearance sources should not fall into "DEFAULT / amz-deals" buckets.
+        # Leave results empty so the forwarder uses UNCLASSIFIED picker
+        # (which routes to your UNCLASSIFIED channel, not INSTORE_LEADS).
+        if source_group == "clearance":
+            pass
+        elif amazon_detected and cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID:
             results.append((cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID, "AMAZON_FALLBACK"))
         elif cfg.SMARTFILTER_DEFAULT_CHANNEL_ID and bool(getattr(cfg, "ENABLE_DEFAULT_FALLBACK", False)):
             results.append((cfg.SMARTFILTER_DEFAULT_CHANNEL_ID, "DEFAULT"))

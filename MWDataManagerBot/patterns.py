@@ -276,9 +276,39 @@ PROFITABLE_FLIP_PATTERN = re.compile(
     r"\b(200%|300%|400%|500%|\d{3,}%|3x|4x|5x|\d+x\s*retail|high\s*roi|exceptional\s*margin|great\s*flip|easy\s*money|quick\s*flip)\b",
     re.IGNORECASE,
 )
+# Woot leads are often wrapped with Amazon affiliate tracking (amzn.to links),
+# so we treat them as a separate primary store class.
+WOOT_DEALS_PATTERN = re.compile(r"\bwoot\s*deals\b", re.IGNORECASE)
+
 # Amazon profitable flip indicators (Keepa-style: avg 30, % drop, etc.)
 AMAZON_PROFITABLE_INDICATOR_PATTERN = re.compile(
     r"\b(avg\s*30|average\s*30|avg\s*365|\d+%\s*drop|\d+%\s*off|amazon\s*sold|flip\s*alert)\b",
+    re.IGNORECASE,
+)
+
+# Conversational Amazon deal templates (often missing explicit amazon.com/amzn.to links).
+# Based on your historical `logs/Datalogs/Amazon.json`, common phrases include:
+# - "Use Promo Code"
+# - "Free at checkout. Clip the coupon."
+# - "Buy on Amazon"
+# - "shipped and sold by amazon"
+AMAZON_CONVERSATIONAL_DEAL_PATTERN = re.compile(
+    r"\b("
+    r"use\s+code\s+at\s+checkout"
+    r"|use\s+promo\s+code"
+    r"|apply\s+promo\s*code"
+    r"|promo\s+stack"
+    r"|with\s+code\b"
+    r"|subscribe\s*&\s*save"
+    r"|must\s+subscribe\s*&\s*save"
+    r"|clip\s+(?:the\s+)?\d+\s*%\s*off\s+coupon"
+    r"|clip\s+(?:the\s+)?coupon"
+    r"|promo\s+drops"
+    r"|lowest\s+ever\s+on\s+amazon"
+    r"|free\s+at\s+checkout"
+    r"|buy\s+on\s+amazon"
+    r"|shipped\s+and\s+sold\s+by\s+amazon"
+    r")\b",
     re.IGNORECASE,
 )
 
@@ -709,6 +739,7 @@ STORE_DOMAINS = {
     "amazon.com": "amazon",
     "amzn.to": "amazon",
     "a.co": "amazon",
+    "woot.com": "woot",
     "walmart.com": "walmart",
     "target.com": "target",
     "bestbuy.com": "best buy",

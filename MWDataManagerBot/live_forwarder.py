@@ -12,6 +12,7 @@ from logging_utils import log_debug, log_error, log_global, log_info, log_filter
 import settings_store as cfg
 from utils import (
     augment_text_with_affiliate_redirects,
+    augment_text_with_dealshacks_hiddendealsociety,
     augment_text_with_dmflip,
     augment_text_with_ringinthedeals,
     append_image_attachments_as_embeds,
@@ -61,6 +62,7 @@ class MessageForwarder:
 
         self.global_content_cache: Dict[str, float] = {}
         self.global_content_ttl_seconds: int = int(cfg.GLOBAL_DUPLICATE_TTL_SECONDS or 300)
+        self.pending_major_clearance_followups: Dict[Tuple[int, str], Dict[str, Any]] = {}
         self.pending_major_clearance: Dict[Tuple[int, str], Dict[str, Any]] = {}
 
     def _is_global_duplicate(self, signature: str) -> bool:
@@ -187,7 +189,13 @@ class MessageForwarder:
             "save up to",
             "sell one like this",
         ]
-        return any(h in tl for h in hints)
+        if any(h in tl for h in hints):
+            return True
+        # TempoMonitors stock-list follow-ups are often like:
+        # "@Arizona 85541 - 1 stock @ $14"
+        if re.search(r"\bstock\s*@\s*\$?\s*\d+", tl):
+            return True
+        return False
 
     async def _send_to_destination(
         self,
@@ -417,6 +425,7 @@ class MessageForwarder:
         _add("MONITORED_KEYWORD", cfg.SMARTFILTER_MONITORED_KEYWORD_CHANNEL_ID, "Monitored keyword")
         _add("AMAZON", cfg.SMARTFILTER_AMAZON_CHANNEL_ID, "Amazon")
         _add("AMAZON_FALLBACK", cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID, "Amazon (fallback)")
+        _add("AMZ_DEALS", cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID, "Amazon • Deals (conversational)")
 
         # Global-trigger buckets
         _add("PRICE_ERROR", cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID, "Global • Price error/glitched")
@@ -835,7 +844,7 @@ class MessageForwarder:
             if cfg.VERBOSE:
                 log_warn(f"Failed to add classification buttons: {type(e).__name__}: {e}")
 
-    async def handle_message(self, message) -> None:
+    async def handle_message(self, message, *, is_edit: bool = False) -> None:
         # Gate
         try:
             guild_id = int(getattr(getattr(message, "guild", None), "id", 0) or 0)
@@ -927,11 +936,18 @@ class MessageForwarder:
                 raw_links = extract_all_raw_links_from_text(text_to_check)
                 text_to_check, dmflip_links = await augment_text_with_dmflip(text_to_check)
                 text_to_check, ring_links = await augment_text_with_ringinthedeals(text_to_check)
+                text_to_check, dealshacks_links = await augment_text_with_dealshacks_hiddendealsociety(text_to_check)
                 text_to_check, affiliate_links = await augment_text_with_affiliate_redirects(text_to_check)
                 # Merge and de-dupe while preserving order
                 seen = set()
                 merged: List[str] = []
-                for u in (raw_links or []) + (dmflip_links or []) + (ring_links or []) + (affiliate_links or []):
+                for u in (
+                    (raw_links or [])
+                    + (dmflip_links or [])
+                    + (ring_links or [])
+                    + (dealshacks_links or [])
+                    + (affiliate_links or [])
+                ):
                     if not u or not isinstance(u, str):
                         continue
                     if u in seen:
@@ -1113,24 +1129,42 @@ class MessageForwarder:
             send_single_on_timeout = bool(getattr(cfg, "MAJOR_CLEARANCE_SEND_SINGLE_ON_TIMEOUT", False))
 
             # Flush expired pending candidates (optional single-send fallback).
-            expired_items: List[Tuple[Tuple[int, str], Dict[str, Any]]] = []
+            expired_first_items: List[Tuple[Tuple[int, str], Dict[str, Any]]] = []
+            expired_followup_items: List[Tuple[Tuple[int, str], Dict[str, Any]]] = []
             try:
                 for k, v in (self.pending_major_clearance or {}).items():
                     if (now_ts - float(v.get("timestamp", 0.0))) > ttl_s:
-                        expired_items.append((k, v))
+                        expired_first_items.append((k, v))
             except Exception:
-                expired_items = []
-            for k, _v in expired_items:
+                expired_first_items = []
+            try:
+                for k, v in (self.pending_major_clearance_followups or {}).items():
+                    if (now_ts - float(v.get("timestamp", 0.0))) > ttl_s:
+                        expired_followup_items.append((k, v))
+            except Exception:
+                expired_followup_items = []
+
+            for k, _v in expired_first_items:
                 try:
                     self.pending_major_clearance.pop(k, None)
                 except Exception:
                     pass
-            if send_single_on_timeout and expired_items:
+            for k, _v in expired_followup_items:
+                try:
+                    self.pending_major_clearance_followups.pop(k, None)
+                except Exception:
+                    pass
+
+            if send_single_on_timeout and expired_first_items:
                 try:
                     import discord
 
                     allowed_mentions = discord.AllowedMentions.none()
-                    for _k, pending_item in expired_items[:20]:
+                    for _k, pending_item in expired_first_items[:20]:
+                        # Safety guard: if the "first embed" match was created purely by an edit,
+                        # don't send it alone on timeout (it tends to cause false positives).
+                        if bool(pending_item.get("from_edit")):
+                            continue
                         src_ch = int(pending_item.get("source_channel_id") or 0)
                         src_group = "instore" if src_ch in getattr(cfg, "SMART_SOURCE_CHANNELS_INSTORE", set()) else (
                             "instore" if src_ch in getattr(cfg, "SMART_SOURCE_CHANNELS_CLEARANCE", set()) else "unknown"
@@ -1161,6 +1195,57 @@ class MessageForwarder:
 
             is_candidate_embed = self._looks_like_major_clearance_embed(text_to_check)
             if is_candidate_embed:
+                followup_cached = (self.pending_major_clearance_followups or {}).get(pair_key)
+                # If follow-up arrived earlier, send the pair immediately (even if the first came from edit).
+                if followup_cached:
+                    try:
+                        import discord
+
+                        allowed_mentions = discord.AllowedMentions.none()
+                        dest_after = self._apply_route_map(source_group=source_group, dest_channel_id=major_clearance_dest)
+
+                        first_msg = await self._send_to_destination(
+                            dest_channel_id=dest_after,
+                            content=str(formatted_content or ""),
+                            embeds=list(embeds_out or []),
+                            attachments=list(attachments or []) if use_files else None,
+                            webhook_username=wh_username,
+                            webhook_avatar_url=wh_avatar_url,
+                            allowed_mentions=allowed_mentions,
+                            return_first_message=True,
+                        )
+
+                        followup_embed = discord.Embed(title="Follow-up", color=0xE67E22)
+                        # Use first's jump_url when available.
+                        src_jump = str(getattr(message, "jump_url", "") or "").strip()
+                        if src_jump:
+                            followup_embed.add_field(name="Source message", value=f"[Jump to original]({src_jump})", inline=False)
+
+                        await self._send_to_destination(
+                            dest_channel_id=dest_after,
+                            content=str(followup_cached.get("formatted_content") or "") or "\u200b",
+                            embeds=[followup_embed.to_dict()] + list(followup_cached.get("embeds_out") or []),
+                            attachments=followup_cached.get("attachments") if use_files else None,
+                            webhook_username=str(followup_cached.get("webhook_username") or ""),
+                            webhook_avatar_url=str(followup_cached.get("webhook_avatar_url") or ""),
+                            allowed_mentions=allowed_mentions,
+                            reference=first_msg,
+                        )
+
+                        self.pending_major_clearance.pop(pair_key, None)
+                        self.pending_major_clearance_followups.pop(pair_key, None)
+                        trace["decision"] = {"action": "sent_major_clearance_pair_rev_order", "dest": int(dest_after or 0)}
+                        try:
+                            write_trace_log(trace)
+                        except Exception:
+                            pass
+                        if cfg.VERBOSE:
+                            log_forward(f"major-clearance pair(rev) msg={message.id} {channel_id} -> {dest_after}")
+                        return
+                    except Exception as e:
+                        if cfg.VERBOSE:
+                            log_warn(f"major-clearance pair(rev-order) failed (msg={message.id}): {type(e).__name__}: {e}")
+
                 self.pending_major_clearance[pair_key] = {
                     "timestamp": now_ts,
                     "formatted_content": formatted_content,
@@ -1171,6 +1256,7 @@ class MessageForwarder:
                     "source_jump_url": str(getattr(message, "jump_url", "") or ""),
                     "source_channel_id": int(channel_id or 0),
                     "source_message_id": int(getattr(message, "id", 0) or 0),
+                    "from_edit": bool(is_edit),
                 }
                 trace["decision"] = {"action": "pending_major_clearance", "reason": "waiting_followup_same_sender"}
                 try:
@@ -1182,44 +1268,68 @@ class MessageForwarder:
                 return
 
             pending = (self.pending_major_clearance or {}).get(pair_key)
-            if pending and self._looks_like_major_clearance_followup(text_to_check):
+            if self._looks_like_major_clearance_followup(text_to_check):
                 try:
                     import discord
 
-                    allowed_mentions = discord.AllowedMentions.none()
-                    dest_after = self._apply_route_map(source_group=source_group, dest_channel_id=major_clearance_dest)
-                    first_msg = await self._send_to_destination(
-                        dest_channel_id=dest_after,
-                        content=str(pending.get("formatted_content") or ""),
-                        embeds=list(pending.get("embeds_out") or []),
-                        attachments=list(pending.get("attachments") or []) if isinstance(pending.get("attachments"), list) else None,
-                        webhook_username=str(pending.get("webhook_username") or ""),
-                        webhook_avatar_url=str(pending.get("webhook_avatar_url") or ""),
-                        allowed_mentions=allowed_mentions,
-                        return_first_message=True,
-                    )
-                    followup_embed = discord.Embed(title="Follow-up", color=0xE67E22)
-                    src_jump = str(pending.get("source_jump_url") or "").strip()
-                    if src_jump:
-                        followup_embed.add_field(name="Source message", value=f"[Jump to original]({src_jump})", inline=False)
-                    await self._send_to_destination(
-                        dest_channel_id=dest_after,
-                        content=formatted_content or "\u200b",
-                        embeds=[followup_embed.to_dict()] + (embeds_out or []),
-                        attachments=attachments if use_files else None,
-                        webhook_username=wh_username,
-                        webhook_avatar_url=wh_avatar_url,
-                        allowed_mentions=allowed_mentions,
-                        reference=first_msg,
-                    )
-                    self.pending_major_clearance.pop(pair_key, None)
-                    trace["decision"] = {"action": "sent_major_clearance_pair", "dest": int(dest_after or 0)}
+                    # If we already have the first embed cached, send the pair.
+                    if pending:
+                        allowed_mentions = discord.AllowedMentions.none()
+                        dest_after = self._apply_route_map(source_group=source_group, dest_channel_id=major_clearance_dest)
+                        first_msg = await self._send_to_destination(
+                            dest_channel_id=dest_after,
+                            content=str(pending.get("formatted_content") or ""),
+                            embeds=list(pending.get("embeds_out") or []),
+                            attachments=list(pending.get("attachments") or []) if isinstance(pending.get("attachments"), list) else None,
+                            webhook_username=str(pending.get("webhook_username") or ""),
+                            webhook_avatar_url=str(pending.get("webhook_avatar_url") or ""),
+                            allowed_mentions=allowed_mentions,
+                            return_first_message=True,
+                        )
+                        followup_embed = discord.Embed(title="Follow-up", color=0xE67E22)
+                        src_jump = str(pending.get("source_jump_url") or "").strip()
+                        if src_jump:
+                            followup_embed.add_field(name="Source message", value=f"[Jump to original]({src_jump})", inline=False)
+                        await self._send_to_destination(
+                            dest_channel_id=dest_after,
+                            content=formatted_content or "\u200b",
+                            embeds=[followup_embed.to_dict()] + (embeds_out or []),
+                            attachments=attachments if use_files else None,
+                            webhook_username=wh_username,
+                            webhook_avatar_url=wh_avatar_url,
+                            allowed_mentions=allowed_mentions,
+                            reference=first_msg,
+                        )
+                        self.pending_major_clearance.pop(pair_key, None)
+                        self.pending_major_clearance_followups.pop(pair_key, None)
+                        trace["decision"] = {"action": "sent_major_clearance_pair", "dest": int(dest_after or 0)}
+                        try:
+                            write_trace_log(trace)
+                        except Exception:
+                            pass
+                        if cfg.VERBOSE:
+                            log_forward(f"major-clearance pair msg={message.id} {channel_id} -> {dest_after}")
+                        return
+
+                    # Otherwise cache the follow-up so an edited/late candidate can still pair.
+                    self.pending_major_clearance_followups[pair_key] = {
+                        "timestamp": now_ts,
+                        "formatted_content": formatted_content,
+                        "embeds_out": embeds_out,
+                        "attachments": attachments if use_files else None,
+                        "webhook_username": wh_username,
+                        "webhook_avatar_url": wh_avatar_url,
+                        "source_channel_id": int(channel_id or 0),
+                        "source_message_id": int(getattr(message, "id", 0) or 0),
+                        "from_edit": bool(is_edit),
+                    }
+                    trace["decision"] = {"action": "pending_major_clearance_followup", "reason": "waiting_first_same_sender"}
                     try:
                         write_trace_log(trace)
                     except Exception:
                         pass
                     if cfg.VERBOSE:
-                        log_forward(f"major-clearance pair msg={message.id} {channel_id} -> {dest_after}")
+                        log_filter(f"cached major-clearance follow-up msg={message.id} ch={channel_id}")
                     return
                 except Exception as e:
                     if cfg.VERBOSE:
@@ -1404,7 +1514,7 @@ class MessageForwarder:
             message = await channel.fetch_message(message_id)
         except Exception:
             return
-        await self.handle_message(message)
+        await self.handle_message(message, is_edit=True)
 
 
 def run_bot(*, settings: Dict[str, Any], token: str) -> Optional[int]:
@@ -1506,6 +1616,7 @@ def run_bot(*, settings: Dict[str, Any], token: str) -> Optional[int]:
             int(cfg.FALLBACK_CHANNEL_ID or 0),
             int(cfg.SMARTFILTER_AMAZON_CHANNEL_ID or 0),
             int(cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID or 0),
+            int(cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID or 0),
             int(cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID or 0),
             int(cfg.SMARTFILTER_UPCOMING_CHANNEL_ID or 0),
             int(cfg.SMARTFILTER_INSTORE_LEADS_CHANNEL_ID or 0),
