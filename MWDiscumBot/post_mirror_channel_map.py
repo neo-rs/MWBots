@@ -253,24 +253,39 @@ def _build_guild_embed_parts(
     """
     # Build textual rows first, then chunk into 4096-safe embed descriptions.
     rows: List[str] = []
-    # Padding width for the left destination column when rendering two columns.
-    # Discord wraps aggressively in embeds; keeping this smaller reduces total line length.
-    col_width = 46
+    # Spacing between the two destination columns on the same line.
+    # Avoid lots of padding because markdown/link text is already long.
+    dest_gap = " " * 18
+    # Spacing between the two source link columns on the same line.
+    link_gap = " " * 16
     for i in range(0, len(destination_buckets), 2):
         left = destination_buckets[i]
         right = destination_buckets[i + 1] if i + 1 < len(destination_buckets) else None
 
         left_header = left[1]
         right_header = right[1] if right else ""
-        rows.append(f"{left_header.ljust(col_width)}{right_header}")
+        if right:
+            rows.append(f"{left_header}{dest_gap}{right_header}")
+        else:
+            rows.append(left_header)
 
-        left_lines = [f"-# {src_name} <#{src_id}>" for src_name, src_id in left[2]]
-        right_lines = [f"-# {src_name} <#{src_id}>" for src_name, src_id in (right[2] if right else [])]
+        # Source channels are rendered as markdown links so the user can click without extra "-#" prefixes.
+        left_lines = [
+            f"[{src_name}](https://discord.com/channels/{guild_id}/{src_id})"
+            for src_name, src_id in left[2]
+        ]
+        right_lines = [
+            f"[{src_name}](https://discord.com/channels/{guild_id}/{src_id})"
+            for src_name, src_id in (right[2] if right else [])
+        ]
         max_len = max(len(left_lines), len(right_lines), 1)
         for j in range(max_len):
             ltxt = left_lines[j] if j < len(left_lines) else ""
             rtxt = right_lines[j] if j < len(right_lines) else ""
-            rows.append(f"{ltxt.ljust(col_width)}{rtxt}".rstrip())
+            if ltxt and rtxt:
+                rows.append(f"{ltxt}{link_gap}{rtxt}".rstrip())
+            else:
+                rows.append(ltxt or rtxt)
         rows.append("")
 
     if not rows:
