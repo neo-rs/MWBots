@@ -861,7 +861,12 @@ class MessageForwarder:
         # In production this bot should only process DiscumBot webhook-forwarded messages.
         if cfg.MONITOR_WEBHOOK_MESSAGES_ONLY:
             try:
-                if getattr(message, "webhook_id", None) is None:
+                is_webhook = getattr(message, "webhook_id", None) is not None
+                author_obj = getattr(message, "author", None)
+                is_bot_author = bool(getattr(author_obj, "bot", False))
+                # Some source monitor apps post as bot-authored messages (not webhooks).
+                # Allow those while still blocking regular user messages.
+                if not is_webhook and not is_bot_author:
                     return
             except Exception:
                 return
