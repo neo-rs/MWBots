@@ -1466,10 +1466,8 @@ class InstorebotForwarder:
         return bool(self._gemini_api_key())
 
     def _gemini_api_key(self) -> str:
-        k = str((self.config or {}).get("gemini_api_key") or "").strip()
-        if k:
-            return k
-        return (os.getenv("GEMINI_API_KEY", "") or "").strip()
+        # Canonical: `gemini_api_key` in config.secrets.json (merged into self.config).
+        return str((self.config or {}).get("gemini_api_key") or "").strip()
 
     def _gemini_model(self) -> str:
         return str((self.config or {}).get("gemini_model") or "gemini-1.5-flash").strip() or "gemini-1.5-flash"

@@ -46,6 +46,7 @@
   "openai_model": "gpt-4o-mini",
   "openai_timeout_s": 12,
   "openai_max_chars": 1800,
+  "gemini_model": "gemini-2.0-flash-lite",
   "dedupe_asin_ttl_s": 21600,
   "startup_smoketest_enabled": false,
   "startup_smoketest_count": 3,
