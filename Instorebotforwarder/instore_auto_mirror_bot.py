@@ -44,6 +44,32 @@ from RSForwarder import affiliate_rewriter
 log = logging.getLogger("instorebotforwarder")
 
 
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F1E6-\U0001F1FF"  # flags
+    "\U0001F300-\U0001F5FF"  # symbols & pictographs
+    "\U0001F600-\U0001F64F"  # emoticons
+    "\U0001F680-\U0001F6FF"  # transport & map
+    "\U0001F700-\U0001F77F"  # alchemical
+    "\U0001F780-\U0001F7FF"  # geometric
+    "\U0001F800-\U0001F8FF"  # supplemental arrows
+    "\U0001F900-\U0001F9FF"  # supplemental symbols
+    "\U0001FA00-\U0001FA6F"  # symbols
+    "\U0001FA70-\U0001FAFF"  # symbols (extended)
+    "\u2600-\u26FF"  # misc symbols
+    "\u2700-\u27BF"  # dingbats
+    "]+",
+    flags=re.UNICODE,
+)
+
+
+def _strip_emoji_text(s: str) -> str:
+    try:
+        return _EMOJI_RE.sub("", s or "")
+    except Exception:
+        return s or ""
+
+
 def _setup_logging() -> None:
     level = (os.getenv("LOG_LEVEL", "") or "").strip().upper() or "INFO"
     logging.basicConfig(
@@ -1430,6 +1456,113 @@ class InstorebotForwarder:
         except Exception:
             self._openai_last_mode[kind] = "api_exc"
             self._openai_stats["api_fail"] = int(self._openai_stats.get("api_fail", 0) or 0) + 1
+            return raw
+
+    def _gemini_enabled(self) -> bool:
+        v = (self.config or {}).get("gemini_rephrase_enabled", None)
+        if isinstance(v, bool):
+            return v
+        # Default: only enable if a key exists.
+        return bool(self._gemini_api_key())
+
+    def _gemini_api_key(self) -> str:
+        k = str((self.config or {}).get("gemini_api_key") or "").strip()
+        if k:
+            return k
+        return (os.getenv("GEMINI_API_KEY", "") or "").strip()
+
+    def _gemini_model(self) -> str:
+        return str((self.config or {}).get("gemini_model") or "gemini-1.5-flash").strip() or "gemini-1.5-flash"
+
+    def _gemini_temperature(self) -> float:
+        try:
+            v = float((self.config or {}).get("gemini_temperature") or 0.3)
+        except Exception:
+            v = 0.3
+        return max(0.0, min(v, 1.0))
+
+    def _gemini_max_chars(self) -> int:
+        try:
+            v = int((self.config or {}).get("gemini_max_chars") or 1800)
+        except Exception:
+            v = 1800
+        return max(200, min(v, 6000))
+
+    async def _gemini_minimal_rephrase(self, kind: str, text: str) -> str:
+        """
+        Best-effort Gemini rewrite for lead text.
+        - Never required: always safe-fallback to original text.
+        - Must keep any URLs unchanged.
+        """
+        raw = (text or "").strip()
+        if not raw:
+            return ""
+        if not self._gemini_enabled():
+            return raw
+
+        key = self._gemini_api_key()
+        if not key:
+            return raw
+
+        cache_key = f"gemini:{kind}:{hashlib.sha256(raw.encode('utf-8', errors='ignore')).hexdigest()[:16]}"
+        if cache_key in self._openai_cache:
+            return self._openai_cache[cache_key]
+
+        clipped = raw
+        max_chars = self._gemini_max_chars()
+        if len(clipped) > max_chars:
+            clipped = clipped[: max_chars - 3] + "..."
+
+        sys_prompt = (
+            "You are rewriting a short Discord deal/lead message.\n"
+            "Rules:\n"
+            "- Rewrite minimally so it is not identical.\n"
+            "- Keep the meaning, prices, and product/brand names.\n"
+            "- Keep all URLs unchanged (do not add, remove, or edit them).\n"
+            "- Do not add new claims.\n"
+            "- Output only the rewritten text (no quotes, no bullets unless already present).\n"
+        )
+        payload = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": f"{sys_prompt}\n{clipped}"}],
+                }
+            ],
+            "generationConfig": {
+                "temperature": self._gemini_temperature(),
+                "topP": 0.9,
+                "maxOutputTokens": 300,
+            },
+        }
+
+        try:
+            import aiohttp
+
+            timeout_s = float((self.config or {}).get("gemini_timeout_s") or 12.0)
+            self._openai_last_mode[f"gemini:{kind}"] = "api_call"
+            headers = {"Content-Type": "application/json"}
+            model = self._gemini_model()
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_s)) as session:
+                async with session.post(url, json=payload, headers=headers) as resp:
+                    txt = await resp.text(errors="replace")
+                    if int(resp.status) >= 400:
+                        return raw
+                    data = json.loads(txt) if txt else {}
+                    out = ""
+                    try:
+                        out = (((data or {}).get("candidates") or [])[0] or {}).get("content", {}).get("parts", [{}])[0].get("text", "") or ""
+                    except Exception:
+                        out = ""
+                    out = str(out).strip()
+                    if not out:
+                        return raw
+                    out = self._neutralize_mentions(out)
+                    self._openai_cache[cache_key] = out
+                    return out
+        except Exception:
             return raw
 
     def _stable_key_slug(self, seed: str, *, length: int = 7) -> str:
@@ -3559,6 +3692,14 @@ class InstorebotForwarder:
         if not dest_channel_id:
             return True
 
+        mode = str(mapping.get("mode") or "").strip().lower()
+        if mode == "affiliated_leads":
+            await self._maybe_affiliated_leads_forward(message, int(dest_channel_id), mapping)
+            return True
+        if mode == "gemini_rephrase_amz_deals":
+            await self._maybe_gemini_rephrase_amz_deals_forward(message, int(dest_channel_id), mapping)
+            return True
+
         # Mirror-as-is: forward one message immediately with content + attachments + embeds (no merge, no scrape).
         if mapping.get("mirror_as_is"):
             ch = self.bot.get_channel(int(dest_channel_id))
@@ -3658,6 +3799,174 @@ class InstorebotForwarder:
         if to_flush:
             await self._simple_flush_buffer(to_flush)
         return True
+
+    async def _maybe_affiliated_leads_forward(self, message: discord.Message, dest_channel_id: int, mapping: Dict[str, Any]) -> None:
+        """
+        Forward lead messages as an embed that contains the original text with emojis removed.
+        Only forwards when we can extract a raw store destination and confirm affiliate support
+        (either Amazon or Mavely) using the existing RSForwarder affiliate rewriter logic.
+        """
+        if not message.guild:
+            return
+
+        ch = self.bot.get_channel(int(dest_channel_id))
+        if ch is None:
+            try:
+                ch = await self.bot.fetch_channel(int(dest_channel_id))
+            except Exception:
+                return
+
+        if not isinstance(ch, (discord.TextChannel, discord.Thread, discord.DMChannel)):
+            return
+
+        block = self._simple_message_block(message)
+        block = _strip_emoji_text(block).strip()
+        if not block:
+            return
+
+        urls = self._collect_message_urls(message)
+        if not urls:
+            return
+
+        # Cheap pre-filter to avoid expensive affiliate rewriting for unrelated messages.
+        has_amazonish = any(affiliate_rewriter.is_amazon_like_url((u or "").strip()) for u in urls)
+        has_mavelyish = any(affiliate_rewriter.is_mavely_link((u or "").strip()) for u in urls)
+        if not (has_amazonish or has_mavelyish):
+            return
+
+        # Confirm affiliate support via the canonical RSForwarder rewrite engine.
+        try:
+            mapped, notes = await affiliate_rewriter.compute_affiliate_rewrites_plain(self.config or {}, urls)
+        except Exception:
+            return
+
+        associate_tag = (self.config or {}).get("amazon_associate_tag") or (os.getenv("AMAZON_ASSOCIATE_TAG", "") or "").strip()
+        associate_tag = str(associate_tag or "").strip()
+
+        def _is_amazon_affiliate_url(u: str) -> bool:
+            try:
+                parsed = urlparse(u)
+                host = (parsed.netloc or "").lower()
+                if not (affiliate_rewriter.is_amazon_like_url(u) or "amazon." in host or host.endswith("amazon.com")):
+                    return False
+                q = parsed.query or ""
+                return ("tag=" in q) and (not associate_tag or f"tag={associate_tag}" in q)
+            except Exception:
+                return False
+
+        confirmed = False
+        chosen_input_url = ""
+        chosen_raw_url = ""
+        if isinstance(mapped, dict) and mapped:
+            for orig_u, repl in mapped.items():
+                repl_s = str(repl or "").strip()
+                if affiliate_rewriter.is_mavely_link(repl_s) or _is_amazon_affiliate_url(repl_s):
+                    confirmed = True
+                    chosen_input_url = str(orig_u or "").strip()
+                    break
+
+        if not confirmed or not chosen_input_url:
+            return
+
+        # Derive the raw store destination URL by unwrapping/expanding the chosen original URL.
+        try:
+            import aiohttp
+
+            timeout_s = float((mapping.get("expand_timeout_s") or _cfg_float(self.config, "amazon_expand_timeout_s", "AMAZON_EXPAND_TIMEOUT_S") or 8.0))
+            max_redirects = int(mapping.get("expand_max_redirects") or _cfg_int(self.config, "amazon_expand_max_redirects", "AMAZON_EXPAND_MAX_REDIRECTS") or 8)
+            async with aiohttp.ClientSession() as session:
+                chosen_raw_url = await self._expand_url_best_effort(session, chosen_input_url, timeout_s=timeout_s, max_redirects=max_redirects)
+                chosen_raw_url = affiliate_rewriter.unwrap_known_query_redirects(chosen_raw_url) or chosen_raw_url
+        except Exception:
+            chosen_raw_url = ""
+
+        if not chosen_raw_url:
+            return
+
+        # Always embed: preserve the original text (minus emojis), but provide the raw URL as the embed link.
+        desc = self._neutralize_mentions(block)
+        if len(desc) > 3900:
+            desc = desc[:3897] + "..."
+        embed = discord.Embed(description=desc, url=chosen_raw_url)
+        try:
+            await ch.send(embeds=[embed], allowed_mentions=discord.AllowedMentions.none())
+        except Exception:
+            return
+
+    async def _maybe_gemini_rephrase_amz_deals_forward(self, message: discord.Message, dest_channel_id: int, mapping: Dict[str, Any]) -> None:
+        """
+        Amazon deals mode:
+        - extract a raw Amazon destination URL
+        - run Gemini minimal rephrase on the lead text to reduce exact duplicates
+        - forward as an embed (Gemini must not change URLs)
+        """
+        if not message.guild:
+            return
+
+        ch = self.bot.get_channel(int(dest_channel_id))
+        if ch is None:
+            try:
+                ch = await self.bot.fetch_channel(int(dest_channel_id))
+            except Exception:
+                return
+
+        if not isinstance(ch, (discord.TextChannel, discord.Thread, discord.DMChannel)):
+            return
+
+        block = self._simple_message_block(message).strip()
+        if not block:
+            return
+
+        urls = self._collect_message_urls(message)
+        if not urls:
+            return
+
+        # Use the same canonical Amazon detection logic (ASIN + final URL extraction).
+        det = None
+        try:
+            det = await self._detect_amazon(urls)
+        except Exception:
+            det = None
+        if not det or not getattr(det, "final_url", ""):
+            return
+
+        raw_url = str(getattr(det, "final_url", "") or "").strip()
+        if not raw_url or not affiliate_rewriter.is_amazon_like_url(raw_url):
+            return
+
+        desc_in = self._neutralize_mentions(block)
+        max_chars = int(mapping.get("gemini_max_chars") or _cfg_int(self.config, "openai_max_chars", "OPENAI_MAX_CHARS") or 1800)
+        if len(desc_in) > max_chars:
+            desc_in = desc_in[: max_chars - 3] + "..."
+
+        try:
+            original_urls = [u for (u, _, _) in affiliate_rewriter.extract_urls_with_spans(desc_in) if (u or "").strip()]
+            # Gemini must keep any URLs unchanged; we keep the entire message block as text input.
+            desc_out = await self._gemini_minimal_rephrase("amz_deals", desc_in)
+        except Exception:
+            desc_out = desc_in
+            original_urls = []
+
+        # Safety: ensure Gemini did not alter/remove URLs. If it did, fall back to the original text.
+        try:
+            if original_urls:
+                for u in original_urls:
+                    if u and u not in desc_out:
+                        desc_out = desc_in
+                        break
+        except Exception:
+            desc_out = desc_in
+
+        if not desc_out:
+            desc_out = desc_in
+
+        if len(desc_out) > 3900:
+            desc_out = desc_out[:3897] + "..."
+        embed = discord.Embed(description=desc_out, url=raw_url)
+        try:
+            await ch.send(embeds=[embed], allowed_mentions=discord.AllowedMentions.none())
+        except Exception:
+            return
 
     async def _detect_amazon(self, urls: List[str]) -> Optional[AmazonDetection]:
         if not urls:

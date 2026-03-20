@@ -4,10 +4,13 @@
     1438969997178306661,
     1435066421133443174,
     1435985494356918333,
-    1435268379521847369
+    1435268379521847369,
+    1435308472639160522,
+    1438970053352751215
   ],
   "source_channel_routes": {
-    "1438969997178306661": "deals"
+    "1438969997178306661": "deals",
+    "1435985494356918333": "deals"
   },
   "output_channels": {
     "personal": "1464853876988706969",
@@ -107,6 +110,17 @@
       "dest_channel_id": 1457129505050202377,
       "merge_window_s": 3.0,
       "enrich_stockx": true
+    },
+    "1435308472639160522": {
+      "dest_channel_id": 1484599902863622195,
+      "mode": "affiliated_leads",
+      "strip_emoji": true,
+      "always_embed": true
+    },
+    "1438970053352751215": {
+      "dest_channel_id": 1484473267031904287,
+      "mode": "gemini_rephrase_amz_deals",
+      "gemini_temperature": 0.3
     }
   }
 }
