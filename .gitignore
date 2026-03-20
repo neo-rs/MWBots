@@ -30,3 +30,16 @@ MWDiscumBot/config/destination_channels.json
 
 # WhopMembershipSync secrets (never commit)
 WhopMembershipSync/config.secrets.json
+
+# Never commit bot secrets in MWBots repo
+**/config.secrets.json
+
+# Instorebotforwarder runtime / local auth (never commit)
+Instorebotforwarder/.instorebotforwarder.lock
+Instorebotforwarder/mavely_cookies*.txt
+Instorebotforwarder/mavely_refresh_token*.txt
+Instorebotforwarder/mavely_auth_token*.txt
+Instorebotforwarder/mavely_id_token*.txt
+Instorebotforwarder/playwright_profile/**
+Instorebotforwarder/.playwright/**
+Instorebotforwarder/api-token.env

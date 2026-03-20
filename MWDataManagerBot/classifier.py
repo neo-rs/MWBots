@@ -473,7 +473,7 @@ def select_target_channel_id(
                 pass
         return cfg.SMARTFILTER_INSTORE_LEADS_CHANNEL_ID, "INSTORE_LEADS"
 
-    # 1) AMAZON (strict) – profitable flips → AMAZON_PROFITABLE_LEADS
+    # 1) AMAZON (strict) – profitable flips → AMAZON_PROFITABLE_LEAD
     amazon_match = AMAZON_LINK_PATTERN.search(text_blob) if not skip_amazon else None
     if amazon_match and (cfg.SMARTFILTER_AMAZON_CHANNEL_ID or cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID):
         matched = amazon_match.group(0).lower()
@@ -487,7 +487,8 @@ def select_target_channel_id(
                 PROFITABLE_FLIP_PATTERN.search(text_blob) or AMAZON_PROFITABLE_INDICATOR_PATTERN.search(text_blob)
             )
             if is_profitable and cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID:
-                return cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID, "AMAZON_PROFITABLE_LEADS"
+                # Canonical tag string (matches global_triggers.py and manual picker)
+                return cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID, "AMAZON_PROFITABLE_LEAD"
             if cfg.SMARTFILTER_AMAZON_CHANNEL_ID:
                 return cfg.SMARTFILTER_AMAZON_CHANNEL_ID, "AMAZON"
             if cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID:
@@ -580,8 +581,8 @@ def select_target_channel_id(
         if cfg.VERBOSE:
             log_smartfilter("UPCOMING", "SKIP", {**(trace.get("classifier", {}) if trace else {}), **upcoming_explain})
 
-    # 10) AFFILIATED_LINKS / other stores (online + clearance feeds — not instore-minor style sources)
-    if (source_group in ("online", "clearance")) and cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID:
+    # 10) AFFILIATED_LINKS / other stores (online only — not clearance or instore sources)
+    if (source_group == "online") and cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID:
         att_text = " ".join([str(a.get("url", "")) for a in (attachments or []) if isinstance(a, dict)])
         blob = (text_to_check or "") + " " + att_text
         if trace is not None:
@@ -718,7 +719,8 @@ def detect_all_link_types(
                 PROFITABLE_FLIP_PATTERN.search(text_blob) or AMAZON_PROFITABLE_INDICATOR_PATTERN.search(text_blob)
             )
             if is_profitable and cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID:
-                results.append((cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID, "AMAZON_PROFITABLE_LEADS"))
+                # Canonical tag string (matches global_triggers.py and manual picker)
+                results.append((cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID, "AMAZON_PROFITABLE_LEAD"))
             elif cfg.SMARTFILTER_AMAZON_CHANNEL_ID:
                 results.append((cfg.SMARTFILTER_AMAZON_CHANNEL_ID, "AMAZON"))
             elif cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID:
@@ -813,7 +815,7 @@ def detect_all_link_types(
 
     # Affiliate links only if not instore-classified and no Amazon hard match
     if not any(tag.startswith("INSTORE") or tag in {"MAJOR_STORES", "DISCOUNTED_STORES"} for _, tag in results):
-        if cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID and (source_group in ("online", "clearance")):
+        if cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID and (source_group == "online"):
             att_text = " ".join([str(a.get("url", "")) for a in (attachments or []) if isinstance(a, dict)])
             blob = (text_to_check or "") + " " + att_text
             if "http" in blob:
@@ -835,8 +837,8 @@ def detect_all_link_types(
                 results.append((cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID, "AFFILIATED_LINKS"))
 
     # If Amazon detected, suppress other store destinations (keep PRICE_ERROR as it can co-exist)
-    if any(tag in ("AMAZON", "AMAZON_PROFITABLE_LEADS", "AMAZON_FALLBACK", "AMZ_DEALS") for _, tag in results):
-        results = [(cid, tag) for cid, tag in results if tag in ("AMAZON", "AMAZON_PROFITABLE_LEADS", "AMAZON_FALLBACK", "AMZ_DEALS", "PRICE_ERROR")]
+    if any(tag in ("AMAZON", "AMAZON_PROFITABLE_LEAD", "AMAZON_FALLBACK", "AMZ_DEALS") for _, tag in results):
+        results = [(cid, tag) for cid, tag in results if tag in ("AMAZON", "AMAZON_PROFITABLE_LEAD", "AMAZON_FALLBACK", "AMZ_DEALS", "PRICE_ERROR")]
 
     # DEFAULT fallback if nothing
     if not results:

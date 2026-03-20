@@ -6,9 +6,9 @@ Messages from **all** `source_channel_ids_online` are classified by the live for
 
 | Channel ID        | Filter / tag | How it receives messages |
 |-------------------|--------------|---------------------------|
-| 1438969997178306661 | **AFFILIATED_LINKS** | Online sources: message has `http` (store domain, mavely, or any link) → this channel. |
+| 1435308472639160522 | **AFFILIATED_LINKS** | Online sources: message has `http` (store domain, mavely, or any link) → this channel. |
 | 1435985494356918333 | **PRICE_ERROR** | Text matches glitch/price-error pattern (e.g. "price error", "glitch", "wrong price", "mispriced") → this channel. |
-| 1438970053352751215 | **DEFAULT** | Online sources: no other classification (no Amazon, keyword, instore, upcoming, affiliate, etc.) → this channel when `enable_default_fallback` is true. |
+| 1435066509860012073 | **DEFAULT** | Online sources: no other classification (no Amazon, keyword, instore, upcoming, affiliate, etc.) → this channel when `enable_default_fallback` is true. |
 
 All three are in `smartfilter_destinations` or `global_trigger_destinations` in `config/settings.json`. They also appear in `mirrorworld_route_online` for backward compatibility.
 
