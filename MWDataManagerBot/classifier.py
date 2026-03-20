@@ -137,7 +137,26 @@ def classify_instore_destination(
     # Check patterns once
     seasonal_hit = bool(SEASONAL_PATTERN.search(text_to_check or ""))
     sneakers_hit = bool(SNEAKERS_PATTERN.search(text_to_check or ""))
-    cards_hit = bool(CARDS_PATTERN.search(text_to_check or ""))
+    cards_match = CARDS_PATTERN.search(text_to_check or "")
+    # `CARDS_PATTERN` contains generic "card" terms, so it can match phrases like
+    # "bottom left of the card" (toy listings / packaging) which are not TCG cards.
+    # Require at least one stronger trading-card signal when we route to INSTORE_CARDS.
+    card_context_hit = bool(
+        re.search(
+            r"("
+            r"pokemon|magic\s*the\s*gathering|mtg|yugioh|one\s*piece\s*card|dragon\s*ball\s*(super\s*)?(tcg|card)?|"
+            r"flesh\s*and\s*blood|fab\s*tcg|lorcana|digimon\s*card|tcg|ccg|"
+            r"booster\s*(pack|box|case)?|etb|elite\s*trainer\s*box|starter\s*deck|"
+            r"slab|psa\s*\d+|bgs\s*\d+|cgc\s*\d+|graded\s*card|"
+            r"rookie\s*card|autograph|auto\s*card|"
+            r"topps|panini|upper\s*deck|bowman|donruss|prizm|select|optic|mosaic|"
+            r"case\s*break|sealed\s*(box|pack|case)"
+            r")",
+            text_to_check or "",
+            re.IGNORECASE,
+        )
+    )
+    cards_hit = bool(cards_match) and card_context_hit
     theatre_hit = bool(matches_instore_theatre(text_to_check or "", where_location))
     major_hit = bool(MAJOR_STORE_PATTERN.search(text_to_check or "") or store_category == "major")
     discounted_hit = bool(DISCOUNTED_STORE_PATTERN.search(text_to_check or "") or store_category == "discounted")
