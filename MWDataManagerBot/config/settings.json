@@ -89,6 +89,6 @@
   "fetchsync_auto_poll_seconds": 60,
   "edit_cooldown_seconds": 30,
   "major_clearance_pair_ttl_seconds": 180,
-  "major_clearance_send_single_on_timeout": true,
+  "major_clearance_send_single_on_timeout": false,
   "fallback_channel_id": 1435066509860012073
 }

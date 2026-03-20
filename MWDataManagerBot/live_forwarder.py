@@ -178,9 +178,54 @@ class MessageForwarder:
         has_tempo = "tempomonitors.com" in tl or "powered by tempomonitors" in tl
         return bool(has_msrp and has_as_low and has_upc and has_tempo)
 
-    def _looks_like_major_clearance_followup(self, text: str) -> bool:
+    def _embed_dict_has_image(self, ed: Dict[str, Any]) -> bool:
+        try:
+            if not isinstance(ed, dict):
+                return False
+            for key in ("image", "thumbnail"):
+                block = ed.get(key)
+                if isinstance(block, dict) and str(block.get("url") or "").strip():
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _major_clearance_attachments_without_barcode_noise(
+        self,
+        attachments: Optional[List[Dict[str, Any]]],
+        raw_embeds: Optional[List[Dict[str, Any]]],
+    ) -> Optional[List[Dict[str, Any]]]:
+        """
+        When the Tempo-style embed already includes a product image, image *file* attachments
+        are usually duplicate barcodes / UPC scans. Drop those so timeout/pair sends are not
+        cluttered with barcode-only images.
+        """
+        if not attachments:
+            return attachments
+        has_embed_image = any(self._embed_dict_has_image(ed) for ed in (raw_embeds or []) if isinstance(ed, dict))
+        if not has_embed_image:
+            return attachments
+        out: List[Dict[str, Any]] = []
+        for a in attachments:
+            if not isinstance(a, dict):
+                continue
+            if not is_image_attachment(a):
+                out.append(a)
+                continue
+            fn = str(a.get("filename") or "").lower()
+            if any(x in fn for x in ("barcode", "upc", "code128", "ean", "sku-scan")):
+                continue
+            # Embed already shows the product; drop generic images (typical barcode noise).
+            continue
+        return out or None
+
+    def _looks_like_major_clearance_followup(self, text: str, *, raw_content: str = "") -> bool:
         tl = (text or "").lower()
         if not tl:
+            return False
+        # Standalone UPC / barcode number posts (no real follow-up sentence).
+        c = (raw_content or "").strip()
+        if c and re.fullmatch(r"[\d\s\-\.]{8,}", c):
             return False
         # Avoid catching normal in-store templates (Retail/Resell/Where) as follow-ups.
         if re.search(r"\bretail\s*[:\-]|\bresell\s*[:\-]|\bwhere\s*[:\-]|\blocation\s*[:\-]", tl):
@@ -867,6 +912,13 @@ class MessageForwarder:
                 # Some source monitor apps post as bot-authored messages (not webhooks).
                 # Allow those while still blocking regular user messages.
                 if not is_webhook and not is_bot_author:
+                    if cfg.VERBOSE and int(channel_id or 0) in getattr(
+                        cfg, "SMART_SOURCE_CHANNELS_INSTORE", set()
+                    ):
+                        log_filter(
+                            f"skip instore ch={channel_id}: not webhook and not bot author "
+                            f"(MONITOR_WEBHOOK_MESSAGES_ONLY)"
+                        )
                     return
             except Exception:
                 return
@@ -1113,16 +1165,16 @@ class MessageForwarder:
             wh_avatar_url = ""
 
         # Special paired-flow: "major clearance" stock-monitor embeds + follow-up message.
-        # This is intentionally separate from normal instore filters (Retail/Resell/Where).
+        # IMPORTANT: Only on *clearance* source channels. If we also intercept instore sources,
+        # Tempo-shaped embeds there return early and never run instore smartfilters (sneakers/seasonal/etc.).
         try:
             major_clearance_dest = int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0)
         except Exception:
             major_clearance_dest = 0
-        is_instore_or_clearance_source = bool(
-            int(channel_id or 0) in getattr(cfg, "SMART_SOURCE_CHANNELS_INSTORE", set())
-            or int(channel_id or 0) in getattr(cfg, "SMART_SOURCE_CHANNELS_CLEARANCE", set())
+        is_major_clearance_source = bool(
+            int(channel_id or 0) in getattr(cfg, "SMART_SOURCE_CHANNELS_CLEARANCE", set())
         )
-        if major_clearance_dest > 0 and is_instore_or_clearance_source:
+        if major_clearance_dest > 0 and is_major_clearance_source:
             now_ts = asyncio.get_event_loop().time()
             sender_key = self._sender_key(message, payload)
             pair_key = (int(channel_id or 0), str(sender_key))
@@ -1133,6 +1185,10 @@ class MessageForwarder:
             if ttl_s < 10:
                 ttl_s = 10.0
             send_single_on_timeout = bool(getattr(cfg, "MAJOR_CLEARANCE_SEND_SINGLE_ON_TIMEOUT", False))
+            mc_filtered = self._major_clearance_attachments_without_barcode_noise(
+                attachments if use_files else None,
+                embeds,
+            )
 
             # Flush expired pending candidates (optional single-send fallback).
             expired_first_items: List[Tuple[Tuple[int, str], Dict[str, Any]]] = []
@@ -1214,7 +1270,7 @@ class MessageForwarder:
                             dest_channel_id=dest_after,
                             content=str(formatted_content or ""),
                             embeds=list(embeds_out or []),
-                            attachments=list(attachments or []) if use_files else None,
+                            attachments=list(mc_filtered or []) if use_files else None,
                             webhook_username=wh_username,
                             webhook_avatar_url=wh_avatar_url,
                             allowed_mentions=allowed_mentions,
@@ -1227,11 +1283,16 @@ class MessageForwarder:
                         if src_jump:
                             followup_embed.add_field(name="Source message", value=f"[Jump to original]({src_jump})", inline=False)
 
+                        _fu_att = followup_cached.get("attachments") if use_files else None
+                        _fu_att = self._major_clearance_attachments_without_barcode_noise(
+                            _fu_att if isinstance(_fu_att, list) else None,
+                            list(followup_cached.get("embeds_out") or []),
+                        )
                         await self._send_to_destination(
                             dest_channel_id=dest_after,
                             content=str(followup_cached.get("formatted_content") or "") or "\u200b",
                             embeds=[followup_embed.to_dict()] + list(followup_cached.get("embeds_out") or []),
-                            attachments=followup_cached.get("attachments") if use_files else None,
+                            attachments=_fu_att,
                             webhook_username=str(followup_cached.get("webhook_username") or ""),
                             webhook_avatar_url=str(followup_cached.get("webhook_avatar_url") or ""),
                             allowed_mentions=allowed_mentions,
@@ -1256,7 +1317,7 @@ class MessageForwarder:
                     "timestamp": now_ts,
                     "formatted_content": formatted_content,
                     "embeds_out": embeds_out,
-                    "attachments": attachments if use_files else None,
+                    "attachments": mc_filtered if use_files else None,
                     "webhook_username": wh_username,
                     "webhook_avatar_url": wh_avatar_url,
                     "source_jump_url": str(getattr(message, "jump_url", "") or ""),
@@ -1274,7 +1335,7 @@ class MessageForwarder:
                 return
 
             pending = (self.pending_major_clearance or {}).get(pair_key)
-            if self._looks_like_major_clearance_followup(text_to_check):
+            if self._looks_like_major_clearance_followup(text_to_check, raw_content=content):
                 try:
                     import discord
 
@@ -1300,7 +1361,7 @@ class MessageForwarder:
                             dest_channel_id=dest_after,
                             content=formatted_content or "\u200b",
                             embeds=[followup_embed.to_dict()] + (embeds_out or []),
-                            attachments=attachments if use_files else None,
+                            attachments=mc_filtered if use_files else None,
                             webhook_username=wh_username,
                             webhook_avatar_url=wh_avatar_url,
                             allowed_mentions=allowed_mentions,
@@ -1322,7 +1383,7 @@ class MessageForwarder:
                         "timestamp": now_ts,
                         "formatted_content": formatted_content,
                         "embeds_out": embeds_out,
-                        "attachments": attachments if use_files else None,
+                        "attachments": mc_filtered if use_files else None,
                         "webhook_username": wh_username,
                         "webhook_avatar_url": wh_avatar_url,
                         "source_channel_id": int(channel_id or 0),

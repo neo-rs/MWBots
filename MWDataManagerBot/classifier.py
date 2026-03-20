@@ -137,19 +137,7 @@ def classify_instore_destination(
     # Check patterns once
     seasonal_hit = bool(SEASONAL_PATTERN.search(text_to_check or ""))
     sneakers_hit = bool(SNEAKERS_PATTERN.search(text_to_check or ""))
-    # "Cards" detection can get false positives if we only rely on set shorthand.
-    # Require explicit card/trading context words as well.
-    cards_match = CARDS_PATTERN.search(text_to_check or "")
-    card_context_hit = bool(
-        re.search(
-            r"(pokemon|magic\s*the\s*gathering|mtg|yugioh|one\s*piece\s*card|dragon\s*ball\s*card|"
-            r"trading\s*cards?|sports\s*cards?|tcg|ccg|booster\s*(pack|box)?|slab|psa\s*\d+|bgs\s*\d+|cgc\s*\d+|"
-            r"topps|panini|upper\s*deck)",
-            text_to_check or "",
-            re.IGNORECASE,
-        )
-    )
-    cards_hit = bool(cards_match) and card_context_hit
+    cards_hit = bool(CARDS_PATTERN.search(text_to_check or ""))
     theatre_hit = bool(matches_instore_theatre(text_to_check or "", where_location))
     major_hit = bool(MAJOR_STORE_PATTERN.search(text_to_check or "") or store_category == "major")
     discounted_hit = bool(DISCOUNTED_STORE_PATTERN.search(text_to_check or "") or store_category == "discounted")
@@ -573,8 +561,8 @@ def select_target_channel_id(
         if cfg.VERBOSE:
             log_smartfilter("UPCOMING", "SKIP", {**(trace.get("classifier", {}) if trace else {}), **upcoming_explain})
 
-    # 10) AFFILIATED_LINKS / other stores (online only)
-    if (source_group == "online") and cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID:
+    # 10) AFFILIATED_LINKS / other stores (online + clearance feeds — not instore-minor style sources)
+    if (source_group in ("online", "clearance")) and cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID:
         att_text = " ".join([str(a.get("url", "")) for a in (attachments or []) if isinstance(a, dict)])
         blob = (text_to_check or "") + " " + att_text
         if trace is not None:
@@ -612,9 +600,6 @@ def select_target_channel_id(
     # Avoid false positives from text like "Links: Amazon" (must include an actual Amazon URL/ASIN).
     if (not skip_amazon) and cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID and AMAZON_LINK_PATTERN.search(text_blob) and _is_amazon_primary(text_blob):
         return cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID, "AMAZON_FALLBACK"
-    # Clearance content should not drop into DEFAULT (e.g. #amz-deals).
-    if source_group == "clearance":
-        return None
     if cfg.SMARTFILTER_DEFAULT_CHANNEL_ID and bool(getattr(cfg, "ENABLE_DEFAULT_FALLBACK", False)):
         return cfg.SMARTFILTER_DEFAULT_CHANNEL_ID, "DEFAULT"
     return None
@@ -809,7 +794,7 @@ def detect_all_link_types(
 
     # Affiliate links only if not instore-classified and no Amazon hard match
     if not any(tag.startswith("INSTORE") or tag in {"MAJOR_STORES", "DISCOUNTED_STORES"} for _, tag in results):
-        if cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID and (source_group == "online"):
+        if cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID and (source_group in ("online", "clearance")):
             att_text = " ".join([str(a.get("url", "")) for a in (attachments or []) if isinstance(a, dict)])
             blob = (text_to_check or "") + " " + att_text
             if "http" in blob:
@@ -836,12 +821,7 @@ def detect_all_link_types(
 
     # DEFAULT fallback if nothing
     if not results:
-        # Clearance sources should not fall into "DEFAULT / amz-deals" buckets.
-        # Leave results empty so the forwarder uses UNCLASSIFIED picker
-        # (which routes to your UNCLASSIFIED channel, not INSTORE_LEADS).
-        if source_group == "clearance":
-            pass
-        elif amazon_detected and cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID:
+        if amazon_detected and cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID:
             results.append((cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID, "AMAZON_FALLBACK"))
         elif cfg.SMARTFILTER_DEFAULT_CHANNEL_ID and bool(getattr(cfg, "ENABLE_DEFAULT_FALLBACK", False)):
             results.append((cfg.SMARTFILTER_DEFAULT_CHANNEL_ID, "DEFAULT"))
