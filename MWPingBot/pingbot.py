@@ -154,9 +154,81 @@ def _append_json_line(path: Path, entry: Dict[str, Any]) -> None:
     except Exception:
         pass
 
+try:
+    _PINGBOT_LOG_MAX_LINES = max(1, int(float(os.getenv("PINGBOT_LOG_MAX_LINES", "1000") or "1000")))
+except Exception:
+    _PINGBOT_LOG_MAX_LINES = 1000
+
+try:
+    _PINGBOT_LOG_TRIM_CHECK_EVERY_WRITES = max(1, int(float(os.getenv("PINGBOT_LOG_TRIM_CHECK_EVERY_WRITES", "50") or "50")))
+except Exception:
+    _PINGBOT_LOG_TRIM_CHECK_EVERY_WRITES = 50
+
+_pingbot_log_write_count = 0
+
+def _tail_jsonl_lines_bytes(path: Path, max_lines: int) -> tuple[List[str], bool]:
+    """Efficiently grab the last `max_lines` JSONL lines by reading from EOF in chunks.
+
+    Returns (lines, truncated) where `truncated` means the file had more than `max_lines` lines.
+    """
+    max_lines = max(1, int(max_lines or 1))
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            file_size = f.tell()
+            if file_size <= 0:
+                return ([], False)
+
+            chunk_size = 64 * 1024
+            pos = file_size
+            data = b""
+            nl_count = 0
+
+            while pos > 0 and nl_count <= max_lines:
+                read_size = min(chunk_size, pos)
+                pos -= read_size
+                f.seek(pos)
+                chunk = f.read(read_size)
+                data = chunk + data
+                nl_count = data.count(b"\n")
+                if pos <= 0:
+                    break
+
+            lines = data.splitlines()
+            truncated = nl_count > max_lines
+            if len(lines) > max_lines:
+                lines = lines[-max_lines:]
+            return ([ln.decode("utf-8", errors="ignore") for ln in lines], truncated)
+    except Exception:
+        return ([], False)
+
+def _trim_jsonl_file_to_last_lines(path: Path, max_lines: int) -> None:
+    """Hard cap a JSONL file to its last `max_lines` entries."""
+    try:
+        lines, truncated = _tail_jsonl_lines_bytes(path, max_lines)
+        if not truncated or not lines:
+            return
+        tmp = Path(str(path) + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            for ln in lines:
+                f.write(ln)
+                f.write("\n")
+        os.replace(str(tmp), str(path))
+    except Exception:
+        pass
+
 
 def write_pingbot_log(entry: Dict[str, Any]) -> None:
+    global _pingbot_log_write_count
     _append_json_line(_PINGBOT_LOGS_PATH, entry)
+    _pingbot_log_write_count += 1
+    if _pingbot_log_write_count % _PINGBOT_LOG_TRIM_CHECK_EVERY_WRITES != 0:
+        return
+    try:
+        if _PINGBOT_LOGS_PATH.exists():
+            _trim_jsonl_file_to_last_lines(_PINGBOT_LOGS_PATH, _PINGBOT_LOG_MAX_LINES)
+    except Exception:
+        pass
 
 
 def write_system_log(entry: Dict[str, Any]) -> None:

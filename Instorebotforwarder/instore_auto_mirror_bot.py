@@ -1513,55 +1513,25 @@ class InstorebotForwarder:
         if len(clipped) > max_chars:
             clipped = clipped[: max_chars - 3] + "..."
 
-        sys_prompt = (
-            "You are rewriting a short Discord deal/lead message.\n"
-            "Rules:\n"
-            "- Rewrite minimally so it is not identical.\n"
-            "- Keep the meaning, prices, and product/brand names.\n"
-            "- Keep all URLs unchanged (do not add, remove, or edit them).\n"
-            "- Do not add new claims.\n"
-            "- Output only the rewritten text (no quotes, no bullets unless already present).\n"
-        )
-        payload = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": f"{sys_prompt}\n{clipped}"}],
-                }
-            ],
-            "generationConfig": {
-                "temperature": self._gemini_temperature(),
-                "topP": 0.9,
-                "maxOutputTokens": 300,
-            },
-        }
-
         try:
-            import aiohttp
-
-            timeout_s = float((self.config or {}).get("gemini_timeout_s") or 12.0)
             self._openai_last_mode[f"gemini:{kind}"] = "api_call"
-            headers = {"Content-Type": "application/json"}
-            model = self._gemini_model()
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+            from MWBots.Instorebotforwarder.automatedParaphrase.gemini_paraphraser import (
+                minimal_rephrase_keep_urls,
+            )
 
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_s)) as session:
-                async with session.post(url, json=payload, headers=headers) as resp:
-                    txt = await resp.text(errors="replace")
-                    if int(resp.status) >= 400:
-                        return raw
-                    data = json.loads(txt) if txt else {}
-                    out = ""
-                    try:
-                        out = (((data or {}).get("candidates") or [])[0] or {}).get("content", {}).get("parts", [{}])[0].get("text", "") or ""
-                    except Exception:
-                        out = ""
-                    out = str(out).strip()
-                    if not out:
-                        return raw
-                    out = self._neutralize_mentions(out)
-                    self._openai_cache[cache_key] = out
-                    return out
+            out = await minimal_rephrase_keep_urls(
+                text=clipped,
+                gemini_api_key=key,
+                model=self._gemini_model(),
+                temperature=self._gemini_temperature(),
+                timeout_s=float((self.config or {}).get("gemini_timeout_s") or 12.0),
+                neutralize_mentions_fn=self._neutralize_mentions,
+            )
+            out = str(out or "").strip()
+            if not out:
+                out = raw
+            self._openai_cache[cache_key] = out
+            return out
         except Exception:
             return raw
 
