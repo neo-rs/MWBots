@@ -1484,6 +1484,41 @@ class InstorebotForwarder:
             v = 0.3
         return max(0.0, min(v, 1.0))
 
+    def _gemini_temperature_from_simple_forward_mapping(self, mapping: Optional[Dict[str, Any]]) -> Optional[float]:
+        """If `simple_forward_mappings[...].gemini_temperature` is set, use it; else None (use global config)."""
+        if not isinstance(mapping, dict):
+            return None
+        raw = mapping.get("gemini_temperature")
+        if raw is None:
+            return None
+        try:
+            return max(0.0, min(float(raw), 1.0))
+        except Exception:
+            return None
+
+    def _journal_source_mapping_line(self, source_channel_id: int) -> str:
+        """Human-readable routing line for logs: <#src> → <#dest> (Discord clients render mentions)."""
+        src = int(source_channel_id)
+        m = self._simple_forward_mapping_for_channel(src)
+        if isinstance(m, dict):
+            did = _safe_int(m.get("dest_channel_id"))
+            mode = str(m.get("mode") or "").strip()
+            if did:
+                suffix = f" mode={mode}" if mode else ""
+                return f"<#{src}> → <#{did}>{suffix}"
+            return f"<#{src}> → (simple_forward; missing dest_channel_id)"
+        try:
+            scr = (self.config or {}).get("source_channel_routes") or {}
+        except Exception:
+            scr = {}
+        if isinstance(scr, dict):
+            forced = str(scr.get(str(src)) or scr.get(src) or "").strip().lower()
+            if forced in {"deals", "personal", "grocery", "enrich_failed"}:
+                dest = self._route_to_dest_id(forced)
+                if dest:
+                    return f"<#{src}> → <#{int(dest)}> route={forced}"
+        return f"<#{src}> → (canonical Amazon-card)"
+
     def _gemini_max_chars(self) -> int:
         try:
             v = int((self.config or {}).get("gemini_max_chars") or 1800)
@@ -1491,11 +1526,18 @@ class InstorebotForwarder:
             v = 1800
         return max(200, min(v, 6000))
 
-    async def _gemini_minimal_rephrase(self, kind: str, text: str) -> str:
+    async def _gemini_minimal_rephrase(
+        self,
+        kind: str,
+        text: str,
+        *,
+        temperature_override: Optional[float] = None,
+    ) -> str:
         """
         Best-effort Gemini rewrite for lead text.
         - Never required: always safe-fallback to original text.
         - Must keep any URLs unchanged.
+        - temperature_override: e.g. from simple_forward_mappings[].gemini_temperature; else global config.
         """
         raw = (text or "").strip()
         if not raw:
@@ -1507,8 +1549,11 @@ class InstorebotForwarder:
         if not key:
             return raw
 
-        cache_key = f"gemini:{kind}:{hashlib.sha256(raw.encode('utf-8', errors='ignore')).hexdigest()[:16]}"
+        temp = self._gemini_temperature() if temperature_override is None else max(0.0, min(float(temperature_override), 1.0))
+        h = hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        cache_key = f"gemini:{kind}:t={temp:.4f}:{h}"
         if cache_key in self._openai_cache:
+            self._openai_last_mode[f"gemini:{kind}"] = "cache"
             return self._openai_cache[cache_key]
 
         clipped = raw
@@ -1522,11 +1567,12 @@ class InstorebotForwarder:
                 minimal_rephrase_keep_urls,
             )
 
+            _log_flow("GEMINI", kind=kind, model=self._gemini_model(), temperature=f"{temp:.4f}", override=("1" if temperature_override is not None else "0"))
             out = await minimal_rephrase_keep_urls(
                 text=clipped,
                 gemini_api_key=key,
                 model=self._gemini_model(),
-                temperature=self._gemini_temperature(),
+                temperature=temp,
                 timeout_s=float((self.config or {}).get("gemini_timeout_s") or 12.0),
                 neutralize_mentions_fn=self._neutralize_mentions,
             )
@@ -3915,7 +3961,12 @@ class InstorebotForwarder:
         try:
             original_urls = [u for (u, _, _) in affiliate_rewriter.extract_urls_with_spans(desc_in) if (u or "").strip()]
             # Gemini must keep any URLs unchanged; we keep the entire message block as text input.
-            desc_out = await self._gemini_minimal_rephrase("amz_deals", desc_in)
+            temp_override = self._gemini_temperature_from_simple_forward_mapping(mapping)
+            desc_out = await self._gemini_minimal_rephrase(
+                "amz_deals",
+                desc_in,
+                temperature_override=temp_override,
+            )
         except Exception:
             desc_out = desc_in
             original_urls = []
@@ -4549,6 +4600,11 @@ class InstorebotForwarder:
 
         if int(message.channel.id) in set(self._output_channel_ids()):
             return
+
+        try:
+            _log_flow("MAPPING", line=self._journal_source_mapping_line(int(message.channel.id)))
+        except Exception:
+            pass
 
         # NEW: config-gated simple forwarding (does not affect existing Amazon mappings unless enabled per-channel)
         try:
