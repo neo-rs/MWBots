@@ -126,14 +126,19 @@ def _cfg_float(cfg: dict, key: str, env_key: str = "") -> Optional[float]:
     return None
 
 
+_FLOW_CH_KEYS = frozenset({"dest_id", "channel", "dest_channel_id", "source_channel_id"})
+
+
 def _log_flow(stage: str, **kv: Any) -> None:
     parts: List[str] = []
     for k, v in kv.items():
         if v is None:
             continue
-        s = str(v)
+        s = str(v).strip()
         if not s:
             continue
+        if k in _FLOW_CH_KEYS and s.isdigit():
+            s = f"<#{s}>"
         parts.append(f"{k}={s}")
     log.info("[FLOW:%s] %s", stage, " ".join(parts))
 
@@ -4751,7 +4756,7 @@ class InstorebotForwarder:
                 lines.append("- detected: `no`")
             lines.append("**Routing**")
             lines.append(f"- enrich_failed: `{enrich_failed}`")
-            lines.append(f"- dest_channel_id: `{dest_id or ''}`")
+            lines.append(f"- dest: {f'<#{dest_id}>' if dest_id else '`(none)`'}")
             lines.append(f"- template_key: `{tpl_key}`")
 
             out = "\n".join(lines)

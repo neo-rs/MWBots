@@ -328,14 +328,8 @@ def _setup_console_logging() -> None:
 _setup_console_logging()
 
 def _fmt_channel(bot_obj: commands.Bot, channel_id: int) -> str:
-    try:
-        ch = bot_obj.get_channel(int(channel_id))
-        name = getattr(ch, "name", None)
-        if name:
-            return f"{_F.BLUE}#{name}{_S.RESET_ALL} ({channel_id})"
-    except Exception:
-        pass
-    return f"{_F.BLUE}Channel-{channel_id}{_S.RESET_ALL}"
+    """Journal-friendly: use <#id> so Discord renders a clickable channel link."""
+    return f"<#{int(channel_id)}>"
 
 
 def log_debug(msg: str) -> None:
@@ -569,7 +563,7 @@ async def on_ready() -> None:
         )
         log_info(f"Logged in as {bot.user} (id={getattr(bot.user, 'id', 'unknown')})")
         if VERBOSE and PING_CHANNEL_IDS:
-            preview = ", ".join(str(cid) for cid in PING_CHANNEL_IDS[:12])
+            preview = ", ".join(f"<#{cid}>" for cid in PING_CHANNEL_IDS[:12])
             log_info(f"PING_CHANNEL_IDS preview: {preview}" + (" ..." if len(PING_CHANNEL_IDS) > 12 else ""))
         log_info("Status: Ready and listening for messages")
     except Exception as e:

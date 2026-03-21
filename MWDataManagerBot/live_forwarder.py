@@ -916,7 +916,7 @@ class MessageForwarder:
                         cfg, "SMART_SOURCE_CHANNELS_INSTORE", set()
                     ):
                         log_filter(
-                            f"skip instore ch={channel_id}: not webhook and not bot author "
+                            f"skip instore ch=<#{channel_id}>: not webhook and not bot author "
                             f"(MONITOR_WEBHOOK_MESSAGES_ONLY)"
                         )
                     return
@@ -955,7 +955,7 @@ class MessageForwarder:
             except Exception:
                 pass
             if cfg.VERBOSE:
-                log_filter(f"skipped message {message.id} in channel {channel_id}")
+                log_filter(f"skipped message {message.id} in channel <#{channel_id}>")
             return
 
         content_sig = generate_content_signature(content, embeds, attachments)
@@ -974,7 +974,7 @@ class MessageForwarder:
             except Exception:
                 pass
             if cfg.VERBOSE:
-                log_info(f"Duplicate message detected (posted {round(now-last,1)}s ago) in channel {channel_id}")
+                log_info(f"Duplicate message detected (posted {round(now-last,1)}s ago) in channel <#{channel_id}>")
             return
         self.recent_hashes[key] = now
         if len(self.recent_hashes) > 2000:
@@ -1041,7 +1041,7 @@ class MessageForwarder:
             except Exception:
                 pass
             if cfg.VERBOSE:
-                log_global(f"skip duplicate content signature in channel {channel_id}", event="global_duplicate")
+                log_global(f"skip duplicate content signature in channel <#{channel_id}>", event="global_duplicate")
             return
 
         all_link_types = detect_all_link_types(
@@ -1247,7 +1247,7 @@ class MessageForwarder:
                             try:
                                 log_forward(
                                     "major-clearance timeout fallback "
-                                    f"msg={int(pending_item.get('source_message_id') or 0)} {src_ch} -> {dest_after_exp}"
+                                    f"msg={int(pending_item.get('source_message_id') or 0)} <#{src_ch}> -> <#{dest_after_exp}>"
                                 )
                             except Exception:
                                 pass
@@ -1307,7 +1307,7 @@ class MessageForwarder:
                         except Exception:
                             pass
                         if cfg.VERBOSE:
-                            log_forward(f"major-clearance pair(rev) msg={message.id} {channel_id} -> {dest_after}")
+                            log_forward(f"major-clearance pair(rev) msg={message.id} <#{channel_id}> -> <#{dest_after}>")
                         return
                     except Exception as e:
                         if cfg.VERBOSE:
@@ -1331,7 +1331,7 @@ class MessageForwarder:
                 except Exception:
                     pass
                 if cfg.VERBOSE:
-                    log_filter(f"cached major-clearance candidate msg={message.id} ch={channel_id}")
+                    log_filter(f"cached major-clearance candidate msg={message.id} ch=<#{channel_id}>")
                 return
 
             pending = (self.pending_major_clearance or {}).get(pair_key)
@@ -1375,7 +1375,7 @@ class MessageForwarder:
                         except Exception:
                             pass
                         if cfg.VERBOSE:
-                            log_forward(f"major-clearance pair msg={message.id} {channel_id} -> {dest_after}")
+                            log_forward(f"major-clearance pair msg={message.id} <#{channel_id}> -> <#{dest_after}>")
                         return
 
                     # Otherwise cache the follow-up so an edited/late candidate can still pair.
@@ -1396,7 +1396,7 @@ class MessageForwarder:
                     except Exception:
                         pass
                     if cfg.VERBOSE:
-                        log_filter(f"cached major-clearance follow-up msg={message.id} ch={channel_id}")
+                        log_filter(f"cached major-clearance follow-up msg={message.id} ch=<#{channel_id}>")
                     return
                 except Exception as e:
                     if cfg.VERBOSE:
@@ -1427,7 +1427,7 @@ class MessageForwarder:
             if sent:
                 return
             if cfg.VERBOSE:
-                log_warn(f"No destination after classification (msg={message.id}) for source channel {channel_id}")
+                log_warn(f"No destination after classification (msg={message.id}) for source channel <#{channel_id}>")
             return
 
         forwarded = 0
@@ -1530,15 +1530,15 @@ class MessageForwarder:
                 except Exception:
                     why = ""
                 if why:
-                    log_forward(f"msg={message.id} {channel_id} -> {dest_channel_id} (tag={tag} why={why})")
+                    log_forward(f"msg={message.id} <#{channel_id}> -> <#{dest_channel_id}> (tag={tag} why={why})")
                 else:
-                    log_forward(f"msg={message.id} {channel_id} -> {dest_channel_id} (tag={tag})")
+                    log_forward(f"msg={message.id} <#{channel_id}> -> <#{dest_channel_id}> (tag={tag})")
                 if stop_after_first:
                     break
             except Exception as e:
                 dest_trace["decision"] = {"action": "error", "error": str(e), "error_type": type(e).__name__}
                 dest_traces.append(dest_trace)
-                log_error(f"Failed forwarding (msg={message.id}) to {dest_channel_id} (tag={tag})", error=e)
+                log_error(f"Failed forwarding (msg={message.id}) to <#{dest_channel_id}> (tag={tag})", error=e)
 
         if forwarded == 0 and cfg.VERBOSE:
             log_warn(f"All destinations blocked or failed (msg={message.id})")

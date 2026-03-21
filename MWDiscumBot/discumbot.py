@@ -2856,7 +2856,7 @@ def message_handler(resp):
         if channel_in_map:
             try:
                 if VERBOSE:
-                    log_d2d(f"Processing message", channel_name=friendly_channel_name or f"Channel-{str(channelID)[-6:]}", dest_channel_name=None)
+                    log_d2d(f"Processing message: Source <#{channelID}>")
                 # Duplicate check already happened above before enrichment
                 
                 if _should_retry_short_embed(m):
@@ -2980,20 +2980,17 @@ def _build_log_entry(m, channelID, channelName, dest_channel_id, dest_channel_na
     
     status_text = "successfully posted" if success else (error_msg or "failed")
     
-    # Ensure dest_channel_name is set properly
+    # Ensure dest_channel_name is set properly (for entry dict, fallback when no dest_channel_id)
     if dest_channel_id is not None:
         resolved_name = _resolve_destination_channel_name(dest_channel_id)
         if not dest_channel_name or dest_channel_name == "Unknown" or dest_channel_name.startswith("Channel "):
             dest_channel_name = resolved_name
     
-    source_label = channelName or f"Channel-{channelID}"
-    dest_label = dest_channel_name or "Unknown"
-    if source_label and not source_label.startswith("#"):
-        source_label = f"#{source_label}"
-    if dest_label and not dest_label.startswith("#"):
-        dest_label = f"#{dest_label}"
-    # Build unified summary line
-    summary = f"Source {source_label} → {dest_label} | {status_text}"
+    # Use <#id> format so Discord journal renders channel links as clickable
+    source_label = f"<#{channelID}>"
+    dest_label = f"<#{dest_channel_id}>" if dest_channel_id is not None else (dest_channel_name or "Unknown")
+    # Build unified summary: Source -> Destination (no redundant from/to suffix)
+    summary = f"Source {source_label} -> Destination {dest_label} | {status_text}"
     
     entry = {
         "message_id": msg_id_for_summary,
@@ -3798,14 +3795,17 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
                     signature=signature,
                 )
                 if VERBOSE:
-                    edit_dest_name = "Webhook"
+                    dest_cid = None
                     try:
                         meta = _resolve_webhook_destination_metadata(webhook) if webhook else {}
                         if isinstance(meta, dict) and meta.get("channel_id"):
-                            edit_dest_name = _resolve_destination_channel_name(int(meta["channel_id"])) or edit_dest_name
+                            dest_cid = meta["channel_id"]
                     except Exception:
                         pass
-                    log_d2d("Edited mirror message", channel_name=channelName, dest_channel_name=edit_dest_name)
+                    if dest_cid:
+                        log_d2d(f"Edited mirror message: Source <#{channelID}> -> Destination <#{dest_cid}>")
+                    else:
+                        log_d2d(f"Edited mirror message: Source <#{channelID}> -> Webhook")
                 return
             # Patch failed → fall back to replace
             needs_replace = True
@@ -3883,10 +3883,10 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
 
             log_entry, summary = _build_log_entry(m, channelID, channelName, dest_channel_id, dest_channel_name, username, guildID, content, True, None, webhook)
             timestamp = time.strftime("%H:%M:%S")
-            log_d2d(f"{summary} (chunked)", channel_name=channelName, dest_channel_name=dest_channel_name)
+            log_d2d(f"{summary} (chunked)")
         except Exception:
             timestamp = time.strftime("%H:%M:%S")
-            log_d2d(f"Message forwarded (chunked)", channel_name=f"Channel-{str(channelID)[-6:]}", dest_channel_name="Webhook")
+            log_d2d(f"Source <#{channelID}> -> Webhook | forwarded (chunked)")
 
         return  # Exit early after chunked send
     
@@ -4156,14 +4156,14 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
     try:
         log_entry, summary = _build_log_entry(m, channelID, channelName, dest_channel_id, dest_channel_name, username, guildID, content, success, error_msg, webhook)
         
-        # Console output with timestamp
-        log_d2d(summary, channel_name=channelName, dest_channel_name=dest_channel_name)
+        # Console output (summary already has <#id> clickable refs)
+        log_d2d(summary)
     except Exception as log_err:
         if VERBOSE:
             log_warn(f"Failed to build log entry: {log_err}")
         # Fallback simple output
         status_text = "successfully forwarded" if success else (error_msg or "failed")
-        log_d2d(f"Message {status_text}", channel_name=f"Channel-{str(channelID)[-6:]}", dest_channel_name="Webhook")
+        log_d2d(f"Source <#{channelID}> -> Webhook | {status_text}")
 
     # Handle attachments that couldn't be downloaded (fallback to posting URLs)
     # Record forward index for edit-sync (only when we have a destination message id).
