@@ -720,7 +720,9 @@ def _queue_pending_edit_update(message_dict: Dict[str, Any], channel_id: int, gu
     }
     _prune_pending_edit_updates(now=now)
     if VERBOSE:
-        log_debug(f"[D2D] Queued MESSAGE_UPDATE for {src_id} (waiting for destination mapping)")
+        src_details = _get_source_channel_details(channel_id_int, guild_id_int) if channel_id_int else None
+        src_ctx = _fmt_channel_context(channel_id_int, details=src_details) if channel_id_int else str(channel_id)
+        log_debug(f"[D2D] Queued MESSAGE_UPDATE for {src_id} ({src_ctx} waiting for destination mapping)")
 
 
 def _flush_pending_edit_update(source_message_id: str) -> bool:
@@ -775,30 +777,62 @@ def _refresh_source_channel_lookup(force: bool = False) -> None:
         guild_name = guild.get("guild_name") or f"Guild-{guild_id}"
         guild_icon = guild.get("guild_icon") or None
         new_guild_lookup[guild_id] = {"guild_name": guild_name, "guild_icon": guild_icon}
+        cat_map: Dict[str, str] = {}
+        for cat in guild.get("categories", []) or []:
+            if isinstance(cat, dict) and cat.get("id") and cat.get("name"):
+                cat_map[str(cat.get("id"))] = str(cat.get("name"))
         for channel in guild.get("channels", []) or []:
             try:
                 channel_id = int(channel.get("id"))
             except (TypeError, ValueError):
                 continue
             channel_name = channel.get("name") or f"Channel-{channel_id}"
+            parent_id = channel.get("parent_id")
+            category_id: Optional[int] = None
+            category_name: Optional[str] = None
+            if parent_id:
+                try:
+                    category_id = int(parent_id)
+                    category_name = cat_map.get(str(parent_id))
+                except (TypeError, ValueError):
+                    pass
             new_lookup[channel_id] = {
                 "channel_name": channel_name,
                 "guild_name": guild_name,
                 "guild_id": guild_id,
                 "guild_icon": guild_icon,
+                "category_id": category_id,
+                "category_name": category_name,
             }
     _SOURCE_CHANNEL_LOOKUP = new_lookup
     _SOURCE_GUILD_LOOKUP = new_guild_lookup
     _SOURCE_CHANNEL_LAST_LOAD = now
 
+def _fmt_channel_context(channel_id: int, details: Optional[Dict[str, Any]] = None, *, guild_id: Optional[int] = None, category_id: Optional[int] = None, use_mention: bool = True) -> str:
+    """Format channel for D2D logs: <#id> [Guild-ID: X, Category-ID: Y]. Details from _get_source_channel_details or dest lookup."""
+    mention = f"<#{channel_id}>" if use_mention else str(channel_id)
+    gid = (details.get("guild_id") if details else None) or guild_id
+    cid = (details.get("category_id") if details else None) or category_id
+    parts = []
+    if gid is not None:
+        parts.append(f"Guild-ID:{gid}")
+    if cid is not None:
+        parts.append(f"Category-ID:{cid}")
+    if not parts:
+        return mention
+    return f"{mention} [{', '.join(parts)}]"
+
+
 def _get_source_channel_details(channel_id: int, guild_id: Optional[int] = None) -> Dict[str, Any]:
-    """Return friendly channel + guild names for logging."""
+    """Return friendly channel + guild + category for logging."""
     _refresh_source_channel_lookup()
     info = _SOURCE_CHANNEL_LOOKUP.get(channel_id, {})
     channel_name = info.get("channel_name") or f"Channel-{channel_id}"
     guild_name = info.get("guild_name")
     resolved_guild_id = info.get("guild_id")
     guild_icon = info.get("guild_icon")
+    category_id = info.get("category_id")
+    category_name = info.get("category_name")
     if not guild_name:
         if guild_id:
             guild_name = f"Guild-{guild_id}"
@@ -810,6 +844,8 @@ def _get_source_channel_details(channel_id: int, guild_id: Optional[int] = None)
         "guild_name": guild_name,
         "guild_id": resolved_guild_id or guild_id,
         "guild_icon": guild_icon,
+        "category_id": category_id,
+        "category_name": category_name,
     }
 
 
@@ -1553,12 +1589,13 @@ _WEBHOOK_INFO_TTL = 3600  # seconds
 _DEST_CHANNEL_NAME_CACHE: Dict[int, Dict[str, object]] = {}
 _DEST_CHANNEL_NAME_TTL = 300  # seconds
 _DEST_CHANNEL_FILE_LOOKUP: Dict[int, str] = {}
+_DEST_CHANNEL_FULL_LOOKUP: Dict[int, Dict[str, Any]] = {}  # id -> {name, guild_id, category_id}
 _DEST_CHANNEL_FILE_LAST_LOAD = 0.0
 _DEST_CHANNEL_FILE_TTL = 300.0  # seconds
 
 def _refresh_destination_channel_file_lookup(force: bool = False) -> None:
-    """Load destination channel id->name from destination_channels.json (preferred; avoids session 'guilds' errors)."""
-    global _DEST_CHANNEL_FILE_LOOKUP, _DEST_CHANNEL_FILE_LAST_LOAD
+    """Load destination channel id->name and id->{guild_id, category_id} from destination_channels.json."""
+    global _DEST_CHANNEL_FILE_LOOKUP, _DEST_CHANNEL_FULL_LOOKUP, _DEST_CHANNEL_FILE_LAST_LOAD
     now = time.time()
     if not force and _DEST_CHANNEL_FILE_LOOKUP and (now - _DEST_CHANNEL_FILE_LAST_LOAD) < _DEST_CHANNEL_FILE_TTL:
         return
@@ -1567,28 +1604,48 @@ def _refresh_destination_channel_file_lookup(force: bool = False) -> None:
             data = json.load(f)
     except FileNotFoundError:
         _DEST_CHANNEL_FILE_LOOKUP = {}
+        _DEST_CHANNEL_FULL_LOOKUP = {}
         _DEST_CHANNEL_FILE_LAST_LOAD = now
         return
     except Exception:
         return
 
     lookup: Dict[int, str] = {}
+    full_lookup: Dict[int, Dict[str, Any]] = {}
+    guild_id = None
     try:
+        if isinstance(data, dict):
+            gid = data.get("guild_id")
+            if gid is not None:
+                try:
+                    guild_id = int(gid)
+                except (TypeError, ValueError):
+                    pass
         for ch in (data.get("channels", []) if isinstance(data, dict) else []) or []:
             if not isinstance(ch, dict):
                 continue
             ch_id = ch.get("id")
             name = ch.get("name")
-            if not ch_id or not name:
+            if not ch_id:
                 continue
             try:
-                lookup[int(ch_id)] = str(name)
+                cid = int(ch_id)
+                lookup[cid] = str(name) if name else f"Channel-{cid}"
+                parent_id = ch.get("parent_id")
+                cat_id: Optional[int] = None
+                if parent_id:
+                    try:
+                        cat_id = int(parent_id)
+                    except (TypeError, ValueError):
+                        pass
+                full_lookup[cid] = {"name": lookup[cid], "guild_id": guild_id, "category_id": cat_id}
             except Exception:
                 continue
     except Exception:
-        lookup = {}
+        pass
 
     _DEST_CHANNEL_FILE_LOOKUP = lookup
+    _DEST_CHANNEL_FULL_LOOKUP = full_lookup
     _DEST_CHANNEL_FILE_LAST_LOAD = now
 
 def _resolve_destination_channel_name(dest_channel_id: Optional[int]) -> str:
@@ -2693,9 +2750,14 @@ def message_handler(resp):
             friendly_channel_name = source_lookup.get("channel_name")
             friendly_guild_name = source_lookup.get("guild_name")
             friendly_guild_id = source_lookup.get("guild_id")
+            category_id = source_lookup.get("category_id")
             if VERBOSE:
-                channel_segment = f"{friendly_channel_name or channelID}-({channelID})"
-                guild_segment = f"{friendly_guild_name or 'Unknown'}-({friendly_guild_id or guildID or 'unknown'})"
+                ctx_parts = [f"Guild-ID:{friendly_guild_id or guildID or '?'}"]
+                if category_id is not None:
+                    ctx_parts.append(f"Category-ID:{category_id}")
+                ctx = " [" + ", ".join(ctx_parts) + "]" if ctx_parts else ""
+                channel_segment = f"{friendly_channel_name or channelID} <#{channelID}>{ctx}"
+                guild_segment = f"{friendly_guild_name or 'Unknown'} (Guild-ID:{friendly_guild_id or guildID or '?'})"
                 print(f"[D2D] [INFO] Message detected in monitored {channel_segment} | {guild_segment}")
 
         # Get message details for backend logging (with error handling)
@@ -2856,7 +2918,9 @@ def message_handler(resp):
         if channel_in_map:
             try:
                 if VERBOSE:
-                    log_d2d(f"Processing message: Source <#{channelID}>")
+                    src_details = _get_source_channel_details(channelID, guildID) if guildID else None
+                    src_ctx = _fmt_channel_context(channelID, details=src_details)
+                    log_d2d(f"Processing message: Source {src_ctx}")
                 # Duplicate check already happened above before enrichment
                 
                 if _should_retry_short_embed(m):
@@ -2985,11 +3049,28 @@ def _build_log_entry(m, channelID, channelName, dest_channel_id, dest_channel_na
         resolved_name = _resolve_destination_channel_name(dest_channel_id)
         if not dest_channel_name or dest_channel_name == "Unknown" or dest_channel_name.startswith("Channel "):
             dest_channel_name = resolved_name
-    
-    # Use <#id> format so Discord journal renders channel links as clickable
-    source_label = f"<#{channelID}>"
-    dest_label = f"<#{dest_channel_id}>" if dest_channel_id is not None else (dest_channel_name or "Unknown")
-    # Build unified summary: Source -> Destination (no redundant from/to suffix)
+
+    source_details = _get_source_channel_details(channelID, guildID) if guildID else None
+    source_label = _fmt_channel_context(channelID, details=source_details)
+
+    if dest_channel_id is not None:
+        _refresh_destination_channel_file_lookup()
+        dest_meta = _DEST_CHANNEL_FULL_LOOKUP.get(int(dest_channel_id))
+        if dest_meta:
+            dest_label = _fmt_channel_context(dest_channel_id, details=dest_meta)
+        else:
+            gid = None
+            if webhook_url:
+                wh_meta = _resolve_webhook_destination_metadata(webhook_url) or {}
+                if wh_meta.get("guild_id"):
+                    try:
+                        gid = int(wh_meta["guild_id"])
+                    except (TypeError, ValueError):
+                        pass
+            dest_label = _fmt_channel_context(dest_channel_id, guild_id=gid)
+    else:
+        dest_label = dest_channel_name or "Unknown"
+
     summary = f"Source {source_label} -> Destination {dest_label} | {status_text}"
     
     entry = {
@@ -3760,7 +3841,9 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
 
         if not webhook or not dest_ids:
             if VERBOSE:
-                log_warn(f"[D2D] Edit sync skipped for {src_id}: no destination mapping (channel not in channel_map.json)")
+                src_details = _get_source_channel_details(channelID, guildID) if guildID else None
+                src_ctx = _fmt_channel_context(channelID, details=src_details)
+                log_warn(f"[D2D] Edit sync skipped for {src_id}: no destination mapping ({src_ctx} not in channel_map.json)")
             # MESSAGE_UPDATE can arrive before we have recorded the destination mapping.
             # Queue this update and apply it once the create-forward records dest message id(s).
             try:
@@ -3802,10 +3885,15 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
                             dest_cid = meta["channel_id"]
                     except Exception:
                         pass
+                    src_details = _get_source_channel_details(channelID, guildID) if guildID else None
+                    src_ctx = _fmt_channel_context(channelID, details=src_details)
                     if dest_cid:
-                        log_d2d(f"Edited mirror message: Source <#{channelID}> -> Destination <#{dest_cid}>")
+                        _refresh_destination_channel_file_lookup()
+                        dest_meta = _DEST_CHANNEL_FULL_LOOKUP.get(int(dest_cid))
+                        dest_ctx = _fmt_channel_context(dest_cid, details=dest_meta)
+                        log_d2d(f"Edited mirror message: Source {src_ctx} -> Destination {dest_ctx}")
                     else:
-                        log_d2d(f"Edited mirror message: Source <#{channelID}> -> Webhook")
+                        log_d2d(f"Edited mirror message: Source {src_ctx} -> Webhook")
                 return
             # Patch failed → fall back to replace
             needs_replace = True
@@ -3886,7 +3974,9 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
             log_d2d(f"{summary} (chunked)")
         except Exception:
             timestamp = time.strftime("%H:%M:%S")
-            log_d2d(f"Source <#{channelID}> -> Webhook | forwarded (chunked)")
+            src_details = _get_source_channel_details(channelID, guildID) if guildID else None
+            src_ctx = _fmt_channel_context(channelID, details=src_details)
+            log_d2d(f"Source {src_ctx} -> Webhook | forwarded (chunked)")
 
         return  # Exit early after chunked send
     
@@ -4004,7 +4094,9 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
                         except Exception:
                             pass
                 if VERBOSE:
-                    log_debug(f"[D2D] Webhook POST status={r.status_code} message_id={'yes' if message_id else 'no'} for src={m.get('id')}")
+                    src_details = _get_source_channel_details(channelID, guildID) if guildID else None
+                    src_ctx = _fmt_channel_context(channelID, details=src_details)
+                    log_debug(f"[D2D] Webhook POST status={r.status_code} message_id={'yes' if message_id else 'no'} for src_msg={m.get('id')} src_ch={src_ctx}")
 
                 # Success - break out of retry loop
                 break
@@ -4163,7 +4255,9 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
             log_warn(f"Failed to build log entry: {log_err}")
         # Fallback simple output
         status_text = "successfully forwarded" if success else (error_msg or "failed")
-        log_d2d(f"Source <#{channelID}> -> Webhook | {status_text}")
+        src_details = _get_source_channel_details(channelID, guildID) if guildID else None
+        src_ctx = _fmt_channel_context(channelID, details=src_details)
+        log_d2d(f"Source {src_ctx} -> Webhook | {status_text}")
 
     # Handle attachments that couldn't be downloaded (fallback to posting URLs)
     # Record forward index for edit-sync (only when we have a destination message id).
