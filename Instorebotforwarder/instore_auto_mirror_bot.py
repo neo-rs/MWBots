@@ -158,6 +158,7 @@ _CALM_FLOW_STAGES = frozenset(
         "DUP_ASIN_SKIP",
         "SKIP_OOS",
         "EBAY_PW_FAIL",
+        "EBAY_PW_SKIP_AFTER_CRASH",
     }
 )
 # Gemini: in calm mode, log only failed/problem outcomes (not every api_request/cache_hit).
@@ -929,16 +930,57 @@ class InstorebotForwarder:
             or "challengeget" in low
         )
 
-    async def _fetch_ebay_sold_page(self, url: str) -> Tuple[Optional[str], Optional[str]]:
+    def _pw_err_indicates_crash(self, err: str) -> bool:
+        """
+        Playwright sometimes raises exceptions like "Page.content: Target crashed".
+        When this happens, retrying Playwright again (e.g. after aiohttp challenge detection)
+        is usually wasteful.
+        """
+        e = (err or "").lower()
+        return any(
+            s in e
+            for s in (
+                "target crashed",
+                "page crashed",
+                "crashed",
+                "browser has disconnected",
+                "target closed",
+            )
+        )
+
+    async def _fetch_ebay_sold_page(
+        self,
+        url: str,
+        *,
+        dest_channel_id: Optional[int] = None,
+        source_channel_id: Optional[int] = None,
+        source_label: Optional[str] = None,
+    ) -> Tuple[Optional[str], Optional[str]]:
         """Fetch one eBay sold search page; return (html, error). Uses Playwright first when enabled (eBay is JS-rendered); else aiohttp with Playwright fallback on challenge."""
         if self._playwright_enabled():
             pw_html, pw_err = await self._fetch_ebay_sold_page_playwright(url)
             if pw_html and not pw_err:
-                _log_flow("EBAY_PW_OK", url=url[:60])
+                _log_flow(
+                    "EBAY_PW_OK",
+                    url=url[:60],
+                    dest_channel_id=dest_channel_id,
+                    source_channel_id=source_channel_id,
+                    source_label=source_label,
+                )
                 return pw_html, None
+            pw_crashed = self._pw_err_indicates_crash(str(pw_err or ""))
             if pw_err:
-                _log_flow("EBAY_PW_FAIL", err=(pw_err or "no_content")[:80])
+                _log_flow(
+                    "EBAY_PW_FAIL",
+                    url=url[:60],
+                    err=(pw_err or "no_content")[:80],
+                    dest_channel_id=dest_channel_id,
+                    source_channel_id=source_channel_id,
+                    source_label=source_label,
+                )
             # Fall through to aiohttp only when Playwright failed
+        else:
+            pw_crashed = False
         try:
             import aiohttp
         except Exception:
@@ -956,12 +998,43 @@ class InstorebotForwarder:
                         return None, f"HTTP {resp.status}"
                     html_txt = await resp.text()
                     if self._is_ebay_challenge_page(html_txt):
-                        _log_flow("EBAY_CHALLENGE", method="aiohttp", url=url[:60])
+                        _log_flow(
+                            "EBAY_CHALLENGE",
+                            method="aiohttp",
+                            url=url[:60],
+                            dest_channel_id=dest_channel_id,
+                            source_channel_id=source_channel_id,
+                            source_label=source_label,
+                        )
+                        # If Playwright already crashed once, avoid re-spinning it.
+                        if pw_crashed:
+                            _log_flow(
+                                "EBAY_PW_SKIP_AFTER_CRASH",
+                                reason="pw_crashed_first_attempt",
+                                dest_channel_id=dest_channel_id,
+                                source_channel_id=source_channel_id,
+                                source_label=source_label,
+                            )
+                            return html_txt, None  # no prices; caller will handle
+
                         pw_html, pw_err = await self._fetch_ebay_sold_page_playwright(url)
                         if pw_html and not pw_err:
-                            _log_flow("EBAY_PW_OK", url=url[:60])
+                            _log_flow(
+                                "EBAY_PW_OK",
+                                url=url[:60],
+                                dest_channel_id=dest_channel_id,
+                                source_channel_id=source_channel_id,
+                                source_label=source_label,
+                            )
                             return pw_html, None
-                        _log_flow("EBAY_PW_FAIL", err=(pw_err or "no_content")[:80])
+                        _log_flow(
+                            "EBAY_PW_FAIL",
+                            url=url[:60],
+                            err=(pw_err or "no_content")[:80],
+                            dest_channel_id=dest_channel_id,
+                            source_channel_id=source_channel_id,
+                            source_label=source_label,
+                        )
                         return html_txt, None  # return challenge HTML so caller sees no prices
                     return html_txt, None
         except asyncio.TimeoutError:
@@ -978,6 +1051,7 @@ class InstorebotForwarder:
                 headless=self._playwright_headless(),
                 args=[
                     "--disable-blink-features=AutomationControlled",
+                    "--disable-gpu",
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
                 ],
@@ -1024,19 +1098,45 @@ class InstorebotForwarder:
         except Exception as e:
             return None, str(e)[:200]
 
-    async def _scrape_ebay_sold_ranges(self, keyword: str) -> Tuple[Optional[Dict[str, Dict[str, str]]], Optional[str]]:
+    async def _scrape_ebay_sold_ranges(
+        self,
+        keyword: str,
+        *,
+        dest_channel_id: Optional[int] = None,
+        source_channel_id: Optional[int] = None,
+        source_label: Optional[str] = None,
+    ) -> Tuple[Optional[Dict[str, Dict[str, str]]], Optional[str]]:
         """
         For a search keyword, fetch eBay sold listings for New (1000), Pre-owned (3000), Refurbished (2000),
         parse sold prices, return low/high per condition. Result e.g. {"new": {"low": "$10", "high": "$50"}, ...}.
         """
         q = self._ebay_keyword_from_title(keyword)
         if not q:
-            _log_flow("EBAY_KEYWORD", keyword="", reason="empty")
+            _log_flow(
+                "EBAY_KEYWORD",
+                keyword="",
+                reason="empty",
+                dest_channel_id=dest_channel_id,
+                source_channel_id=source_channel_id,
+                source_label=source_label,
+            )
             return None, "empty keyword"
-        _log_flow("EBAY_KEYWORD", keyword=q[:60])
+        _log_flow(
+            "EBAY_KEYWORD",
+            keyword=q[:60],
+            dest_channel_id=dest_channel_id,
+            source_channel_id=source_channel_id,
+            source_label=source_label,
+        )
         cached = self._ebay_scrape_cache_get(q)
         if cached:
-            _log_flow("EBAY_CACHE_HIT", keyword=q[:40])
+            _log_flow(
+                "EBAY_CACHE_HIT",
+                keyword=q[:40],
+                dest_channel_id=dest_channel_id,
+                source_channel_id=source_channel_id,
+                source_label=source_label,
+            )
             return cached, None
 
         # 1000=New, 2000=Refurbished, 3000=Used/Pre-owned
@@ -1048,17 +1148,54 @@ class InstorebotForwarder:
         result: Dict[str, Dict[str, str]] = {}
         for cond_key, cond_id in condition_ids:
             url = self._ebay_sold_search_url(q, condition_id=cond_id)
-            _log_flow("EBAY_FETCH_START", cond=cond_key, url=url[:70])
-            html, err = await self._fetch_ebay_sold_page(url)
+            _log_flow(
+                "EBAY_FETCH_START",
+                cond=cond_key,
+                url=url[:70],
+                dest_channel_id=dest_channel_id,
+                source_channel_id=source_channel_id,
+                source_label=source_label,
+            )
+            html, err = await self._fetch_ebay_sold_page(
+                url,
+                dest_channel_id=dest_channel_id,
+                source_channel_id=source_channel_id,
+                source_label=source_label,
+            )
             if err or not html:
-                _log_flow("EBAY_FETCH", cond=cond_key, err=(err or "no_html")[:80], html_len=0)
+                _log_flow(
+                    "EBAY_FETCH",
+                    cond=cond_key,
+                    err=(err or "no_html")[:80],
+                    html_len=0,
+                    dest_channel_id=dest_channel_id,
+                    source_channel_id=source_channel_id,
+                    source_label=source_label,
+                )
                 result[cond_key] = {"low": "N/A", "high": "N/A", "url": url}
                 continue
-            _log_flow("EBAY_FETCH", cond=cond_key, err="ok", html_len=len(html or ""))
+            _log_flow(
+                "EBAY_FETCH",
+                cond=cond_key,
+                err="ok",
+                html_len=len(html or ""),
+                dest_channel_id=dest_channel_id,
+                source_channel_id=source_channel_id,
+                source_label=source_label,
+            )
             max_listings = int((self.config or {}).get("ebay_max_listings_per_condition") or 0)
             prices = self._extract_ebay_sold_prices_from_html(html, condition_hint=cond_key, max_listings=max_listings)
             if not prices:
-                _log_flow("EBAY_PRICES", cond=cond_key, raw_count=0, low="N/A", high="N/A")
+                _log_flow(
+                    "EBAY_PRICES",
+                    cond=cond_key,
+                    raw_count=0,
+                    low="N/A",
+                    high="N/A",
+                    dest_channel_id=dest_channel_id,
+                    source_channel_id=source_channel_id,
+                    source_label=source_label,
+                )
                 result[cond_key] = {"low": "N/A", "high": "N/A", "url": url}
                 continue
             # Ignore very low prices (parts, accessories) when computing range
@@ -1072,7 +1209,17 @@ class InstorebotForwarder:
                 "high": f"${high_val:,.2f}" if low_val != high_val else f"${high_val:,.2f}",
                 "url": url,
             }
-            _log_flow("EBAY_PRICES", cond=cond_key, raw_count=len(prices), filtered=len(prices_filtered), low=result[cond_key]["low"], high=result[cond_key]["high"])
+            _log_flow(
+                "EBAY_PRICES",
+                cond=cond_key,
+                raw_count=len(prices),
+                filtered=len(prices_filtered),
+                low=result[cond_key]["low"],
+                high=result[cond_key]["high"],
+                dest_channel_id=dest_channel_id,
+                source_channel_id=source_channel_id,
+                source_label=source_label,
+            )
         # If Refurbished looks like cross-contamination (same as another condition, mix of bounds, or overlaps Pre-owned), clear it
         ref = result.get("refurbished") or {}
         if ref.get("low") != "N/A" and ref.get("high") != "N/A":
@@ -1096,7 +1243,14 @@ class InstorebotForwarder:
             )
             if same_as_new or same_as_pre or mixed_bounds or overlaps_pre:
                 result["refurbished"] = {"low": "N/A", "high": "N/A", "url": ref.get("url", "")}
-                _log_flow("EBAY_PRICES", cond="refurbished_cleared", reason="contamination")
+                _log_flow(
+                    "EBAY_PRICES",
+                    cond="refurbished_cleared",
+                    reason="contamination",
+                    dest_channel_id=dest_channel_id,
+                    source_channel_id=source_channel_id,
+                    source_label=source_label,
+                )
         self._ebay_scrape_cache_put(q, result)
         return result, None
 
@@ -4997,6 +5151,21 @@ class InstorebotForwarder:
         deal_type = (guessed.get("deal_type") or "").strip() or "Amazon Lead"
         source_credit = (guessed.get("source_credit") or "").strip()
 
+        # Routing (run before expensive blocks so eBay logs include dest channel).
+        try:
+            src_id = int(getattr(getattr(message, "channel", None), "id", 0) or 0)
+        except Exception:
+            src_id = 0
+        source_label = None
+        if src_id:
+            try:
+                source_label = self._source_channel_log_label(src_id)
+            except Exception:
+                source_label = None
+
+        dest_id, route_reason = self._pick_dest_channel_id(source_channel_id=(src_id or None), category=category, enrich_failed=False)
+        _log_flow("ROUTE", dest_id=(dest_id or ""), reason=route_reason)
+
         # eBay sold comps (run before card body so we can inject eBay block and compute upside).
         ebay_comps_url = ""
         ebay_sold_new = "N/A"
@@ -5009,7 +5178,12 @@ class InstorebotForwarder:
         if self._ebay_scrape_enabled() and title:
             _log_flow("EBAY_START", title=(title or "")[:50])
             try:
-                ebay_ranges, ebay_err = await self._scrape_ebay_sold_ranges(title)
+                ebay_ranges, ebay_err = await self._scrape_ebay_sold_ranges(
+                    title,
+                    dest_channel_id=dest_id,
+                    source_channel_id=(src_id or None),
+                    source_label=source_label,
+                )
                 if ebay_err:
                     ebay_sold_err = ebay_err
                     _log_flow("EBAY_SCRAPE_FAIL", err=ebay_err[:120])
@@ -5088,14 +5262,6 @@ class InstorebotForwarder:
             if ebay_sold_refurbished != "N/A":
                 card_lines.append(f"Refurbished {ebay_sold_refurbished}")
         card_body = "\n".join(card_lines).strip()
-
-        # Routing: allow per-source overrides, otherwise personal vs grocery based on detected category.
-        try:
-            src_id = int(getattr(getattr(message, "channel", None), "id", 0) or 0)
-        except Exception:
-            src_id = 0
-        dest_id, route_reason = self._pick_dest_channel_id(source_channel_id=(src_id or None), category=category, enrich_failed=False)
-        _log_flow("ROUTE", dest_id=(dest_id or ""), reason=route_reason)
         
         # Strict filter for channel 1457129557067960482: only Amazon links with "glitch"/"price error" keywords (case-insensitive) AND >= 80% OFF
         if dest_id and int(dest_id) == 1457129557067960482:
