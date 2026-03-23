@@ -42,4 +42,8 @@ Instorebotforwarder/mavely_auth_token*.txt
 Instorebotforwarder/mavely_id_token*.txt
 Instorebotforwarder/playwright_profile/**
 Instorebotforwarder/.playwright/**
+# Oracle/direct downloads include an extra nested folder:
+# MWBots/Instorebotforwarder/Instorebotforwarder/playwright_profile/...
+Instorebotforwarder/Instorebotforwarder/playwright_profile/**
+Instorebotforwarder/Instorebotforwarder/.playwright/**
 Instorebotforwarder/api-token.env
