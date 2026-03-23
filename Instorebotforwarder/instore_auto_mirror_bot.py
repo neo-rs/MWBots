@@ -150,8 +150,41 @@ def _cfg_float(cfg: dict, key: str, env_key: str = "") -> Optional[float]:
 
 _FLOW_CH_KEYS = frozenset({"dest_id", "channel", "dest_channel_id", "source_channel_id"})
 
+# When `verbose_flow_logs` is false in config, only these [FLOW:*] lines are emitted (plus GEMINI failures; see below).
+_CALM_FLOW_STAGES = frozenset(
+    {
+        "SEND_FAIL",
+        "FILTER_SKIP",
+        "DUP_ASIN_SKIP",
+        "SKIP_OOS",
+        "EBAY_PW_FAIL",
+    }
+)
+# Gemini: in calm mode, log only failed/problem outcomes (not every api_request/cache_hit).
+_CALM_GEMINI_SOURCES = frozenset({"api_fallback"})
+
+_log_flow_context: Optional[Any] = None
+
+
+def _register_log_flow_context(inst: Any) -> None:
+    global _log_flow_context
+    _log_flow_context = inst
+
 
 def _log_flow(stage: str, **kv: Any) -> None:
+    ctx = _log_flow_context
+    if ctx is not None:
+        try:
+            verbose = bool((getattr(ctx, "config", None) or {}).get("verbose_flow_logs", False))
+        except Exception:
+            verbose = False
+        if not verbose:
+            if stage == "GEMINI":
+                src = str(kv.get("source") or "").strip()
+                if src not in _CALM_GEMINI_SOURCES:
+                    return
+            elif stage not in _CALM_FLOW_STAGES:
+                return
     parts: List[str] = []
     for k, v in kv.items():
         if v is None:
@@ -378,6 +411,7 @@ class InstorebotForwarder:
         self.bot = commands.Bot(command_prefix="!", intents=intents)
         self._setup_events()
         self._setup_slash_commands()
+        _register_log_flow_context(self)
 
     # -----------------------
     # Config IO (IMPORTANT: write config.json ONLY, never secrets)
@@ -1540,6 +1574,80 @@ class InstorebotForwarder:
                 if dest:
                     return f"<#{src}> → <#{int(dest)}> route={forced}"
         return f"<#{src}> → (canonical Amazon-card)"
+
+    def _verbose_flow_logs(self) -> bool:
+        return bool((self.config or {}).get("verbose_flow_logs", False))
+
+    def _source_channel_log_label(self, channel_id: int) -> str:
+        raw = (self.config or {}).get("source_channel_log_labels") or {}
+        if not isinstance(raw, dict):
+            return "source"
+        sid = int(channel_id)
+        s = (
+            str(raw.get(str(sid)) or raw.get(sid) or "").strip()
+        )
+        return s or "source"
+
+    def _log_message_forward_summary(
+        self,
+        *,
+        src_channel_id: int,
+        dest_channel_id: int,
+        path: str,
+        extra: str = "",
+    ) -> None:
+        if self._verbose_flow_logs():
+            return
+        label = self._source_channel_log_label(int(src_channel_id))
+        tail = f" {extra}" if (extra or "").strip() else ""
+        log.info(
+            "[FORWARD] posted <#%s> (%s) -> <#%s> [%s]%s",
+            int(src_channel_id),
+            label,
+            int(dest_channel_id),
+            path,
+            tail,
+        )
+
+    def _emit_startup_dashboard(self) -> None:
+        """One-time readable summary: integrations + channel map (calm logs)."""
+        calm = not self._verbose_flow_logs()
+        log.info("[BOOT] ========== Instorebotforwarder startup ==========")
+        log.info(
+            "[BOOT] Log detail: %s (verbose_flow_logs=%s)",
+            "calm - [FORWARD] + errors only, no per-step [FLOW:SCAN] noise" if calm else "verbose - all [FLOW:*] lines",
+            (not calm),
+        )
+        try:
+            gu = len(self.bot.guilds or [])
+        except Exception:
+            gu = 0
+        log.info("[BOOT] Discord: logged in as %s | guilds=%s", self.bot.user, gu)
+        ge = self._gemini_enabled()
+        gk = bool(self._gemini_api_key())
+        log.info(
+            "[BOOT] Gemini: enabled=%s api_key=%s model=%s temp=%.2f",
+            ge,
+            "set" if gk else "missing",
+            self._gemini_model(),
+            self._gemini_temperature(),
+        )
+        log.info(
+            "[BOOT] Amazon: scrape=%s playwright=%s",
+            self._scrape_enabled(),
+            str((self.config or {}).get("amazon_playwright_scrape_enabled", "")),
+        )
+        log.info("[BOOT] eBay sold scrape: %s", self._ebay_scrape_enabled())
+        log.info("[BOOT] ---------- channel map (watched sources) ----------")
+        ids = self._source_channel_ids()
+        if not ids:
+            log.info("[BOOT]   (source_channel_ids is empty)")
+        else:
+            for sid in ids:
+                lbl = self._source_channel_log_label(sid)
+                log.info("[BOOT]   <#%s>  %s", sid, lbl)
+                log.info("[BOOT]       %s", self._journal_source_mapping_line(sid))
+        log.info("[BOOT] ========== ready for messages ==========")
 
     def _gemini_max_chars(self) -> int:
         try:
@@ -4144,6 +4252,12 @@ class InstorebotForwarder:
 
         try:
             await ch.send(content=out, embeds=embeds if embeds else None, allowed_mentions=discord.AllowedMentions.none())
+            self._log_message_forward_summary(
+                src_channel_id=int(buf.src_channel_id),
+                dest_channel_id=int(buf.dest_channel_id),
+                path="simple_forward_merge",
+                extra="",
+            )
         except Exception:
             pass
 
@@ -4231,6 +4345,12 @@ class InstorebotForwarder:
                         pass
                 try:
                     await ch.send(content=content, embeds=embeds_copy if embeds_copy else None, allowed_mentions=discord.AllowedMentions.none())
+                    self._log_message_forward_summary(
+                        src_channel_id=int(src_channel_id),
+                        dest_channel_id=int(dest_channel_id),
+                        path="mirror_as_is",
+                        extra="",
+                    )
                 except Exception:
                     pass
             return True
@@ -4404,6 +4524,12 @@ class InstorebotForwarder:
                 pass
         try:
             await ch.send(embeds=[embed], allowed_mentions=discord.AllowedMentions.none())
+            self._log_message_forward_summary(
+                src_channel_id=int(message.channel.id),
+                dest_channel_id=int(dest_channel_id),
+                path="affiliated_leads",
+                extra="",
+            )
         except Exception:
             return
 
@@ -4480,6 +4606,17 @@ class InstorebotForwarder:
                 pass
         try:
             await ch.send(embeds=[embed], allowed_mentions=discord.AllowedMentions.none())
+            asin_ex = ""
+            try:
+                asin_ex = str(getattr(det, "asin", "") or "").strip().upper()
+            except Exception:
+                asin_ex = ""
+            self._log_message_forward_summary(
+                src_channel_id=int(message.channel.id),
+                dest_channel_id=int(dest_channel_id),
+                path="gemini_rephrase_amz_deals",
+                extra=f"asin={asin_ex}" if asin_ex else "",
+            )
         except Exception:
             return
 
@@ -5109,11 +5246,20 @@ class InstorebotForwarder:
             return
 
         if self._source_message_opens_with_new_deal_found(message):
-            _log_flow("SKIP", reason="new_deal_found_card_top", channel_id=str(message.channel.id), message_id=str(message.id))
+            sid = int(message.channel.id)
+            if self._verbose_flow_logs():
+                _log_flow("SKIP", reason="new_deal_found_card_top", channel_id=str(sid), message_id=str(message.id))
+            else:
+                log.info(
+                    "[FORWARD] skip <#%s> (%s) | rebroadcast card (New Deal Found pattern)",
+                    sid,
+                    self._source_channel_log_label(sid),
+                )
             return
 
         try:
-            _log_flow("MAPPING", line=self._journal_source_mapping_line(int(message.channel.id)))
+            if self._verbose_flow_logs():
+                _log_flow("MAPPING", line=self._journal_source_mapping_line(int(message.channel.id)))
         except Exception:
             pass
 
@@ -5156,7 +5302,15 @@ class InstorebotForwarder:
 
         try:
             await ch.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-            _log_flow("SEND_OK", dest_id=dest_id, message_id=str(message.id))
+            if self._verbose_flow_logs():
+                _log_flow("SEND_OK", dest_id=dest_id, message_id=str(message.id))
+            ex = f"asin={asin}" if asin else ""
+            self._log_message_forward_summary(
+                src_channel_id=int(message.channel.id),
+                dest_channel_id=int(dest_id),
+                path="amazon_embed",
+                extra=ex,
+            )
             if reserved and asin:
                 self._dedupe_commit(asin)
         except Exception as e:
@@ -5173,6 +5327,10 @@ class InstorebotForwarder:
             guild_id = _cfg_int(self.config, "guild_id", "GUILD_ID")
             log.info("Bot ready user=%s guild_id=%s config=%s secrets=%s", self.bot.user, guild_id, self.config_path, self.secrets_path)
             log.info("bot_token=%s", mask_secret(self.config.get("bot_token")))
+            try:
+                self._emit_startup_dashboard()
+            except Exception:
+                log.exception("[BOOT] startup dashboard failed (continuing)")
 
             # Sync slash commands so /embed, /testallmessage appear in all servers the bot is in
             await asyncio.sleep(1)

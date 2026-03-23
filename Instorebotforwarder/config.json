@@ -1,5 +1,14 @@
 {
   "guild_id": 1451275225512546497,
+  "verbose_flow_logs": false,
+  "source_channel_log_labels": {
+    "1438969997178306661": "Profitable leads (routed deals)",
+    "1435066421133443174": "Amazon Lowkey Flips",
+    "1435985494356918333": "Price Error / Glitched",
+    "1435268379521847369": "Shop merge / StockX enrich",
+    "1435308472639160522": "Mavely Leads",
+    "1438970053352751215": "Promo Deal"
+  },
   "source_channel_ids": [
     1438969997178306661,
     1435066421133443174,
