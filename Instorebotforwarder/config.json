@@ -46,7 +46,8 @@
   "openai_model": "gpt-4o-mini",
   "openai_timeout_s": 12,
   "openai_max_chars": 1800,
-  "gemini_model": "gemini-2.0-flash-lite",
+  "gemini_model": "gemini-2.5-flash-lite",
+  "gemini_temperature": 0.65,
   "dedupe_asin_ttl_s": 21600,
   "startup_smoketest_enabled": false,
   "startup_smoketest_count": 3,
@@ -120,8 +121,7 @@
     },
     "1438970053352751215": {
       "dest_channel_id": 1484473267031904287,
-      "mode": "gemini_rephrase_amz_deals",
-      "gemini_temperature": 0.3
+      "mode": "gemini_rephrase_amz_deals"
     }
   }
 }

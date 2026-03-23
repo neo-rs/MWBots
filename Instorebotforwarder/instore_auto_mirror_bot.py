@@ -62,6 +62,28 @@ _EMOJI_RE = re.compile(
     flags=re.UNICODE,
 )
 
+# gemini_rephrase_amz_deals: structured parse (header / body / kept price lines)
+_RE_AMZ_DEAL_HEADER_LINE = re.compile(
+    r"(?i)^(?:(new\s+)?deal\s+found\b|hot\s+deal\b|deal\s+alert\b|price\s+drop\b|flash\s+deal\b|limited[\s-]time\s+deal\b)",
+)
+_RE_AMZ_MD_LINK_ONLY_LINE = re.compile(
+    r"(?i)^\s*(\[[^\]]+\]\(\s*<?https?://[^)>]+>?\s*\)\s*)+$",
+)
+_RE_AMZ_RAW_HTTP_ONLY_LINE = re.compile(r"(?i)^\s*https?://\S+\s*$")
+# Discord hides embeds with <https://...> on its own line — same as CTA for our template.
+_RE_AMZ_ANGLE_HTTP_LINE = re.compile(r"(?i)^\s*<https?://[^>\s]+>\s*$")
+# Skip re-forwarding embeds that already open like our RS deal cards (e.g. FLIPFLUENCE output).
+_RE_SKIP_SOURCE_NEW_DEAL_FOUND_TOP = re.compile(r"(?i)^new\s+deal\s+found\b")
+
+
+def _embed_card_first_line(text: Optional[str]) -> str:
+    """First logical line of embed description/title, with common Discord markdown trim."""
+    if not text:
+        return ""
+    line = str(text).replace("\r\n", "\n").strip().split("\n", 1)[0].strip()
+    line = line.replace("**", "").replace("__", "").strip()
+    return line
+
 
 def _strip_emoji_text(s: str) -> str:
     try:
@@ -320,7 +342,7 @@ class InstorebotForwarder:
         self.config_path = config_path
         self.secrets_path = secrets_path
         self._cfg_lock = asyncio.Lock()
-        self._openai_cache: Dict[str, str] = {}
+        self._openai_cache: Dict[str, Any] = {}
         self._openai_stats: Dict[str, int] = {}
         self._openai_last_mode: Dict[str, str] = {}
 
@@ -1479,9 +1501,9 @@ class InstorebotForwarder:
 
     def _gemini_temperature(self) -> float:
         try:
-            v = float((self.config or {}).get("gemini_temperature") or 0.3)
+            v = float((self.config or {}).get("gemini_temperature") or 0.62)
         except Exception:
-            v = 0.3
+            v = 0.62
         return max(0.0, min(v, 1.0))
 
     def _gemini_temperature_from_simple_forward_mapping(self, mapping: Optional[Dict[str, Any]]) -> Optional[float]:
@@ -1551,7 +1573,8 @@ class InstorebotForwarder:
 
         temp = self._gemini_temperature() if temperature_override is None else max(0.0, min(float(temperature_override), 1.0))
         h = hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()[:16]
-        cache_key = f"gemini:{kind}:t={temp:.4f}:{h}"
+        # v3: prompt + full amz_deals finalize (all hub URLs + boilerplate); bump when contract changes.
+        cache_key = f"gemini:v3:{kind}:t={temp:.4f}:{h}"
         if cache_key in self._openai_cache:
             self._openai_last_mode[f"gemini:{kind}"] = "cache"
             return self._openai_cache[cache_key]
@@ -1575,6 +1598,7 @@ class InstorebotForwarder:
                 temperature=temp,
                 timeout_s=float((self.config or {}).get("gemini_timeout_s") or 12.0),
                 neutralize_mentions_fn=self._neutralize_mentions,
+                usage_accumulator=getattr(self, "_gemini_usage_accumulator", None),
             )
             out = str(out or "").strip()
             if not out:
@@ -1583,6 +1607,153 @@ class InstorebotForwarder:
             return out
         except Exception:
             return raw
+
+    def _gemini_header_rewrite_is_too_bland(self, ho: str, h0: str) -> bool:
+        """Reject generic catalog-style headlines; caller falls back to parsed header."""
+        ho_s = (ho or "").strip()
+        h0_s = (h0 or "").strip()
+        if not ho_s or not h0_s:
+            return False
+        low = ho_s.lower()
+        banned = (
+            "available for",
+            "currently listed",
+            "is listed on",
+            "is currently",
+            "can be purchased",
+            "can be found",
+            "for sale at",
+            "listed on amazon",
+            "product is",
+            "kit available for",
+            "tool kit available",
+            "we've sourced",
+            "we have sourced",
+            " is listed ",
+            "currently on amazon",
+        )
+        if any(b in low for b in banned):
+            return True
+        if len(h0_s) > 20 and len(ho_s) > int(len(h0_s) * 1.9) + 15:
+            return True
+        if len(ho_s) > 165:
+            return True
+        return False
+
+    async def _gemini_rephrase_amz_deals_structured(
+        self,
+        header: str,
+        body: str,
+        *,
+        temperature_override: Optional[float] = None,
+    ) -> Tuple[str, str, Optional[str]]:
+        """
+        Gemini rewrites header + optional compare/body prose (JSON). Short price rows and promo/coupon
+        lines stay in kept_lines (not sent to the model).
+
+        Third tuple element is None when the API returned usable JSON at least once; otherwise a short
+        reason tag (e.g. 'http_429') so logs are not reported as a successful model completion.
+        """
+        h0 = (header or "").strip()
+        b0 = (body or "").strip()
+        if not h0 and not b0:
+            return "", "", None
+        if not self._gemini_enabled():
+            return h0, b0, "gemini_disabled"
+        key = self._gemini_api_key()
+        if not key:
+            return h0, b0, "no_api_key"
+
+        tester_skip = getattr(self, "_instore_flow_tester_suppress_struct_gemini_reason", None)
+        if isinstance(tester_skip, str) and tester_skip.strip():
+            ts = tester_skip.strip()
+            _log_flow(
+                "GEMINI",
+                kind="amz_deals_struct",
+                source="skipped_duplicate_preflight",
+                reason=ts,
+                header_changed="false",
+                body_changed="false",
+                header_out_chars=len(h0),
+                body_out_chars=len(b0),
+            )
+            return h0, b0, ts
+
+        temp = self._gemini_temperature() if temperature_override is None else max(0.0, min(float(temperature_override), 1.0))
+        payload = f"H:{h0}\nB:{b0}"
+        h = hashlib.sha256(payload.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        cache_key = f"gemini:v11:amz_deals_struct:t={temp:.4f}:{h}"
+        if cache_key in self._openai_cache:
+            self._openai_last_mode["gemini:amz_deals_struct"] = "cache"
+            _log_flow(
+                "GEMINI",
+                kind="amz_deals_struct",
+                source="cache_hit",
+                key_suffix=h,
+            )
+            cached = self._openai_cache[cache_key]
+            if isinstance(cached, (list, tuple)) and len(cached) == 2:
+                return str(cached[0] or ""), str(cached[1] or ""), None
+
+        try:
+            self._openai_last_mode["gemini:amz_deals_struct"] = "api_call"
+            from MWBots.Instorebotforwarder.automatedParaphrase.gemini_paraphraser import (
+                minimal_rephrase_amz_deal_header_body_json,
+            )
+
+            _log_flow(
+                "GEMINI",
+                kind="amz_deals_struct",
+                source="api_request",
+                model=self._gemini_model(),
+                temperature=f"{temp:.4f}",
+                override=("1" if temperature_override is not None else "0"),
+                header_in_chars=len(h0),
+                body_in_chars=len(b0),
+            )
+            ho, bo, api_fail = await minimal_rephrase_amz_deal_header_body_json(
+                header=h0,
+                body=b0,
+                gemini_api_key=key,
+                model=self._gemini_model(),
+                temperature=temp,
+                timeout_s=float((self.config or {}).get("gemini_timeout_s") or 12.0),
+                neutralize_mentions_fn=self._neutralize_mentions,
+                usage_accumulator=getattr(self, "_gemini_usage_accumulator", None),
+            )
+            ho = str(ho or "").strip() or h0
+            bo = str(bo or "").strip()
+            if not api_fail and not bo and b0:
+                bo = b0
+            if not api_fail and self._gemini_header_rewrite_is_too_bland(ho, h0):
+                log.info("[FLOW:GEMINI] amz_deals_struct header_bland_fallback")
+                ho = h0
+            if api_fail:
+                _log_flow(
+                    "GEMINI",
+                    kind="amz_deals_struct",
+                    source="api_fallback",
+                    reason=str(api_fail),
+                    header_changed=str(ho != h0).lower(),
+                    body_changed=str(bo != b0).lower(),
+                    header_out_chars=len(ho),
+                    body_out_chars=len(bo),
+                )
+            else:
+                self._openai_cache[cache_key] = (ho, bo)
+                _log_flow(
+                    "GEMINI",
+                    kind="amz_deals_struct",
+                    source="api_ok",
+                    header_changed=str(ho != h0).lower(),
+                    body_changed=str(bo != b0).lower(),
+                    header_out_chars=len(ho),
+                    body_out_chars=len(bo),
+                )
+            return ho, bo, api_fail
+        except Exception as ex:
+            log.warning("[FLOW:GEMINI] amz_deals_struct api_exception: %s", str(ex)[:200])
+            return h0, b0, "exception"
 
     def _stable_key_slug(self, seed: str, *, length: int = 7) -> str:
         s = (seed or "").encode("utf-8", errors="ignore")
@@ -3181,8 +3352,12 @@ class InstorebotForwarder:
             if not u:
                 return
             u_norm = affiliate_rewriter.normalize_input_url(u)
-            if u_norm:
-                urls.append(u_norm)
+            if not u_norm:
+                return
+            # Loose URL scan turns $38.xx into https://38.xx — never use for expansion/detection.
+            if re.search(r"(?i)https?://\d+\.xx\b", u_norm):
+                return
+            urls.append(u_norm)
 
         # 1) content
         for (u, _, _) in affiliate_rewriter.extract_urls_with_spans((message.content or "")):
@@ -3278,6 +3453,80 @@ class InstorebotForwarder:
                             final_url = affiliate_rewriter.unwrap_known_query_redirects(final_url) or final_url
                         except Exception:
                             pass
+        except Exception:
+            pass
+
+        # Same idea as affiliate_rewriter.compute_affiliate_rewrites_plain (special_html_hosts loop):
+        # pricedoffers/saveyourdeals/joylink/etc. often 200 on an HTML shell; the real Amazon URL lives
+        # in __NEXT_DATA__ / JSON, not in redirect Location headers. Without this, _detect_amazon only
+        # sees the hub URL and _scrape_deal_hub_for_amazon_assets may miss ASINs.
+        _hub_shell_suffixes = frozenset(
+            {
+                "deals.pennyexplorer.com",
+                "ringinthedeals.com",
+                "dmflip.com",
+                "trackcm.com",
+                "joylink.io",
+                "fkd.deals",
+                "pricedoffers.com",
+                "saveyourdeals.com",
+                "go.sylikes.com",
+                "rd.bizrate.com",
+                "go.skimresources.com",
+                "howl.link",
+                "howl.me",
+                "hiddendealsociety.com",
+            }
+        )
+
+        def _hub_shell_host(netloc: str) -> bool:
+            h = (netloc or "").lower().strip()
+            if h.startswith("www."):
+                h = h[4:]
+            return h in _hub_shell_suffixes
+
+        candidate = (final_url or "").strip()
+        try:
+            for _ in range(3):
+                try:
+                    ph = (urlparse(candidate).netloc or "").lower()
+                except Exception:
+                    break
+                if not _hub_shell_host(ph):
+                    break
+                try:
+                    import aiohttp
+
+                    _hh = affiliate_rewriter._html_fetch_headers_for_hub(candidate)  # type: ignore[attr-defined]
+                    async with session.get(
+                        candidate,
+                        headers=_hh,
+                        timeout=aiohttp.ClientTimeout(total=float(timeout_s)),
+                    ) as resp:
+                        txt = await resp.text(errors="ignore")
+                    out = affiliate_rewriter._first_production_outbound_from_hub_html(txt)  # type: ignore[attr-defined]
+                except Exception:
+                    break
+                if not out:
+                    break
+                out_abs = (out or "").strip()
+                if out_abs.startswith("/"):
+                    out_abs = urljoin(candidate, out_abs)
+                out_abs = affiliate_rewriter.unwrap_known_query_redirects(out_abs) or out_abs
+                candidate = out_abs
+                final_url = candidate
+                if affiliate_rewriter.should_expand_url(final_url):
+                    try:
+                        final_url = await affiliate_rewriter.expand_url(
+                            session,
+                            final_url,
+                            timeout_s=timeout_s,
+                            max_redirects=max_redirects,
+                        )
+                        final_url = affiliate_rewriter.unwrap_known_query_redirects(final_url) or final_url
+                    except Exception:
+                        pass
+                candidate = (final_url or "").strip()
         except Exception:
             pass
 
@@ -3598,6 +3847,29 @@ class InstorebotForwarder:
         if content:
             lines.append(content)
 
+        # Webhooks and deal bots often put the full lead in an embed only (empty .content).
+        # Mirror that text here so simple-forward / Gemini / affiliated paths see the same copy as users.
+        try:
+            for e in (message.embeds or []):
+                eparts: List[str] = []
+                t = (getattr(e, "title", None) or "").strip()
+                if t:
+                    eparts.append(t)
+                d = (getattr(e, "description", None) or "").strip()
+                if d:
+                    eparts.append(d)
+                for f in (getattr(e, "fields", None) or []):
+                    fn = (getattr(f, "name", None) or "").strip()
+                    fv = (getattr(f, "value", None) or "").strip()
+                    row = "\n".join([x for x in (fn, fv) if x])
+                    if row:
+                        eparts.append(row)
+                # Omit embed footer: often "From: … | By: …" / #ad boilerplate we do not want in Gemini output.
+                if eparts:
+                    lines.append("\n\n".join(eparts))
+        except Exception:
+            pass
+
         # Add attachments as raw CDN URLs so Discord renders visual embeds.
         try:
             for att in (message.attachments or []):
@@ -3609,6 +3881,223 @@ class InstorebotForwarder:
 
         block = "\n".join([x for x in lines if str(x).strip()]).strip()
         return block
+
+    def _first_source_embed_media_url(self, message: discord.Message) -> str:
+        """First image or thumbnail URL from message embeds (for outbound simple-forward embeds)."""
+        try:
+            for e in (message.embeds or []):
+                try:
+                    img = getattr(e, "image", None)
+                    u = (getattr(img, "url", None) or "").strip() if img is not None else ""
+                    if u:
+                        return u
+                except Exception:
+                    pass
+                try:
+                    th = getattr(e, "thumbnail", None)
+                    u = (getattr(th, "url", None) or "").strip() if th is not None else ""
+                    if u:
+                        return u
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return ""
+
+    def _is_public_http_url_for_amz_deals(self, url: str) -> bool:
+        u = (url or "").strip()
+        if not u:
+            return False
+        low = u.lower()
+        return low.startswith("http://") or low.startswith("https://")
+
+    def _amz_deal_line_is_prime_junk(self, line: str) -> bool:
+        s = line.strip()
+        if re.match(r"(?i)^\s*30[\s-]*day\s+prime(?:\s+free)?\s+trial\s*$", s):
+            return True
+        if re.search(r"(?i)\bprime\s+(?:free\s+)?trial\b", s) and len(s) < 96:
+            return True
+        return False
+
+    def _amz_deal_line_is_shouty_deal_headline(self, line: str) -> bool:
+        """
+        Main hook line with a price but not a compare/Was/Originally line (e.g. $35 FOR A 412-PIECE KIT...).
+        Those must go to Gemini as header, not 'kept' verbatim price rows.
+        """
+        s = line.strip()
+        if not re.search(r"\$\s*\d", s):
+            return False
+        if re.match(
+            r"(?i)^\s*(now|was|reg\.?|list|msrp|orig(?:inally)?|compare|sale|priced|list(?:ed)?)\b",
+            s,
+        ):
+            return False
+        alpha = [c for c in s if c.isalpha()]
+        if len(alpha) >= 14:
+            up = sum(1 for c in alpha if c.isupper())
+            if up / len(alpha) >= 0.62:
+                return True
+        if re.search(r"(?i)\bfor a\b|\bfor an\b|\d+\s*-?\s*piece\b", s):
+            return True
+        if re.search(r"(?i)\bkit\b.*\bamazon\b|\bamazon\b.*\bkit\b", s):
+            return True
+        return False
+
+    def _amz_deal_line_is_price_or_compare(self, line: str) -> bool:
+        """Compare / was-now lines — not the primary shouty headline."""
+        s = line.strip()
+        if self._amz_deal_line_is_shouty_deal_headline(s):
+            return False
+        if re.match(
+            r"(?i)^\s*(now|was|reg\.?|list|msrp|orig(?:inally)?|compare|sale|priced|list(?:ed)?)\b",
+            s,
+        ):
+            return True
+        if re.search(r"(?i)\bsimilar\b.*\bsell|\blisted as\b|\bcompare to\b", s):
+            return True
+        if re.search(r"(?i)\$\s*\d", s) and len(s) <= 52:
+            if not re.search(r"(?i)\b(for a|for an|piece|kit|amazon)\b", s):
+                return True
+        return False
+
+    def _amz_deal_line_is_compare_body_fodder(self, line: str) -> bool:
+        """Longer compare/context lines → Gemini body; short Now/Reg stubs stay under Product info."""
+        s = line.strip()
+        if not self._amz_deal_line_is_price_or_compare(s):
+            return False
+        if len(s) > 72:
+            return True
+        if re.search(
+            r"(?i)\b(originally|similar\b.*\bsell|listed\s+as|compare\s+to|other\s+stores|selling\s+for)\b",
+            s,
+        ):
+            return True
+        if "&" in s and re.search(r"(?i)\$\s*\d", s) and len(s) > 42:
+            return True
+        return False
+
+    def _amz_deal_line_is_preserved_promo(self, line: str) -> bool:
+        s = line.strip()
+        if re.search(
+            r"(?i)\b(use\s+code|code at checkout|at checkout|checkout:|promo\b|coupon\s*code|apply\s+code)\b",
+            s,
+        ):
+            return True
+        return bool(
+            re.match(
+                r"(?i)^\s*(clip\s+coupon|coupon|sub/?\s*&?\s*save|s\s*&\s*s|add[\s-]?on item|add[\s-]?on)\b",
+                s,
+            )
+        )
+
+    def _amz_deal_line_is_skip_cta(self, line: str) -> bool:
+        s = line.strip()
+        if _RE_AMZ_MD_LINK_ONLY_LINE.match(s):
+            return True
+        if _RE_AMZ_RAW_HTTP_ONLY_LINE.match(s):
+            return True
+        if _RE_AMZ_ANGLE_HTTP_LINE.match(s):
+            return True
+        return False
+
+    def _amz_deal_line_is_branded_header(self, line: str) -> bool:
+        return bool(_RE_AMZ_DEAL_HEADER_LINE.search(line.strip()))
+
+    def _amz_deal_line_looks_like_embed_headline(self, line: str) -> bool:
+        """First line **title** or '% OFF' style when there is no 'New Deal Found' header."""
+        s = line.strip()
+        if not s or len(s) > 200:
+            return False
+        if re.match(r"^\*\*.+\*\*$", s):
+            return True
+        if re.search(r"(?i)\d+\s*%", s) and re.search(r"(?i)\b(off|save|deal|lowest|amazon)\b", s):
+            return True
+        return False
+
+    def _strip_url_only_paragraphs_from_body(self, body: str) -> str:
+        """Remove paragraphs that are only outbound links (after parse)."""
+        raw = (body or "").strip()
+        if not raw:
+            return ""
+        paras = [p.strip() for p in re.split(r"\n\s*\n", raw) if p.strip()]
+        kept: List[str] = []
+        for p in paras:
+            lines = [ln.strip() for ln in p.split("\n") if ln.strip()]
+            if not lines:
+                continue
+            if all(self._amz_deal_line_is_skip_cta(ln) for ln in lines):
+                continue
+            kept.append(p)
+        return "\n\n".join(kept).strip()
+
+    def _parse_amz_deals_block_for_structured_gemini(self, text: str) -> Dict[str, Any]:
+        """
+        Split simple_forward deal copy into: headline (AI), body prose (AI), kept lines (prices/promos, exact).
+        Drops CTA markdown lines and Prime junk; canonical Amazon URL appended as plain text (no markdown).
+        """
+        raw = (text or "").replace("\r\n", "\n")
+        header = ""
+        header_consumed = False
+        body_lines: List[str] = []
+        kept_lines: List[str] = []
+
+        for ln in raw.split("\n"):
+            line = re.sub(r"(?i)\s+#ad\s*$", "", ln).strip()
+            if not line:
+                continue
+            if self._amz_deal_line_is_prime_junk(line):
+                continue
+            if self._amz_deal_line_is_skip_cta(line):
+                continue
+            if self._amz_deal_line_is_preserved_promo(line):
+                kept_lines.append(line)
+                continue
+            if not header_consumed and (
+                self._amz_deal_line_is_branded_header(line) or self._amz_deal_line_is_shouty_deal_headline(line)
+            ):
+                header = line
+                header_consumed = True
+                continue
+            if self._amz_deal_line_is_price_or_compare(line):
+                if self._amz_deal_line_is_compare_body_fodder(line):
+                    body_lines.append(line)
+                else:
+                    kept_lines.append(line)
+                continue
+            body_lines.append(line)
+
+        if not header and body_lines and self._amz_deal_line_looks_like_embed_headline(body_lines[0]):
+            header = body_lines.pop(0)
+
+        body_joined = "\n\n".join(body_lines).strip()
+        body_joined = self._strip_url_only_paragraphs_from_body(body_joined)
+        return {"header": header, "body": body_joined, "kept_lines": kept_lines}
+
+    def _discord_bold_embed_headline(self, header: str) -> str:
+        """First line of embed description: Discord **bold**; avoid duplicating existing wrap."""
+        t = (header or "").strip()
+        if not t:
+            return t
+        if len(t) >= 4 and t.startswith("**") and t.endswith("**"):
+            return t
+        inner = t.replace("**", "")
+        return f"**{inner}**"
+
+    def _rebuild_amz_deals_embed_description(self, header: str, body: str, kept_lines: List[str], amazon_url: str) -> str:
+        amz = (amazon_url or "").strip()
+        parts: List[str] = []
+        h = (header or "").strip()
+        b = (body or "").strip()
+        if h:
+            parts.append(self._discord_bold_embed_headline(h))
+        if b:
+            parts.append(b)
+        if kept_lines:
+            parts.append("### Product info\n" + "\n".join(kept_lines))
+        if amz:
+            parts.append(amz)
+        out = "\n\n".join(p for p in parts if p)
+        return re.sub(r"\n{3,}", "\n\n", out).strip()
 
     async def _simple_flush_buffer(self, buf: _SimpleForwardBuffer) -> None:
         if not buf or not buf.dest_channel_id:
@@ -3907,6 +4396,12 @@ class InstorebotForwarder:
         if len(desc) > 3900:
             desc = desc[:3897] + "..."
         embed = discord.Embed(description=desc, url=chosen_raw_url)
+        media_u = self._first_source_embed_media_url(message)
+        if media_u:
+            try:
+                embed.set_image(url=media_u)
+            except Exception:
+                pass
         try:
             await ch.send(embeds=[embed], allowed_mentions=discord.AllowedMentions.none())
         except Exception:
@@ -3915,9 +4410,9 @@ class InstorebotForwarder:
     async def _maybe_gemini_rephrase_amz_deals_forward(self, message: discord.Message, dest_channel_id: int, mapping: Dict[str, Any]) -> None:
         """
         Amazon deals mode:
-        - extract a raw Amazon destination URL
-        - run Gemini minimal rephrase on the lead text to reduce exact duplicates
-        - forward as an embed (Gemini must not change URLs)
+        - resolve canonical Amazon URL
+        - parse embed copy into headline + body + preserved price/promo lines
+        - Gemini rephrases headline + body only (JSON); rebuild with one [Product link](url)
         """
         if not message.guild:
             return
@@ -3958,35 +4453,31 @@ class InstorebotForwarder:
         if len(desc_in) > max_chars:
             desc_in = desc_in[: max_chars - 3] + "..."
 
+        parsed = self._parse_amz_deals_block_for_structured_gemini(desc_in)
+        h0 = str(parsed.get("header") or "")
+        b0 = str(parsed.get("body") or "")
+        kept = list(parsed.get("kept_lines") or [])
+        temp_override = self._gemini_temperature_from_simple_forward_mapping(mapping)
         try:
-            original_urls = [u for (u, _, _) in affiliate_rewriter.extract_urls_with_spans(desc_in) if (u or "").strip()]
-            # Gemini must keep any URLs unchanged; we keep the entire message block as text input.
-            temp_override = self._gemini_temperature_from_simple_forward_mapping(mapping)
-            desc_out = await self._gemini_minimal_rephrase(
-                "amz_deals",
-                desc_in,
+            h1, b1, _gem_fail = await self._gemini_rephrase_amz_deals_structured(
+                h0,
+                b0,
                 temperature_override=temp_override,
             )
         except Exception:
-            desc_out = desc_in
-            original_urls = []
+            h1, b1 = h0, b0
 
-        # Safety: ensure Gemini did not alter/remove URLs. If it did, fall back to the original text.
-        try:
-            if original_urls:
-                for u in original_urls:
-                    if u and u not in desc_out:
-                        desc_out = desc_in
-                        break
-        except Exception:
-            desc_out = desc_in
-
-        if not desc_out:
-            desc_out = desc_in
+        desc_out = self._rebuild_amz_deals_embed_description(h1, b1, kept, raw_url)
 
         if len(desc_out) > 3900:
             desc_out = desc_out[:3897] + "..."
         embed = discord.Embed(description=desc_out, url=raw_url)
+        media_u = self._first_source_embed_media_url(message)
+        if media_u:
+            try:
+                embed.set_image(url=media_u)
+            except Exception:
+                pass
         try:
             await ch.send(embeds=[embed], allowed_mentions=discord.AllowedMentions.none())
         except Exception:
@@ -4588,6 +5079,22 @@ class InstorebotForwarder:
         }
         return embed, meta
 
+    def _source_message_opens_with_new_deal_found(self, message: discord.Message) -> bool:
+        """True when the card's top line is 'New Deal Found!' (description, then title, then plain content)."""
+        for e in list(message.embeds or []):
+            desc = getattr(e, "description", None)
+            if desc:
+                fl = _embed_card_first_line(desc)
+                if fl and _RE_SKIP_SOURCE_NEW_DEAL_FOUND_TOP.match(fl):
+                    return True
+            tit = getattr(e, "title", None)
+            if tit:
+                fl = _embed_card_first_line(tit)
+                if fl and _RE_SKIP_SOURCE_NEW_DEAL_FOUND_TOP.match(fl):
+                    return True
+        fl = _embed_card_first_line(message.content or "")
+        return bool(fl and _RE_SKIP_SOURCE_NEW_DEAL_FOUND_TOP.match(fl))
+
     async def _maybe_forward_message(self, message: discord.Message) -> None:
         if self.bot.user and message.author and message.author.id == self.bot.user.id:
             return
@@ -4599,6 +5106,10 @@ class InstorebotForwarder:
             return
 
         if int(message.channel.id) in set(self._output_channel_ids()):
+            return
+
+        if self._source_message_opens_with_new_deal_found(message):
+            _log_flow("SKIP", reason="new_deal_found_card_top", channel_id=str(message.channel.id), message_id=str(message.id))
             return
 
         try:
