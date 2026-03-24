@@ -117,6 +117,25 @@ def store_category_from_location(where_location: str) -> Optional[str]:
     return None
 
 
+def is_definitive_major_clearance_embed(text: str) -> bool:
+    """
+    Home Depot monitor embed shape for MAJOR_CLEARANCE (clearance source channels only in routing).
+    Single source of truth shared with live_forwarder major-clearance flow.
+    """
+    tl = (text or "").lower()
+    if not tl:
+        return False
+    has_title = ("home depot store clearance deals" in tl) and ("new item" in tl)
+    has_inventory = bool(re.search(r"\btotal\s*inventory\b", tl))
+    has_internet_number = bool(re.search(r"\binternet\s*number\b", tl))
+    has_price_shape = bool(
+        re.search(r"\bprice\b", tl)
+        and re.search(r"\boriginal\s*price\b", tl)
+        and (re.search(r"\bpercentage\s*off\b", tl) or re.search(r"\bdollar\s*off\b", tl))
+    )
+    return bool(has_title and has_inventory and has_internet_number and has_price_shape)
+
+
 def classify_instore_destination(
     text_to_check: str,
     where_location: str,
@@ -466,6 +485,16 @@ def select_target_channel_id(
                 pass
         return cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID, "PRICE_ERROR"
 
+    # Definitive Home Depot clearance monitor embed → MAJOR_CLEARANCE (global_trigger_destinations).
+    mc_id = int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0)
+    if mc_id > 0 and source_group == "clearance" and is_definitive_major_clearance_embed(text_blob):
+        if trace is not None:
+            try:
+                trace.setdefault("classifier", {}).setdefault("matches", {})["definitive_major_clearance"] = True
+            except Exception:
+                pass
+        return mc_id, "MAJOR_CLEARANCE"
+
     # WOOT: Woot deals can include affiliate Amazon tracking (amzn.to links),
     # causing them to be detected as Amazon. Route to INSTORE_LEADS instead.
     if (
@@ -701,6 +730,21 @@ def detect_all_link_types(
             except Exception:
                 pass
 
+    # Definitive Home Depot clearance monitor embed → MAJOR_CLEARANCE (same rule as select_target_channel_id / live_forwarder).
+    mc_id = int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0)
+    if (
+        mc_id > 0
+        and source_group == "clearance"
+        and is_definitive_major_clearance_embed(text_blob)
+        and not any(tag == "PRICE_ERROR" for _, tag in results)
+    ):
+        if trace is not None:
+            try:
+                trace.setdefault("classifier", {}).setdefault("matches", {})["definitive_major_clearance"] = True
+            except Exception:
+                pass
+        return [(mc_id, "MAJOR_CLEARANCE")]
+
     # WOOT: Woot deals can include affiliate Amazon tracking (amzn.to links),
     # causing them to be detected as "Amazon". Route them to INSTORE_LEADS
     # so they go through the in-store classification buttons.
@@ -820,7 +864,11 @@ def detect_all_link_types(
             log_smartfilter("UPCOMING", "SKIP", {**(trace.get("classifier", {}) if trace else {}), **upcoming_explain})
 
     # Affiliate links only if not instore-classified and no Amazon hard match
-    if not any(tag.startswith("INSTORE") or tag in {"MAJOR_STORES", "DISCOUNTED_STORES"} for _, tag in results):
+    if not any(
+        tag.startswith("INSTORE")
+        or tag in {"MAJOR_STORES", "DISCOUNTED_STORES", "MAJOR_CLEARANCE"}
+        for _, tag in results
+    ):
         if cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID and (source_group == "online"):
             att_text = " ".join([str(a.get("url", "")) for a in (attachments or []) if isinstance(a, dict)])
             blob = (text_to_check or "") + " " + att_text

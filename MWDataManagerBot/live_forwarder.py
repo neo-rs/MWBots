@@ -5,7 +5,12 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from classifier import detect_all_link_types, order_link_types, select_target_channel_id
+from classifier import (
+    detect_all_link_types,
+    is_definitive_major_clearance_embed,
+    order_link_types,
+    select_target_channel_id,
+)
 from global_triggers import detect_global_triggers
 from keywords import load_keywords
 from logging_utils import log_debug, log_error, log_global, log_info, log_filter, log_forward, log_warn, write_trace_log
@@ -250,21 +255,7 @@ class MessageForwarder:
         if has_msrp and has_as_low and has_upc and has_tempo:
             return True
         # New stricter Home Depot monitor shape (edited embeds often hydrate into this form).
-        return self._is_definitive_major_clearance_embed(tl)
-
-    def _is_definitive_major_clearance_embed(self, text: str) -> bool:
-        tl = (text or "").lower()
-        if not tl:
-            return False
-        has_title = ("home depot store clearance deals" in tl) and ("new item" in tl)
-        has_inventory = bool(re.search(r"\btotal\s*inventory\b", tl))
-        has_internet_number = bool(re.search(r"\binternet\s*number\b", tl))
-        has_price_shape = bool(
-            re.search(r"\bprice\b", tl)
-            and re.search(r"\boriginal\s*price\b", tl)
-            and (re.search(r"\bpercentage\s*off\b", tl) or re.search(r"\bdollar\s*off\b", tl))
-        )
-        return bool(has_title and has_inventory and has_internet_number and has_price_shape)
+        return is_definitive_major_clearance_embed(tl)
 
     def _embed_dict_has_image(self, ed: Dict[str, Any]) -> bool:
         try:
@@ -1243,26 +1234,12 @@ class MessageForwarder:
         try:
             author_obj = getattr(message, "author", None)
             if author_obj is not None:
-                # For bot-authored source messages, use source guild identity so forwarded
-                # posts don't appear as the source bot account name/avatar.
-                is_bot_author = bool(getattr(author_obj, "bot", False))
-                if is_bot_author:
-                    try:
-                        g = getattr(message, "guild", None)
-                        wh_username = str(getattr(g, "name", "") or "").strip()
-                        g_icon = getattr(g, "icon", None)
-                        wh_avatar_url = str(getattr(g_icon, "url", "") or "").strip()
-                    except Exception:
-                        wh_username = ""
-                        wh_avatar_url = ""
-                if not wh_username:
-                    wh_username = str(getattr(author_obj, "display_name", None) or getattr(author_obj, "name", None) or "").strip()
-                if not wh_avatar_url:
-                    try:
-                        av = getattr(author_obj, "display_avatar", None)
-                        wh_avatar_url = str(getattr(av, "url", "") or "").strip()
-                    except Exception:
-                        wh_avatar_url = ""
+                wh_username = str(getattr(author_obj, "display_name", None) or getattr(author_obj, "name", None) or "").strip()
+                try:
+                    av = getattr(author_obj, "display_avatar", None)
+                    wh_avatar_url = str(getattr(av, "url", "") or "").strip()
+                except Exception:
+                    wh_avatar_url = ""
         except Exception:
             wh_username = ""
             wh_avatar_url = ""
@@ -1360,7 +1337,7 @@ class MessageForwarder:
 
             is_candidate_embed = self._looks_like_major_clearance_embed(text_to_check)
             if is_candidate_embed:
-                is_definitive_embed = self._is_definitive_major_clearance_embed(text_to_check)
+                is_definitive_embed = is_definitive_major_clearance_embed(text_to_check)
                 if is_definitive_embed:
                     try:
                         import discord
