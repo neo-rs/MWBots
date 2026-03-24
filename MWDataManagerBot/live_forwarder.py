@@ -31,6 +31,34 @@ from utils import (
     rewrite_affiliate_links_in_message,
 )
 
+def _dispatch_tag_priority(tag: str) -> int:
+    """
+    When multiple classifier tags route to the same destination channel, prefer the more specific bucket.
+    (e.g. INSTORE_* over MONITORED_KEYWORD when both map to the same id via config or route maps.)
+    """
+    t = str(tag or "")
+    if t == "PRICE_ERROR":
+        return 200
+    if t == "MAJOR_CLEARANCE":
+        return 195
+    if t.startswith("INSTORE"):
+        return 170
+    # classify_instore_destination store buckets (often paired with MONITORED_KEYWORD on same lead)
+    if t in ("MAJOR_STORES", "DISCOUNTED_STORES"):
+        return 130
+    if t in ("AMAZON_PROFITABLE_LEAD", "AMAZON", "AMAZON_FALLBACK", "AMZ_DEALS"):
+        return 160
+    if t == "UPCOMING":
+        return 140
+    if t == "AFFILIATED_LINKS":
+        return 60
+    if t == "MONITORED_KEYWORD":
+        return 50
+    if t == "DEFAULT":
+        return 10
+    return 40
+
+
 def _should_filter_message(payload: Dict[str, Any]) -> bool:
     try:
         content = (payload.get("content", "") or "").strip()
@@ -297,6 +325,51 @@ class MessageForwarder:
             # Embed already shows the product; drop generic images (typical barcode noise).
             continue
         return out or None
+
+    def _collapse_dispatch_same_destination(
+        self,
+        pairs: List[Tuple[int, str]],
+        *,
+        source_group: str,
+    ) -> List[Tuple[int, str]]:
+        """
+        One outbound post per routed destination channel per source message.
+        detect_all_link_types can emit several (cid, tag) pairs that differ only by tag but map to the
+        same channel after MIRRORWORLD route maps — without this, the forwarder loops and sends duplicates.
+        """
+        if not pairs:
+            return []
+        winners: Dict[int, Tuple[int, str, int]] = {}
+        for cid, tag in pairs:
+            try:
+                d = int(self._apply_route_map(source_group=source_group, dest_channel_id=int(cid or 0)) or 0)
+            except Exception:
+                d = 0
+            if d <= 0:
+                continue
+            pr = _dispatch_tag_priority(str(tag or ""))
+            cur = winners.get(d)
+            if cur is None or pr > cur[2]:
+                winners[d] = (int(cid or 0), str(tag or ""), pr)
+        out: List[Tuple[int, str]] = []
+        emitted: Set[int] = set()
+        for cid, tag in pairs:
+            try:
+                d = int(self._apply_route_map(source_group=source_group, dest_channel_id=int(cid or 0)) or 0)
+            except Exception:
+                d = 0
+            if d <= 0:
+                continue
+            w = winners.get(d)
+            if not w:
+                continue
+            if int(cid or 0) != int(w[0]) or str(tag or "") != str(w[1]):
+                continue
+            if d in emitted:
+                continue
+            out.append((w[0], w[1]))
+            emitted.add(d)
+        return out
 
     def _looks_like_major_clearance_followup(self, text: str, *, raw_content: str = "") -> bool:
         tl = (text or "").lower()
@@ -1219,6 +1292,12 @@ class MessageForwarder:
             )
             if fallback:
                 dispatch_link_types = [fallback]
+
+        if dispatch_link_types:
+            dispatch_link_types = self._collapse_dispatch_same_destination(
+                dispatch_link_types,
+                source_group=source_group,
+            )
 
         try:
             trace.setdefault("classifier", {})["dispatch_link_types"] = dispatch_link_types

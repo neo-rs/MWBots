@@ -637,6 +637,7 @@ _MESSAGE_PAYLOAD_CACHE: Dict[str, Dict[str, Any]] = {}  # message_id -> cached p
 # Track where each source message was forwarded so edits can PATCH instead of double-posting.
 # source_message_id -> {"webhook": str, "dest_ids": [str], "last_signature": str, "updated_at": float}
 _FORWARDED_MESSAGE_INDEX: Dict[str, Dict[str, Any]] = {}
+_RECENT_FORWARD_IDS_LOCK = threading.Lock()
 
 _WEBHOOK_URL_RE = re.compile(r"/webhooks/(?P<id>\d+)/(?P<token>[^/?#]+)")
 
@@ -4025,18 +4026,19 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
         except NameError:
             _recent_forward_ids = {}
         try:
-            msg_id_key = str(m.get("id", ""))
-            now_ts = time.time()
-            # prune old entries (> 30s)
-            for k, ts in list(_recent_forward_ids.items()):
-                if now_ts - ts > 30:
-                    _recent_forward_ids.pop(k, None)
-            if msg_id_key:
-                if msg_id_key in _recent_forward_ids:
-                    if VERBOSE:
-                        log_info(f"Duplicate message_id {msg_id_key} within 30s window - skipping webhook forward")
-                    return
-                _recent_forward_ids[msg_id_key] = now_ts
+            with _RECENT_FORWARD_IDS_LOCK:
+                msg_id_key = str(m.get("id", ""))
+                now_ts = time.time()
+                # prune old entries (> 30s)
+                for k, ts in list(_recent_forward_ids.items()):
+                    if now_ts - ts > 30:
+                        _recent_forward_ids.pop(k, None)
+                if msg_id_key:
+                    if msg_id_key in _recent_forward_ids:
+                        if VERBOSE:
+                            log_info(f"Duplicate message_id {msg_id_key} within 30s window - skipping webhook forward")
+                        return
+                    _recent_forward_ids[msg_id_key] = now_ts
         except Exception:
             pass
 
@@ -4280,7 +4282,9 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
         if success and (not edit_existing):
             src_id = str(m.get("id", "")).strip()
             has_embeds_or_attachments = bool((embeds or []) or (attachments or []))
-            if src_id and has_embeds_or_attachments:
+            # Skip when the source message has real uploads: edit_existing with files forces delete+repost,
+            # which can leave duplicate destination messages if delete fails or races other updates.
+            if src_id and has_embeds_or_attachments and not (attachments or []):
                 try:
                     _schedule_hydration_edit(source_message_id=src_id, channel_id=int(channelID), guild_id=int(guildID))
                 except Exception:
