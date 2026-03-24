@@ -29,6 +29,30 @@ from patterns import (
 from utils import matches_instore_theatre
 
 
+# Strong toy / figure signals — suppress INSTORE_CARDS when TCG heuristics misfire (eBay URLs, embeds).
+_TOY_FIGURE_SUPPRESS_CARDS_PATTERN = re.compile(
+    r"\b("
+    r"jakks\s*pacific|world\s+of\s+nintendo|"
+    r"2\.5\s*[\"\u201c\u201d]\s*figures?\b|2\.5\s*inch\s*figures?\b|"
+    r"action\s*figures?\b|vinyl\s*figures?\b"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Stronger TCG context than bare substrings (avoids "selection" → select, ".m570." already fixed in patterns).
+_INSTORE_CARDS_CONTEXT_PATTERN = re.compile(
+    r"("
+    r"pokemon|magic\s*the\s*gathering|mtg|yugioh|one\s*piece\s*card|dragon\s*ball\s*(super\s*)?(tcg|card)?|"
+    r"flesh\s*and\s*blood|fab\s*tcg|lorcana|digimon\s*card|tcg\b|ccg\b|"
+    r"booster\s*(pack|box|case)\b|etb\b|elite\s*trainer\s*box|starter\s*deck|"
+    r"\bslab\b|psa\s*\d+|bgs\s*\d+|cgc\s*\d+|graded\s*card|"
+    r"rookie\s*card|autograph|auto\s*card|"
+    r"topps\b|panini\b|upper\s*deck|bowman\b|donruss\b|\bprizm\b|\bselect\b|\boptic\b|\bmosaic\b|"
+    r"case\s*break|sealed\s*(box|pack|case)"
+    r")",
+    re.IGNORECASE,
+)
+
 _FIELD_DELIMITER_PATTERN = r"[:\-/]"
 _INSTORE_PRIMARY_FIELD_PATTERNS = [
     re.compile(rf"\bretail(?:\s+price)?\s*{_FIELD_DELIMITER_PATTERN}", re.IGNORECASE),
@@ -158,25 +182,11 @@ def classify_instore_destination(
     seasonal_hit = bool(SEASONAL_PATTERN.search(text_to_check or ""))
     sneakers_hit = bool(SNEAKERS_PATTERN.search(text_to_check or ""))
     cards_match = CARDS_PATTERN.search(text_to_check or "")
-    # `CARDS_PATTERN` contains generic "card" terms, so it can match phrases like
-    # "bottom left of the card" (toy listings / packaging) which are not TCG cards.
-    # Require at least one stronger trading-card signal when we route to INSTORE_CARDS.
-    card_context_hit = bool(
-        re.search(
-            r"("
-            r"pokemon|magic\s*the\s*gathering|mtg|yugioh|one\s*piece\s*card|dragon\s*ball\s*(super\s*)?(tcg|card)?|"
-            r"flesh\s*and\s*blood|fab\s*tcg|lorcana|digimon\s*card|tcg|ccg|"
-            r"booster\s*(pack|box|case)?|etb|elite\s*trainer\s*box|starter\s*deck|"
-            r"slab|psa\s*\d+|bgs\s*\d+|cgc\s*\d+|graded\s*card|"
-            r"rookie\s*card|autograph|auto\s*card|"
-            r"topps|panini|upper\s*deck|bowman|donruss|prizm|select|optic|mosaic|"
-            r"case\s*break|sealed\s*(box|pack|case)"
-            r")",
-            text_to_check or "",
-            re.IGNORECASE,
-        )
-    )
+    card_context_hit = bool(_INSTORE_CARDS_CONTEXT_PATTERN.search(text_to_check or ""))
     cards_hit = bool(cards_match) and card_context_hit
+    toy_figure_suppress = bool(_TOY_FIGURE_SUPPRESS_CARDS_PATTERN.search(text_to_check or ""))
+    if toy_figure_suppress:
+        cards_hit = False
     theatre_hit = bool(matches_instore_theatre(text_to_check or "", where_location))
     major_hit = bool(MAJOR_STORE_PATTERN.search(text_to_check or "") or store_category == "major")
     discounted_hit = bool(DISCOUNTED_STORE_PATTERN.search(text_to_check or "") or store_category == "discounted")
@@ -194,6 +204,13 @@ def classify_instore_destination(
                     "instore_seasonal": seasonal_hit,
                     "instore_sneakers": sneakers_hit,
                     "instore_cards": cards_hit,
+                    "instore_cards_pattern_span": (
+                        {"start": cards_match.start(), "end": cards_match.end(), "text": cards_match.group(0)[:200]}
+                        if cards_match
+                        else None
+                    ),
+                    "instore_cards_context_hit": card_context_hit,
+                    "instore_cards_toy_figure_suppress": toy_figure_suppress,
                     "instore_theatre": theatre_hit,
                     "major_store": major_hit,
                     "discounted_store": discounted_hit,

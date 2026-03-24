@@ -158,7 +158,8 @@ CARDS_PATTERN = re.compile(
     r"kaldheim|zendikar\s*rising|theros\s*beyond\s*death|"
     r"throne\s*of\s*eldraine|war\s*of\s*the\s*spark|"
     r"guilds\s*of\s*ravnica|ravnica\s*allegiance|"
-    r"core\s*set\s*\d+|m\d+|"
+    # MTG-style core codes (M21, M22, …). Use at most 2 digits so ".m570." eBay tokens do not match.
+    r"core\s*set\s*\d+|m\d{1,2}\b|"
     r"commander\s*\d+|c\d+|"
     r"jumpstart|jump\s*start|"
     r"modern\s*horizons?|mh\d+|"
