@@ -312,6 +312,20 @@ AMAZON_CONVERSATIONAL_DEAL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Chatty grocery / delivery / in-app price glitches (AMZ_DEALS bucket in settings — legacy name).
+# Matches templates that often have no product URL in the embed body.
+RETAIL_CONVERSATIONAL_DEAL_PATTERN = re.compile(
+    r"\b("
+    r"glitch(?:ing|ed)?\s+on\s+instacart"
+    r"|ringing\s+up\s+for"
+    r"|check\s+all\s+stores\s+near\s+you"
+    r"|walmart\s+on\s+instacart"
+    r"|target\s+on\s+instacart"
+    r"|instacart\s*[—-]\s*(?:check|see|try)"
+    r")\b",
+    re.IGNORECASE,
+)
+
 # Store lists (subset; mirrors global_filters)
 MAJOR_STORES = [
     "walmart",

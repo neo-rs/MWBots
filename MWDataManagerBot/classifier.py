@@ -11,6 +11,7 @@ from patterns import (
     AMAZON_ASIN_PATTERN,
     AMAZON_CONVERSATIONAL_DEAL_PATTERN,
     AMAZON_LINK_PATTERN,
+    RETAIL_CONVERSATIONAL_DEAL_PATTERN,
     AMAZON_PROFITABLE_INDICATOR_PATTERN,
     CARDS_PATTERN,
     DISCOUNTED_STORE_PATTERN,
@@ -327,6 +328,10 @@ def _store_domain_pattern() -> re.Pattern[str]:
 
 _STORE_DOMAIN_PATTERN = _store_domain_pattern()
 
+# Never route “New Deal Found!” style banners to the conversational AMZ_DEALS bucket.
+_NEW_DEAL_FOUND_PATTERN = re.compile(r"\bnew\s+deal\s+found\b", re.IGNORECASE)
+
+
 def _primary_store_label_from_blob(text_blob: str) -> str:
     """
     Best-effort "primary store" detector based on the earliest store-domain URL in the blob.
@@ -383,26 +388,40 @@ def _looks_like_conversational_amazon_deal(
     *,
     source_group: str,
     source_channel_id: Optional[int] = None,
+    trace: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """
-    DealShacks/HiddenDealSociety-style Amazon deal templates can be conversational
-    (e.g. "Use code at checkout", "promo stack", "Shipped and Sold by Amazon")
-    and may not include an explicit amazon.com/amzn.to link in the text blob.
+    Conversational online deals → AMZ_DEALS (settings key; not Amazon-only).
+
+    - Amazon-style phrases (clip coupon, promo stack, …): still require Amazon to be the
+      primary store when URLs make another retailer primary.
+    - Retail / Instacart glitch phrasing: allowed with **no** product link (Walmart-on-Instacart, etc.).
     """
+
+    def _skip(reason: str) -> bool:
+        if trace is not None:
+            try:
+                trace.setdefault("classifier", {}).setdefault("matches", {})["amz_deals_conversational_skip"] = reason
+            except Exception:
+                pass
+        return False
+
     if not text_blob:
-        return False
+        return _skip("empty_blob")
     if source_group != "online":
-        return False
+        return _skip("not_online_source_group")
     # Extra safety: only treat as conversational-amazon when the channel is explicitly
     # configured in source_channel_ids_online.
     try:
         if source_channel_id is not None and int(source_channel_id) not in getattr(cfg, "SMART_SOURCE_CHANNELS_ONLINE", set()):
-            return False
+            return _skip("not_configured_online_channel")
     except Exception:
-        return False
+        return _skip("channel_id_error")
+    if _NEW_DEAL_FOUND_PATTERN.search(text_blob):
+        return _skip("new_deal_found_banner")
     # These templates almost always include at least one explicit price token.
     if "$" not in text_blob:
-        return False
+        return _skip("no_dollar_sign")
     # Exclude stock-monitor / clearance-feed style embeds that can include "Amazon" in comps.
     if re.search(
         r"(store\s+clearance\s+deals|clearance\s+deals?\s*-\s*new\s+item|"
@@ -410,11 +429,35 @@ def _looks_like_conversational_amazon_deal(
         text_blob,
         re.IGNORECASE,
     ):
-        return False
-    if not AMAZON_CONVERSATIONAL_DEAL_PATTERN.search(text_blob):
-        return False
-    # Avoid misrouting Woot content as Amazon.
-    return _is_amazon_primary(text_blob)
+        return _skip("clearance_monitor_shape")
+
+    amazon_conv = bool(AMAZON_CONVERSATIONAL_DEAL_PATTERN.search(text_blob))
+    retail_conv = bool(RETAIL_CONVERSATIONAL_DEAL_PATTERN.search(text_blob))
+    if not amazon_conv and not retail_conv:
+        return _skip("no_conversational_phrase")
+
+    if trace is not None:
+        try:
+            trace.setdefault("classifier", {}).setdefault("matches", {}).update(
+                {
+                    "conversational_amazon_phrase": amazon_conv,
+                    "conversational_retail_phrase": retail_conv,
+                }
+            )
+        except Exception:
+            pass
+
+    # Grocery / Instacart-style monitors: do not require an http link or Amazon-primary URL logic.
+    if retail_conv:
+        return True
+
+    # Amazon conversational phrases: avoid Woot / “comps” where another store is primary.
+    if amazon_conv:
+        if not _is_amazon_primary(text_blob):
+            return _skip("amazon_not_primary_store")
+        return True
+
+    return False
 
 
 def select_target_channel_id(
@@ -539,6 +582,7 @@ def select_target_channel_id(
             text_blob,
             source_group=source_group,
             source_channel_id=source_channel_id,
+            trace=trace,
         )
     ):
         return cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID, "AMZ_DEALS"
@@ -792,6 +836,7 @@ def detect_all_link_types(
             text_blob,
             source_group=source_group,
             source_channel_id=source_channel_id,
+            trace=trace,
         )
     ):
         results.append((cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID, "AMZ_DEALS"))
