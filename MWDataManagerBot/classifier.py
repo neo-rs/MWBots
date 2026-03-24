@@ -32,7 +32,7 @@ _FIELD_DELIMITER_PATTERN = r"[:\-/]"
 _INSTORE_PRIMARY_FIELD_PATTERNS = [
     re.compile(rf"\bretail(?:\s+price)?\s*{_FIELD_DELIMITER_PATTERN}", re.IGNORECASE),
     re.compile(rf"\bresell(?:\s+price)?\s*{_FIELD_DELIMITER_PATTERN}", re.IGNORECASE),
-    re.compile(rf"\bwhere\s*{_FIELD_DELIMITER_PATTERN}", re.IGNORECASE),
+    re.compile(rf"\b(?:where|location)\s*{_FIELD_DELIMITER_PATTERN}", re.IGNORECASE),
 ]
 _INSTORE_OPTIONAL_FIELD_PATTERNS = [
     re.compile(rf"product\s*title\s*{_FIELD_DELIMITER_PATTERN}", re.IGNORECASE),
