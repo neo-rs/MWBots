@@ -84,6 +84,7 @@
   "global_duplicate_ttl_seconds": 300,
   "monitor_embed_ttl_seconds": 300,
   "link_tracking_ttl_seconds": 86400,
+  "forward_on_edit": false,
   "fetchall_default_destination_category_id": 1437856372300451851,
   "fetchall_max_messages_per_channel": 400,
   "fetchsync_auto_poll_seconds": 60,

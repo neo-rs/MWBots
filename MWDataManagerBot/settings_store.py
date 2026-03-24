@@ -69,6 +69,10 @@ RECENT_TTL_SECONDS: int = 10
 GLOBAL_DUPLICATE_TTL_SECONDS: int = 60 * 5
 MONITOR_EMBED_TTL_SECONDS: int = 60 * 5
 LINK_TRACKING_TTL_SECONDS: int = 24 * 60 * 60
+FORWARD_ON_EDIT: bool = False
+SHORT_EMBED_CHAR_THRESHOLD: int = 50
+SHORT_EMBED_RETRY_DELAY_SECONDS: float = 5.0
+SHORT_EMBED_MAX_WAIT_SECONDS: float = 35.0
 
 FALLBACK_CHANNEL_ID: int = 0
 
@@ -152,6 +156,8 @@ def init(settings: Dict[str, Any]) -> None:
     global SMARTFILTER_FLIPS_LUNCHMONEY_CHANNEL_ID, SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID
     global SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID
     global RECENT_TTL_SECONDS, GLOBAL_DUPLICATE_TTL_SECONDS, MONITOR_EMBED_TTL_SECONDS, LINK_TRACKING_TTL_SECONDS
+    global FORWARD_ON_EDIT
+    global SHORT_EMBED_CHAR_THRESHOLD, SHORT_EMBED_RETRY_DELAY_SECONDS, SHORT_EMBED_MAX_WAIT_SECONDS
     global FALLBACK_CHANNEL_ID
     global EDIT_COOLDOWN_SECONDS
     global MAJOR_CLEARANCE_PAIR_TTL_SECONDS, MAJOR_CLEARANCE_SEND_SINGLE_ON_TIMEOUT
@@ -254,6 +260,22 @@ def init(settings: Dict[str, Any]) -> None:
     GLOBAL_DUPLICATE_TTL_SECONDS = _get_int(settings, "global_duplicate_ttl_seconds", 60 * 5)
     MONITOR_EMBED_TTL_SECONDS = _get_int(settings, "monitor_embed_ttl_seconds", 60 * 5)
     LINK_TRACKING_TTL_SECONDS = _get_int(settings, "link_tracking_ttl_seconds", 24 * 60 * 60)
+    FORWARD_ON_EDIT = bool(settings.get("forward_on_edit", False))
+    SHORT_EMBED_CHAR_THRESHOLD = _get_int(settings, "short_embed_char_threshold", 50)
+    if SHORT_EMBED_CHAR_THRESHOLD < 0:
+        SHORT_EMBED_CHAR_THRESHOLD = 0
+    try:
+        SHORT_EMBED_RETRY_DELAY_SECONDS = float(settings.get("short_embed_retry_delay_seconds", 5.0) or 5.0)
+    except Exception:
+        SHORT_EMBED_RETRY_DELAY_SECONDS = 5.0
+    if SHORT_EMBED_RETRY_DELAY_SECONDS < 0:
+        SHORT_EMBED_RETRY_DELAY_SECONDS = 0.0
+    try:
+        SHORT_EMBED_MAX_WAIT_SECONDS = float(settings.get("short_embed_max_wait_seconds", 35.0) or 35.0)
+    except Exception:
+        SHORT_EMBED_MAX_WAIT_SECONDS = 35.0
+    if SHORT_EMBED_MAX_WAIT_SECONDS < 0:
+        SHORT_EMBED_MAX_WAIT_SECONDS = 0.0
 
     try:
         FALLBACK_CHANNEL_ID = int(settings.get("fallback_channel_id") or 0)

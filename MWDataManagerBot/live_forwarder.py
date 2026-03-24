@@ -146,6 +146,77 @@ class MessageForwarder:
             "author": author_dict,
         }
 
+    def _is_short_bare_embed_payload(self, payload: Dict[str, Any]) -> bool:
+        """Discum-style guard: wait if embed payload looks like a thin placeholder."""
+        try:
+            embeds: List[Dict[str, Any]] = payload.get("embeds", []) or []
+            if not embeds:
+                return False
+            content = str(payload.get("content", "") or "").strip()
+            threshold = int(getattr(cfg, "SHORT_EMBED_CHAR_THRESHOLD", 50) or 50)
+            if len(content) >= max(0, threshold):
+                return False
+            for raw in embeds:
+                if not isinstance(raw, dict):
+                    continue
+                if str(raw.get("description", "") or "").strip():
+                    return False
+                fields = raw.get("fields") or []
+                if isinstance(fields, list):
+                    for f in fields:
+                        if not isinstance(f, dict):
+                            continue
+                        if str(f.get("name", "") or "").strip() or str(f.get("value", "") or "").strip():
+                            return False
+                if raw.get("image") or raw.get("thumbnail") or raw.get("video"):
+                    return False
+                author = raw.get("author") or {}
+                if isinstance(author, dict) and (author.get("name") or author.get("url") or author.get("icon_url")):
+                    return False
+                footer = raw.get("footer") or {}
+                if isinstance(footer, dict) and str(footer.get("text", "") or "").strip():
+                    return False
+                provider = raw.get("provider") or {}
+                if isinstance(provider, dict) and provider.get("name"):
+                    return False
+            return True
+        except Exception:
+            return False
+
+    async def _hydrate_short_embed_message(self, message, payload: Dict[str, Any]):
+        """
+        Re-fetch short/bare embeds for a bounded window to avoid forwarding placeholders
+        like: title + "..." before MESSAGE_UPDATE hydration lands.
+        """
+        if not self._is_short_bare_embed_payload(payload):
+            return message, payload
+        try:
+            delay = float(getattr(cfg, "SHORT_EMBED_RETRY_DELAY_SECONDS", 5.0) or 5.0)
+        except Exception:
+            delay = 5.0
+        try:
+            max_wait = float(getattr(cfg, "SHORT_EMBED_MAX_WAIT_SECONDS", 35.0) or 35.0)
+        except Exception:
+            max_wait = 35.0
+        if delay <= 0 or max_wait <= 0:
+            return message, payload
+        waited = 0.0
+        channel = getattr(message, "channel", None)
+        message_id = int(getattr(message, "id", 0) or 0)
+        while waited < max_wait:
+            await asyncio.sleep(delay)
+            waited += delay
+            if channel is None or message_id <= 0:
+                break
+            try:
+                refreshed = await channel.fetch_message(message_id)
+            except Exception:
+                break
+            refreshed_payload = self._to_filter_payload(refreshed)
+            if not self._is_short_bare_embed_payload(refreshed_payload):
+                return refreshed, refreshed_payload
+        return message, payload
+
     def _sender_key(self, message, payload: Dict[str, Any]) -> str:
         try:
             wh = str(getattr(message, "webhook_id", "") or "").strip()
@@ -176,7 +247,24 @@ class MessageForwarder:
         has_as_low = ("as low as" in tl) or ("as-low-as" in tl)
         has_upc = "upc" in tl and bool(re.search(r"\b\d{11,14}\b", tl))
         has_tempo = "tempomonitors.com" in tl or "powered by tempomonitors" in tl
-        return bool(has_msrp and has_as_low and has_upc and has_tempo)
+        if has_msrp and has_as_low and has_upc and has_tempo:
+            return True
+        # New stricter Home Depot monitor shape (edited embeds often hydrate into this form).
+        return self._is_definitive_major_clearance_embed(tl)
+
+    def _is_definitive_major_clearance_embed(self, text: str) -> bool:
+        tl = (text or "").lower()
+        if not tl:
+            return False
+        has_title = ("home depot store clearance deals" in tl) and ("new item" in tl)
+        has_inventory = bool(re.search(r"\btotal\s*inventory\b", tl))
+        has_internet_number = bool(re.search(r"\binternet\s*number\b", tl))
+        has_price_shape = bool(
+            re.search(r"\bprice\b", tl)
+            and re.search(r"\boriginal\s*price\b", tl)
+            and (re.search(r"\bpercentage\s*off\b", tl) or re.search(r"\bdollar\s*off\b", tl))
+        )
+        return bool(has_title and has_inventory and has_internet_number and has_price_shape)
 
     def _embed_dict_has_image(self, ed: Dict[str, Any]) -> bool:
         try:
@@ -931,6 +1019,7 @@ class MessageForwarder:
         self.processed_ids.add(int(message.id))
 
         payload = self._to_filter_payload(message)
+        message, payload = await self._hydrate_short_embed_message(message, payload)
 
         # Deterministic per-channel dedupe + trace (keyed by message.id so logs don't interleave)
         content = (payload.get("content") or "").strip()
@@ -1154,12 +1243,26 @@ class MessageForwarder:
         try:
             author_obj = getattr(message, "author", None)
             if author_obj is not None:
-                wh_username = str(getattr(author_obj, "display_name", None) or getattr(author_obj, "name", None) or "").strip()
-                try:
-                    av = getattr(author_obj, "display_avatar", None)
-                    wh_avatar_url = str(getattr(av, "url", "") or "").strip()
-                except Exception:
-                    wh_avatar_url = ""
+                # For bot-authored source messages, use source guild identity so forwarded
+                # posts don't appear as the source bot account name/avatar.
+                is_bot_author = bool(getattr(author_obj, "bot", False))
+                if is_bot_author:
+                    try:
+                        g = getattr(message, "guild", None)
+                        wh_username = str(getattr(g, "name", "") or "").strip()
+                        g_icon = getattr(g, "icon", None)
+                        wh_avatar_url = str(getattr(g_icon, "url", "") or "").strip()
+                    except Exception:
+                        wh_username = ""
+                        wh_avatar_url = ""
+                if not wh_username:
+                    wh_username = str(getattr(author_obj, "display_name", None) or getattr(author_obj, "name", None) or "").strip()
+                if not wh_avatar_url:
+                    try:
+                        av = getattr(author_obj, "display_avatar", None)
+                        wh_avatar_url = str(getattr(av, "url", "") or "").strip()
+                    except Exception:
+                        wh_avatar_url = ""
         except Exception:
             wh_username = ""
             wh_avatar_url = ""
@@ -1257,6 +1360,36 @@ class MessageForwarder:
 
             is_candidate_embed = self._looks_like_major_clearance_embed(text_to_check)
             if is_candidate_embed:
+                is_definitive_embed = self._is_definitive_major_clearance_embed(text_to_check)
+                if is_definitive_embed:
+                    try:
+                        import discord
+
+                        allowed_mentions = discord.AllowedMentions.none()
+                        dest_after = self._apply_route_map(source_group=source_group, dest_channel_id=major_clearance_dest)
+                        if dest_after > 0:
+                            await self._send_to_destination(
+                                dest_channel_id=dest_after,
+                                content=str(formatted_content or ""),
+                                embeds=list(embeds_out or []),
+                                attachments=list(mc_filtered or []) if use_files else None,
+                                webhook_username=wh_username,
+                                webhook_avatar_url=wh_avatar_url,
+                                allowed_mentions=allowed_mentions,
+                            )
+                            trace["decision"] = {"action": "sent_major_clearance_single", "dest": int(dest_after)}
+                            try:
+                                write_trace_log(trace)
+                            except Exception:
+                                pass
+                            if cfg.VERBOSE:
+                                log_forward(f"major-clearance single msg={message.id} <#{channel_id}> -> <#{dest_after}>")
+                            return
+                    except Exception as e:
+                        if cfg.VERBOSE:
+                            log_warn(f"major-clearance single-send failed (msg={message.id}): {type(e).__name__}: {e}")
+                        # Fall through to paired-flow cache behavior when immediate single-send fails.
+
                 followup_cached = (self.pending_major_clearance_followups or {}).get(pair_key)
                 # If follow-up arrived earlier, send the pair immediately (even if the first came from edit).
                 if followup_cached:
@@ -1404,6 +1537,22 @@ class MessageForwarder:
                     # Do not return; if pair-send fails, continue through normal routing.
 
         if not dispatch_link_types:
+            # Strict clearance mode: do not spam UNCLASSIFIED with monitor-feed fragments.
+            # These are either handled by major-clearance flow or intentionally dropped.
+            text_lower = (text_to_check or "").lower()
+            if source_group == "clearance" and (
+                "home depot store clearance deals" in text_lower
+                or "internet number" in text_lower
+                or "total inventory" in text_lower
+            ):
+                trace["decision"] = {"action": "skip", "reason": "clearance_monitor_no_route"}
+                try:
+                    write_trace_log(trace)
+                except Exception:
+                    pass
+                if cfg.VERBOSE:
+                    log_filter(f"skipped clearance monitor fragment msg={message.id} ch=<#{channel_id}>")
+                return
             trace["decision"] = {"action": "unclassified", "reason": "no_destination"}
             try:
                 write_trace_log(trace)
@@ -1552,6 +1701,8 @@ class MessageForwarder:
 
     async def handle_edit(self, payload) -> None:
         # payload: discord.RawMessageUpdateEvent
+        if not bool(getattr(cfg, "FORWARD_ON_EDIT", False)):
+            return
         try:
             channel_id = int(getattr(payload, "channel_id", 0) or 0)
             message_id = int(getattr(payload, "message_id", 0) or 0)

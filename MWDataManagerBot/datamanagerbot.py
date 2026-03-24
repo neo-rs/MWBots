@@ -22,6 +22,8 @@ Outputs (standalone, local-only):
 
 from __future__ import annotations
 
+import atexit
+import os
 import platform
 import sys
 import warnings
@@ -32,6 +34,46 @@ warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*GIL.*")
 
 _BOT_DIR = Path(__file__).resolve().parent
 _CONFIG_DIR = _BOT_DIR / "config"
+_LOCK_PATH = _BOT_DIR / "logs" / "datamanagerbot.pid"
+
+
+def _acquire_single_instance_lock() -> tuple[bool, int]:
+    """
+    Best-effort single-instance guard for Windows:
+    - if pid file exists and process is alive -> reject
+    - else write our current pid
+    Returns (ok, existing_pid_if_any)
+    """
+    try:
+        _LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    try:
+        if _LOCK_PATH.exists():
+            raw = str(_LOCK_PATH.read_text(encoding="utf-8", errors="ignore") or "").strip()
+            old_pid = int(raw) if raw.isdigit() else 0
+            if old_pid > 0:
+                try:
+                    # os.kill(pid, 0) is a cross-platform "is process alive" probe.
+                    os.kill(old_pid, 0)
+                    return False, old_pid
+                except Exception:
+                    pass
+        _LOCK_PATH.write_text(str(os.getpid()), encoding="utf-8")
+        return True, 0
+    except Exception:
+        # If lock cannot be created, do not block startup.
+        return True, 0
+
+
+def _release_single_instance_lock() -> None:
+    try:
+        if _LOCK_PATH.exists():
+            raw = str(_LOCK_PATH.read_text(encoding="utf-8", errors="ignore") or "").strip()
+            if raw == str(os.getpid()):
+                _LOCK_PATH.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def main() -> int:
@@ -63,6 +105,16 @@ def main() -> int:
         },
     )
     startup_banner(proof_lines, bot_name="MWDataManagerBot (Standalone)")
+
+    # Prevent accidental multi-run (common cause of duplicate forwards).
+    ok, existing_pid = _acquire_single_instance_lock()
+    if not ok:
+        log_error(
+            f"Another MWDataManagerBot instance appears to be running (pid={existing_pid}). "
+            "Stop the existing process before starting a new one."
+        )
+        return 2
+    atexit.register(_release_single_instance_lock)
 
     # ---------------- Canonical tokens (standalone) ----------------
     # DATAMANAGER_BOT only: no user token. Fetchall/fetchsync run in MWDiscumBot only (single user-token consumer).

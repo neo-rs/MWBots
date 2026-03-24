@@ -160,6 +160,12 @@ def classify_instore_destination(
     theatre_hit = bool(matches_instore_theatre(text_to_check or "", where_location))
     major_hit = bool(MAJOR_STORE_PATTERN.search(text_to_check or "") or store_category == "major")
     discounted_hit = bool(DISCOUNTED_STORE_PATTERN.search(text_to_check or "") or store_category == "discounted")
+    # Keep store traits mutually exclusive to avoid "major + discounted" overlap leakage.
+    # Prefer explicit discounted detection when both patterns happen to match.
+    if discounted_hit:
+        major_hit = False
+    elif major_hit:
+        discounted_hit = False
     
     if trace is not None:
         try:
