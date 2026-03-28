@@ -4,8 +4,15 @@ import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import settings_store as cfg
-from logging_utils import log_debug, log_smartfilter
-from patterns import AMAZON_LINK_PATTERN, PRICE_ERROR_PATTERN, PROFITABLE_FLIP_PATTERN
+from logging_utils import log_smartfilter
+from patterns import (
+    AMAZON_LINK_PATTERN,
+    PRICE_ERROR_PATTERN,
+    PROFITABLE_FLIP_PATTERN,
+    is_amazon_deal_complicated_monitor_blob,
+    is_amz_price_errors_monitor_blob,
+    is_simple_amazon_profitable_lead_blob,
+)
 from utils import collect_embed_strings, has_product_and_marketplace_links, normalize_message
 
 
@@ -287,17 +294,31 @@ def detect_global_triggers(
         # If Amazon content is present, do not evaluate or route to flip channels.
         # Instead, optionally route to a dedicated Amazon leads channel if configured.
         if amazon_hit:
-            if (
+            amz_pe_blob = ((text_to_check or "") + "\n" + (embed_text or "")).strip()
+            amz_monitor_template = bool(is_amz_price_errors_monitor_blob(amz_pe_blob))
+            complicated_monitor = bool(is_amazon_deal_complicated_monitor_blob(amz_pe_blob))
+            simple_profitable_lead = bool(is_simple_amazon_profitable_lead_blob(amz_pe_blob))
+            profitable_leads_gate = (
                 int(getattr(cfg, "SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID", 0) or 0) > 0
-                and bool(has_marketplace_link)
-                and bool(has_product_link)
                 and not bool(dyor_block)
-            ):
+                and not complicated_monitor
+                and (
+                    (bool(has_marketplace_link) and bool(has_product_link))
+                    or simple_profitable_lead
+                )
+            )
+            if profitable_leads_gate and not amz_monitor_template:
                 results.append((int(cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID), "AMAZON_PROFITABLE_LEAD"))
                 log_smartfilter(
                     "AMAZON_PROFITABLE_LEAD",
                     "TRIGGER",
                     {**sf_ctx, "reason": "amazon_content_blocked_from_flips"},
+                )
+            elif profitable_leads_gate and amz_monitor_template:
+                log_smartfilter(
+                    "AMAZON_PROFITABLE_LEAD",
+                    "SKIP",
+                    {**sf_ctx, "reason": "amz_price_errors_monitor_template"},
                 )
             else:
                 # Log once: Amazon content is excluded from both flip channels.
@@ -426,11 +447,5 @@ def detect_global_triggers(
         seen.add(key)
         out.append((cid, tag))
 
-    if cfg.VERBOSE and out:
-        try:
-            tags = ", ".join([t for _, t in out])
-            log_debug(f"[GLOBAL] triggers={tags} (source_channel_id={source_channel_id})")
-        except Exception:
-            pass
     return out
 

@@ -384,21 +384,127 @@ def log_filter(msg: str, *, event: Optional[str] = None, **fields: Any) -> None:
     write_bot_log(entry)
 
 
+EXPLAIN_BAR = "=" * 78
+
+
+def _cfg_verbose() -> bool:
+    try:
+        import settings_store as _cfg
+
+        return bool(getattr(_cfg, "VERBOSE", False))
+    except Exception:
+        return bool(_VERBOSE_CONSOLE)
+
+
+def _print_explainable_lines(lines: List[str], *, accent: str = "") -> None:
+    color = accent or _F.CYAN
+    try:
+        with _CONSOLE_LOCK:
+            for line in lines:
+                if line == EXPLAIN_BAR:
+                    _builtins.print(f"{color}{line}{_S.RESET_ALL}", flush=True)
+                else:
+                    _builtins.print(f"{_F.WHITE}{line}{_S.RESET_ALL}", flush=True)
+    except Exception:
+        for line in lines:
+            try:
+                _builtins.print(line, flush=True)
+            except Exception:
+                pass
+
+
+def _truncate_val(v: Any, max_len: int = 140) -> str:
+    try:
+        s = str(v).replace("\n", " ").strip()
+    except Exception:
+        s = ""
+    if len(s) > max_len:
+        return s[: max_len - 3] + "..."
+    return s
+
+
+def _human_bullets_from_details(details: Dict[str, Any], *, max_items: int = 14) -> List[str]:
+    """Flat, operator-readable lines from smartfilter/global context dicts."""
+    skip_keys = {
+        "matches",
+        "upcoming_explain",
+        "classifier",
+        "monitored_keywords",
+        "marketplace_matches",
+        "resell_indicator_matches",
+        "amazon_match",
+    }
+    bullets: List[str] = []
+    mm = details.get("marketplace_matches")
+    if isinstance(mm, list) and mm:
+        bullets.append(f"- marketplace_matches: {', '.join(str(x) for x in mm[:6])}")
+    am = details.get("amazon_match")
+    if am:
+        bullets.append(f"- amazon_match: {_truncate_val(am, 130)}")
+    for k, v in sorted(details.items(), key=lambda kv: str(kv[0])):
+        if k in skip_keys or v is None or v is False:
+            continue
+        if isinstance(v, (dict, list)) and k not in ("reason", "stage"):
+            continue
+        bullets.append(f"- {k}: {_truncate_val(v, 160)}")
+        if len(bullets) >= max_items:
+            break
+    if not bullets:
+        bullets.append("- (no extra context fields)")
+    return bullets
+
+
+def _eli5_smartfilter(tag: str, decision: str, details: Dict[str, Any]) -> str:
+    reason = str(details.get("reason") or "")
+    tag_u = str(tag or "").upper()
+    dec_u = str(decision or "").upper()
+    if tag_u == "AMAZON_PROFITABLE_LEAD" and dec_u == "TRIGGER":
+        return (
+            "Amazon-related content with a product link and a resale marketplace link; "
+            "global rules steer this toward the Amazon profitable-leads bucket instead of generic flip channels."
+        )
+    if tag_u == "AMAZON_PROFITABLE_LEAD" and dec_u == "SKIP":
+        if "amz_price_errors_monitor_template" in reason:
+            return (
+                "This post matches the high-volume AMZ Price Errors / Divine monitor template; "
+                "the global profitable-leads shortcut is skipped so routing follows the main classifier (typically regular Amazon)."
+            )
+        return f"Global profitable-leads trigger did not apply ({reason or 'gating'})."
+    if tag_u == "FLIP_CHANNELS" and dec_u == "SKIP":
+        if "amazon_content_excluded" in reason:
+            return (
+                "Amazon-only message: profitable-flip and lunchmoney-flip channels are not evaluated here "
+                "(Amazon paths are handled separately)."
+            )
+        return f"Flip-channel evaluation skipped ({reason or 'see context'})."
+    if tag_u == "UPCOMING" and dec_u == "TRIGGER":
+        ue = details.get("upcoming_explain")
+        if isinstance(ue, dict):
+            ind = ue.get("matched_future_indicators") or []
+            if isinstance(ind, list) and ind:
+                return f"Upcoming / future drop language matched ({', '.join(str(x) for x in ind[:4])})."
+        return "Timestamp or future-release wording matched; message is treated as UPCOMING."
+    if tag_u == "UPCOMING" and dec_u == "SKIP":
+        ue = details.get("upcoming_explain")
+        if isinstance(ue, dict) and ue.get("reason"):
+            return f"Upcoming classifier skipped: {ue.get('reason')}."
+        return "Upcoming classifier skipped (see verbose trace for detail)."
+    if tag_u in ("PROFITABLE_FLIP", "LUNCHMONEY_FLIP") and dec_u == "TRIGGER":
+        return f"Flip-shaped message met thresholds for {tag_u} routing."
+    if tag_u in ("PROFITABLE_FLIP", "LUNCHMONEY_FLIP") and dec_u in ("BLOCK", "SKIP", "FALLBACK"):
+        return f"{tag_u}: {dec_u.lower()} ({reason or 'rule gate'})."
+    if tag_u == "PRICE_ERROR" and dec_u == "TRIGGER":
+        return "Price-error / glitch wording matched; routed to the price-error destination."
+    return f"{tag_u} — {dec_u}: {reason or 'see human summary and optional verbose trace'}."
+
+
 def log_smartfilter(tag: str, decision: str, details: Optional[Dict[str, Any]] = None) -> None:
     """
-    Structured terminal + file logging for smartfilter decisions.
-
-    Example console line:
-      [SMARTFILTER:PROFITABLE_FLIP:TRIGGER] {"reason":"roi_pass", ...}
+    Explainable smartfilter logging (Canonical_SOP_with_Explainable_Logging.md):
+    console shows ELI5 + human bullets; raw JSON only when verbose.
+    File / JSONL traces keep full structured payloads.
     """
     details = dict(details or {})
-    try:
-        payload = json.dumps(details, ensure_ascii=False, default=str)
-    except Exception:
-        payload = "{}"
-
-    _tag_print(f"SMARTFILTER:{tag}:{decision}", _F.YELLOW, payload)
-
     entry: Dict[str, Any] = {
         "level": "INFO",
         "tag": "SMARTFILTER",
@@ -409,6 +515,246 @@ def log_smartfilter(tag: str, decision: str, details: Optional[Dict[str, Any]] =
     write_bot_log(entry)
     try:
         write_trace_log({**entry, "event": "smartfilter"})
+    except Exception:
+        pass
+
+    lines: List[str] = [
+        EXPLAIN_BAR,
+        f"MWDataManagerBot / SMARTFILTER  |  {tag}  |  {decision}",
+        EXPLAIN_BAR,
+        "1) ELI5 SUMMARY",
+        _eli5_smartfilter(tag, decision, details),
+        "",
+        "2) HUMAN DECISION SUMMARY",
+    ]
+    lines.extend(_human_bullets_from_details(details))
+    lines.append("")
+    lines.append("3) RULES THAT FIRED")
+    lines.append(f"- Layer: global_triggers / classifier smartfilter")
+    lines.append(f"- Tag: {tag}  |  Outcome: {decision}")
+    rk = details.get("reason") or details.get("stage")
+    if rk:
+        lines.append(f"- Reason key: {rk}")
+    if _cfg_verbose():
+        lines.append("")
+        lines.append("4) RAW FLAGS / TRACE (verbose)")
+        try:
+            payload = json.dumps(details, ensure_ascii=False, default=str)
+            if len(payload) > 3500:
+                payload = payload[:3497] + "..."
+            lines.append(payload)
+        except Exception:
+            lines.append("(trace serialization failed)")
+    lines.append(EXPLAIN_BAR)
+    _print_explainable_lines(lines)
+
+
+def _classifier_why_for_tag(tag: str, trace: Optional[Dict[str, Any]]) -> str:
+    if not trace:
+        return ""
+    try:
+        matches = (trace.get("classifier") or {}).get("matches") or {}
+        tag_s = str(tag or "")
+        if tag_s == "AMAZON":
+            amazon = str(matches.get("amazon") or "").strip()
+            if amazon:
+                return f"amazon_match={_truncate_val(amazon, 100)}"
+        if tag_s == "MONITORED_KEYWORD":
+            kws = matches.get("monitored_keywords") or []
+            if isinstance(kws, list) and kws:
+                return "kw=" + ",".join(str(k) for k in kws[:4])
+        if tag_s == "AFFILIATED_LINKS":
+            dom = str(matches.get("affiliate_domain") or "").strip()
+            reason = str(matches.get("affiliate_reason") or "").strip()
+            if dom:
+                return f"domain={dom}"
+            if reason:
+                return reason
+    except Exception:
+        pass
+    return ""
+
+
+def log_explainable_forward_summary(
+    *,
+    message_id: int,
+    source_channel_id: int,
+    source_group: str,
+    dest_traces: List[Dict[str, Any]],
+    stop_after_first: bool,
+    content_preview: str = "",
+    forwarded_count: int = 0,
+    trace: Optional[Dict[str, Any]] = None,
+    flow_label: str = "LIVE FORWARD",
+    simulation: bool = False,
+) -> None:
+    """
+    One consolidated routing block per handled message (actual Discord send, not dry-run unless flagged).
+    """
+    lines: List[str] = [
+        EXPLAIN_BAR,
+        f"MWDataManagerBot / {flow_label}",
+        EXPLAIN_BAR,
+        "1) MESSAGE INFO",
+        f"- message_id: {message_id}",
+        f"- source_channel_id: {source_channel_id}",
+        f"- source_group: {source_group}",
+    ]
+    if content_preview:
+        lines.append(f"- content_preview: {_truncate_val(content_preview, 200)}")
+    lines.append("")
+
+    sent = sum(1 for t in dest_traces if (t.get("decision") or {}).get("action") == "sent")
+    skipped = sum(1 for t in dest_traces if (t.get("decision") or {}).get("action") == "skip")
+    errors = sum(1 for t in dest_traces if (t.get("decision") or {}).get("action") == "error")
+
+    if simulation:
+        mode = "DRY SEND PREVIEW (simulation — not posted)"
+    elif forwarded_count <= 0 and not dest_traces:
+        mode = "BLOCKED / NO ROUTE"
+    elif forwarded_count <= 0:
+        mode = "BLOCKED / NO ROUTE (all legs skipped or failed)"
+    elif sent == 1:
+        mode = "SINGLE ROUTE"
+    else:
+        mode = "MULTI ROUTE"
+
+    lines.append("2) ELI5 SUMMARY")
+    if forwarded_count > 0:
+        lines.append(f"- Bottom line: {mode}; posted to {sent} destination(s).")
+    else:
+        lines.append(f"- Bottom line: {mode}.")
+    if stop_after_first and sent > 0:
+        lines.append("- Stop-after-first: remaining planned routes were not attempted after the first send.")
+    lines.append("")
+
+    lines.append("3) HUMAN DECISION SUMMARY")
+    lines.append("- Winning: destinations below reflect classifier + global triggers + route map.")
+    if skipped:
+        lines.append(f"- Skipped legs: {skipped} (dedupe, throttle, or invalid destination).")
+    if errors:
+        lines.append(f"- Errors: {errors} send failure(s); see trace log.")
+    lines.append("")
+
+    lines.append("4) DESTINATION DECISION (ordered)")
+    if not dest_traces:
+        lines.append("- (no routing legs recorded)")
+    for i, leg in enumerate(dest_traces, start=1):
+        tag = str(leg.get("tag") or "")
+        db = int(leg.get("dest_before") or 0)
+        da = int(leg.get("dest_after") or db)
+        dec = leg.get("decision") or {}
+        action = str(dec.get("action") or "")
+        mapped = db > 0 and da > 0 and db != da
+        why = _classifier_why_for_tag(tag, trace)
+        extra = f" | {why}" if why else ""
+        if action == "sent":
+            sim_note = " (simulated)" if simulation else ""
+            lines.append(
+                f"- Leg {i}: SENT  tag={tag}  dest_id={da}  route_map_applied={'yes' if mapped else 'no'}{extra}{sim_note}"
+            )
+        elif action == "skip":
+            age = dec.get("age_seconds")
+            age_s = f"  age_s={age}" if age is not None else ""
+            lines.append(
+                f"- Leg {i}: SKIPPED  tag={tag}  dest_id={da}  reason={dec.get('reason', 'unknown')}{age_s}"
+            )
+        elif action == "error":
+            lines.append(f"- Leg {i}: ERROR  tag={tag}  dest_id={da}  error={_truncate_val(dec.get('error'), 120)}")
+        else:
+            lines.append(f"- Leg {i}: {action or 'unknown'}  tag={tag}  dest_id={da}{extra}")
+
+    lines.append("")
+    lines.append("5) FAILURE HINTS")
+    if forwarded_count > 0:
+        lines.append("- None (at least one send succeeded).")
+    else:
+        hints: List[str] = []
+        for leg in dest_traces:
+            dec = leg.get("decision") or {}
+            if dec.get("action") == "skip":
+                hints.append(f"skip:{dec.get('reason')}")
+            if dec.get("action") == "error":
+                hints.append(f"error:{dec.get('error_type') or 'send'}")
+        lines.append("- " + ("; ".join(hints) if hints else "No matching destination or all legs skipped — check classifier trace / UNCLASSIFIED flow."))
+
+    if _cfg_verbose() and trace:
+        lines.append("")
+        lines.append("6) RAW FLAGS / TRACE (verbose)")
+        try:
+            slim = {
+                "classifier": trace.get("classifier"),
+                "dispatch_link_types": trace.get("dispatch_link_types"),
+                "stop_after_first": trace.get("stop_after_first"),
+            }
+            payload = json.dumps(slim, ensure_ascii=False, default=str)
+            if len(payload) > 3000:
+                payload = payload[:2997] + "..."
+            lines.append(payload)
+        except Exception:
+            lines.append("(trace slice failed)")
+
+    lines.append(EXPLAIN_BAR)
+    _print_explainable_lines(lines)
+
+    # Structured JSON line for journal parsers / Botlogs
+    try:
+        write_bot_log(
+            {
+                "level": "INFO",
+                "tag": "ROUTING_SUMMARY",
+                "message": f"msg={message_id} ch={source_channel_id} forwarded={forwarded_count} mode={mode}",
+                "message_id": int(message_id),
+                "source_channel_id": int(source_channel_id),
+                "source_group": str(source_group),
+                "forwarded_count": int(forwarded_count),
+                "route_mode": mode,
+                "stop_after_first": bool(stop_after_first),
+                "dest_traces": dest_traces,
+                "simulation": bool(simulation),
+            }
+        )
+    except Exception:
+        pass
+
+
+def log_explainable_major_clearance_send(
+    *,
+    variant: str,
+    message_id: int,
+    source_channel_id: int,
+    dest_channel_id: int,
+    route_map_applied: bool,
+) -> None:
+    lines = [
+        EXPLAIN_BAR,
+        "MWDataManagerBot / MAJOR_CLEARANCE",
+        EXPLAIN_BAR,
+        "1) MESSAGE INFO",
+        f"- message_id: {message_id}",
+        f"- source_channel_id: {source_channel_id}",
+        "",
+        "2) ELI5 SUMMARY",
+        f"- Home Depot–style clearance embed ({variant}); forwarded to major-clearance destination.",
+        "",
+        "3) DESTINATION DECISION",
+        f"- SENT to dest_id={dest_channel_id}  route_map_applied={'yes' if route_map_applied else 'no'}",
+        "",
+        EXPLAIN_BAR,
+    ]
+    _print_explainable_lines(lines)
+    try:
+        write_bot_log(
+            {
+                "level": "INFO",
+                "tag": "FORWARD",
+                "message": f"major-clearance {variant} msg={message_id} -> {dest_channel_id}",
+                "variant": variant,
+                "message_id": int(message_id),
+                "source_channel_id": int(source_channel_id),
+                "dest_channel_id": int(dest_channel_id),
+            }
+        )
     except Exception:
         pass
 

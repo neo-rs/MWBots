@@ -13,7 +13,17 @@ from classifier import (
 )
 from global_triggers import detect_global_triggers
 from keywords import load_keywords
-from logging_utils import log_debug, log_error, log_global, log_info, log_filter, log_forward, log_warn, write_trace_log
+from logging_utils import (
+    log_debug,
+    log_error,
+    log_explainable_forward_summary,
+    log_explainable_major_clearance_send,
+    log_global,
+    log_info,
+    log_filter,
+    log_warn,
+    write_trace_log,
+)
 import settings_store as cfg
 from utils import (
     augment_text_with_affiliate_redirects,
@@ -1404,9 +1414,12 @@ class MessageForwarder:
                         )
                         if cfg.VERBOSE:
                             try:
-                                log_forward(
-                                    "major-clearance timeout fallback "
-                                    f"msg={int(pending_item.get('source_message_id') or 0)} <#{src_ch}> -> <#{dest_after_exp}>"
+                                log_explainable_major_clearance_send(
+                                    variant="timeout_fallback",
+                                    message_id=int(pending_item.get("source_message_id") or 0),
+                                    source_channel_id=src_ch,
+                                    dest_channel_id=int(dest_after_exp),
+                                    route_map_applied=int(major_clearance_dest) != int(dest_after_exp),
                                 )
                             except Exception:
                                 pass
@@ -1439,7 +1452,13 @@ class MessageForwarder:
                             except Exception:
                                 pass
                             if cfg.VERBOSE:
-                                log_forward(f"major-clearance single msg={message.id} <#{channel_id}> -> <#{dest_after}>")
+                                log_explainable_major_clearance_send(
+                                    variant="single_embed",
+                                    message_id=int(message.id),
+                                    source_channel_id=int(channel_id),
+                                    dest_channel_id=int(dest_after),
+                                    route_map_applied=int(major_clearance_dest) != int(dest_after),
+                                )
                             return
                     except Exception as e:
                         if cfg.VERBOSE:
@@ -1496,7 +1515,13 @@ class MessageForwarder:
                         except Exception:
                             pass
                         if cfg.VERBOSE:
-                            log_forward(f"major-clearance pair(rev) msg={message.id} <#{channel_id}> -> <#{dest_after}>")
+                            log_explainable_major_clearance_send(
+                                variant="pair_reverse_order",
+                                message_id=int(message.id),
+                                source_channel_id=int(channel_id),
+                                dest_channel_id=int(dest_after),
+                                route_map_applied=int(major_clearance_dest) != int(dest_after),
+                            )
                         return
                     except Exception as e:
                         if cfg.VERBOSE:
@@ -1564,7 +1589,13 @@ class MessageForwarder:
                         except Exception:
                             pass
                         if cfg.VERBOSE:
-                            log_forward(f"major-clearance pair msg={message.id} <#{channel_id}> -> <#{dest_after}>")
+                            log_explainable_major_clearance_send(
+                                variant="pair",
+                                message_id=int(message.id),
+                                source_channel_id=int(channel_id),
+                                dest_channel_id=int(dest_after),
+                                route_map_applied=int(major_clearance_dest) != int(dest_after),
+                            )
                         return
 
                     # Otherwise cache the follow-up so an edited/late candidate can still pair.
@@ -1713,31 +1744,6 @@ class MessageForwarder:
                         if cfg.VERBOSE:
                             log_warn(f"Failed to add classification buttons (msg={message.id}): {type(e).__name__}: {e}")
 
-                why = ""
-                try:
-                    matches = (trace.get("classifier") or {}).get("matches") or {}
-                    tag_s = str(tag or "")
-                    if tag_s == "AMAZON":
-                        amazon = str(matches.get("amazon") or "").strip()
-                        if amazon:
-                            why = f"amazon={amazon[:80]}"
-                    elif tag_s == "MONITORED_KEYWORD":
-                        kws = matches.get("monitored_keywords") or []
-                        if isinstance(kws, list) and kws:
-                            why = "kw=" + ",".join(str(k) for k in kws[:3])
-                    elif tag_s == "AFFILIATED_LINKS":
-                        dom = str(matches.get("affiliate_domain") or "").strip()
-                        reason = str(matches.get("affiliate_reason") or "").strip()
-                        if dom:
-                            why = f"domain={dom}"
-                        elif reason:
-                            why = reason
-                except Exception:
-                    why = ""
-                if why:
-                    log_forward(f"msg={message.id} <#{channel_id}> -> <#{dest_channel_id}> (tag={tag} why={why})")
-                else:
-                    log_forward(f"msg={message.id} <#{channel_id}> -> <#{dest_channel_id}> (tag={tag})")
                 if stop_after_first:
                     break
             except Exception as e:
@@ -1745,7 +1751,18 @@ class MessageForwarder:
                 dest_traces.append(dest_trace)
                 log_error(f"Failed forwarding (msg={message.id}) to <#{dest_channel_id}> (tag={tag})", error=e)
 
-        if forwarded == 0 and cfg.VERBOSE:
+        if dest_traces or forwarded > 0:
+            log_explainable_forward_summary(
+                message_id=int(getattr(message, "id", 0) or 0),
+                source_channel_id=int(channel_id or 0),
+                source_group=str(source_group or "unknown"),
+                dest_traces=dest_traces,
+                stop_after_first=bool(stop_after_first),
+                content_preview=str(trace.get("content_preview") or ""),
+                forwarded_count=int(forwarded),
+                trace=trace,
+            )
+        elif forwarded == 0 and cfg.VERBOSE:
             log_warn(f"All destinations blocked or failed (msg={message.id})")
         try:
             trace["forwarded_count"] = int(forwarded)

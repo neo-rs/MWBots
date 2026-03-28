@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import settings_store as cfg
 from keywords import check_keyword_match, load_keyword_channel_overrides, scan_keywords
-from logging_utils import log_debug, log_smartfilter
+from logging_utils import log_smartfilter
 from patterns import (
     ALL_STORE_PATTERN,
     AMAZON_ASIN_PATTERN,
@@ -13,6 +13,9 @@ from patterns import (
     AMAZON_LINK_PATTERN,
     RETAIL_CONVERSATIONAL_DEAL_PATTERN,
     AMAZON_PROFITABLE_INDICATOR_PATTERN,
+    is_amazon_deal_complicated_monitor_blob,
+    is_amz_price_errors_monitor_blob,
+    is_simple_amazon_profitable_lead_blob,
     CARDS_PATTERN,
     DISCOUNTED_STORE_PATTERN,
     INSTORE_KEYWORDS,
@@ -581,7 +584,28 @@ def select_target_channel_id(
             is_profitable = bool(
                 PROFITABLE_FLIP_PATTERN.search(text_blob) or AMAZON_PROFITABLE_INDICATOR_PATTERN.search(text_blob)
             )
-            if is_profitable and cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID:
+            skip_profitable_leads = bool(is_amz_price_errors_monitor_blob(text_blob))
+            complicated_monitor = bool(is_amazon_deal_complicated_monitor_blob(text_blob))
+            simple_profitable = bool(not is_profitable and is_simple_amazon_profitable_lead_blob(text_blob))
+            profitable_for_leads_bucket = bool(
+                (is_profitable or simple_profitable) and not complicated_monitor
+            )
+            if trace is not None:
+                try:
+                    m = trace.setdefault("classifier", {}).setdefault("matches", {})
+                    if skip_profitable_leads:
+                        m["amz_price_errors_monitor_template"] = True
+                    if complicated_monitor:
+                        m["amazon_complicated_monitor_template"] = True
+                    if simple_profitable:
+                        m["simple_amazon_profitable_lead"] = True
+                except Exception:
+                    pass
+            if (
+                profitable_for_leads_bucket
+                and cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID
+                and not skip_profitable_leads
+            ):
                 # Canonical tag string (matches global_triggers.py and manual picker)
                 return cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID, "AMAZON_PROFITABLE_LEAD"
             if cfg.SMARTFILTER_AMAZON_CHANNEL_ID:
@@ -829,7 +853,28 @@ def detect_all_link_types(
             is_profitable = bool(
                 PROFITABLE_FLIP_PATTERN.search(text_blob) or AMAZON_PROFITABLE_INDICATOR_PATTERN.search(text_blob)
             )
-            if is_profitable and cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID:
+            skip_profitable_leads = bool(is_amz_price_errors_monitor_blob(text_blob))
+            complicated_monitor = bool(is_amazon_deal_complicated_monitor_blob(text_blob))
+            simple_profitable = bool(not is_profitable and is_simple_amazon_profitable_lead_blob(text_blob))
+            profitable_for_leads_bucket = bool(
+                (is_profitable or simple_profitable) and not complicated_monitor
+            )
+            if trace is not None:
+                try:
+                    m = trace.setdefault("classifier", {}).setdefault("matches", {})
+                    if skip_profitable_leads:
+                        m["amz_price_errors_monitor_template"] = True
+                    if complicated_monitor:
+                        m["amazon_complicated_monitor_template"] = True
+                    if simple_profitable:
+                        m["simple_amazon_profitable_lead"] = True
+                except Exception:
+                    pass
+            if (
+                profitable_for_leads_bucket
+                and cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID
+                and not skip_profitable_leads
+            ):
                 # Canonical tag string (matches global_triggers.py and manual picker)
                 results.append((cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID, "AMAZON_PROFITABLE_LEAD"))
             elif cfg.SMARTFILTER_AMAZON_CHANNEL_ID:

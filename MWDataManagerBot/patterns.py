@@ -287,6 +287,118 @@ AMAZON_PROFITABLE_INDICATOR_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Divine / "AMZ Price Errors" monitor — rigid templates; route to AMAZON not AMAZON_PROFITABLE_LEADS.
+_AMZ_PE_ERRORS_FOOTER_PATTERN = re.compile(r"by:\s*amz\s*price\s*errors\b", re.IGNORECASE)
+_AMZ_PE_FLIP_LINE_PATTERN = re.compile(r"amazon\s+to\s+ebay\s+flip", re.IGNORECASE)
+_AMZ_PE_WAREHOUSE_ALERT_PATTERN = re.compile(r"like-new\s*\([^)]*warehouse[^)]*\)\s*alert", re.IGNORECASE)
+_AMZ_PE_PRICE_AMAZON_SOLD_PATTERN = re.compile(
+    r"price:\s*\$[\d,]+(?:\.\d{2})?\s*\(\s*amazon\s*sold\s*\)",
+    re.IGNORECASE,
+)
+_AMZ_PE_AVG30_LINE_PATTERN = re.compile(r"average\s*30\s*:", re.IGNORECASE)
+_AMZ_PE_AMAZON_SOLD_LABEL_PATTERN = re.compile(r"amazon\s*sold\s*:", re.IGNORECASE)
+_AMZ_PE_EBAY_AVG_PATTERN = re.compile(r"ebay\s*avg", re.IGNORECASE)
+
+
+def is_amz_price_errors_monitor_blob(text: str) -> bool:
+    """
+    True for templated Discord alerts from Divine / AMZ Price Errors (footer, flip lines, warehouse alerts).
+    These hit AMAZON_PROFITABLE_INDICATOR_PATTERN (e.g. amazon sold, average 30, % drop) but are high-volume
+    monitor spam relative to curated profitable leads.
+    """
+    if not text or not str(text).strip():
+        return False
+    s = str(text)
+    sl = s.lower()
+    if _AMZ_PE_ERRORS_FOOTER_PATTERN.search(sl):
+        return True
+    if _AMZ_PE_FLIP_LINE_PATTERN.search(sl):
+        return True
+    if _AMZ_PE_WAREHOUSE_ALERT_PATTERN.search(sl):
+        return True
+    if _AMZ_PE_PRICE_AMAZON_SOLD_PATTERN.search(sl) and _AMZ_PE_AVG30_LINE_PATTERN.search(sl):
+        return True
+    if (
+        _AMZ_PE_AMAZON_SOLD_LABEL_PATTERN.search(sl)
+        and _AMZ_PE_EBAY_AVG_PATTERN.search(sl)
+        and (re.search(r"amazon\s+to\s+ebay", sl) or re.search(r"difference\s*!", sl))
+    ):
+        return True
+    return False
+
+
+# Noisy deal-monitor banners / price-teaser layouts — do not use "simple" profitable-leads exception.
+_AMZ_COMPLICATED_CHECK_PRICE_PATTERN = re.compile(r"check\s+your\s+price", re.IGNORECASE)
+_AMZ_COMPLICATED_NEW_DEAL_FOUND_PATTERN = re.compile(r"\bnew\s+deal\s+found\b", re.IGNORECASE)
+_AMZ_COMPLICATED_BEFORE_REG_PATTERN = re.compile(r"before\s+reg(?:ular|\.?)\b", re.IGNORECASE)
+# Placeholder / teaser prices like "$7.xx" or "xx $7.xx"
+_AMZ_COMPLICATED_XX_PRICE_PATTERN = re.compile(
+    r"(?:\$\s*\d*\.xx\b|\bxx\s*\$?\s*\d|\d+\s*\$?\s*\d+\.xx\b)",
+    re.IGNORECASE,
+)
+
+
+def is_amazon_deal_complicated_monitor_blob(text: str) -> bool:
+    """
+    True for loud monitor-style deal posts (headers, teaser prices). These stay on the generic
+    AMAZON bucket even if they mention Amazon; they are excluded from the simple profitable-leads path.
+    """
+    if not text or not str(text).strip():
+        return False
+    sl = str(text).lower()
+    if _AMZ_COMPLICATED_NEW_DEAL_FOUND_PATTERN.search(sl):
+        return True
+    if _AMZ_COMPLICATED_CHECK_PRICE_PATTERN.search(sl):
+        return True
+    if _AMZ_COMPLICATED_BEFORE_REG_PATTERN.search(sl):
+        return True
+    if _AMZ_COMPLICATED_XX_PRICE_PATTERN.search(sl):
+        return True
+    return False
+
+
+def is_simple_amazon_profitable_lead_blob(text: str) -> bool:
+    """
+    Plain Amazon deal copy (price + short context + link) without Keepa-style % / avg-30 triggers.
+    Used to route curated-style alerts to AMAZON_PROFITABLE_LEADS when not complicated-monitor shaped.
+    """
+    if not text or not str(text).strip():
+        return False
+    raw = str(text)
+    sl = raw.lower()
+    if not re.search(r"\$[\d,]+(?:\.\d{2})?\b", raw):
+        return False
+    amazonish = bool(
+        re.search(r"\bamazon\b", sl)
+        or re.search(r"amzn\.to|a\.co/", sl)
+        or re.search(r"amazon\.[a-z.]{2,12}/", sl)
+        or re.search(r"\bB0[A-Z0-9]{8}\b", raw, re.IGNORECASE)
+    )
+    if not amazonish:
+        return False
+    if is_amazon_deal_complicated_monitor_blob(raw):
+        return False
+    if is_amz_price_errors_monitor_blob(raw):
+        return False
+    simple_signals = [
+        r"on\s+sale\s+from\s+\$[\d,]+(?:\.\d{2})?\s+down\s+to\s+\$",
+        r"\bfrom\s+\$[\d,]+(?:\.\d{2})?\s+down\s+to\s+\$",
+        r"sold\s+by\s+amazon\s*",
+        r"no\s+risk\s+preorder",
+        r"these\s+are\s+normally",
+        r"normally\s+\$[\d,]+(?:\.\d{2})?",
+        r"\$[\d,]+(?:\.\d{2})?[^\n]{0,140}\bon\s+amazon\b",
+        r"\bon\s+amazon\b[^\n]{0,140}\$[\d,]+(?:\.\d{2})?",
+        r"clip\s+(?:the\s+)?(?:\d+\s*%?\s*off\s+)?coupon",
+        r"sub\s*&\s*save|subscribe\s*&\s*save",
+        r"(?:target|walmart|costco|kroger)\s+sells.{0,100}\$",
+        r"same\s+(?:bottle|item|pack|product|sku|size)\s+for\s+\$",
+        r"other\s+retailers.{0,120}\$[\d,]+(?:\.\d{2})?",
+        r"\$[\d,]+(?:\.\d{2})?.{0,120}other\s+retailers",
+    ]
+    return any(re.search(p, sl) for p in simple_signals)
+
+
 # Conversational Amazon deal templates (often missing explicit amazon.com/amzn.to links).
 # Based on your historical `logs/Datalogs/Amazon.json`, common phrases include:
 # - "Use Promo Code"
