@@ -479,6 +479,285 @@ if VERBOSE:
     except Exception:
         pass
 
+
+# --- Explainable logging (Canonical_SOP_with_Explainable_Logging.md: D2D / forwarding) ---
+def _d2d_explain_rule_source(rule: str) -> str:
+    return f"discumbot.py — {rule}"
+
+
+def _d2d_explain_banner_close() -> None:
+    with _CONSOLE_BLOCK_LOCK:
+        print(_F.CYAN + "=" * 78 + _S.RESET_ALL, flush=True)
+
+
+def _d2d_explain_flow_header(title: str) -> None:
+    with _CONSOLE_BLOCK_LOCK:
+        print(_F.CYAN + "=" * 78 + _S.RESET_ALL, flush=True)
+        print(f"{_F.CYAN}MWDiscumBot / {title}{_S.RESET_ALL}", flush=True)
+        print(_F.CYAN + "=" * 78 + _S.RESET_ALL, flush=True)
+
+
+def _d2d_explain_section(num: str, name: str) -> None:
+    print(f"{_F.WHITE}{num}) {name}{_S.RESET_ALL}", flush=True)
+
+
+def _d2d_explain_bullets(items: List[str], prefix: str = "   ") -> None:
+    for it in items:
+        try:
+            print(f"{prefix}- {it}", flush=True)
+        except UnicodeEncodeError:
+            safe = str(it).encode("ascii", "replace").decode("ascii")
+            print(f"{prefix}- {safe}", flush=True)
+
+
+def explain_d2d_duplicate_skip(
+    *,
+    message_id: str,
+    source_channel_id: int,
+    source_channel_name: str,
+    source_guild_id: str,
+    author_name: str,
+    dedupe_scope: str,
+    content_hash: str,
+    ttl_seconds: int,
+    seconds_since_last: float,
+    content_preview: str,
+) -> None:
+    """Sectioned DUPLICATE SKIP (mandatory explainable logging for dedupe)."""
+    hshort = (content_hash or "")[:12]
+    prev = (content_preview or "").replace("\n", " ")[:120]
+    _d2d_explain_flow_header("D2D FORWARDER — Duplicate detection")
+    _d2d_explain_section("1", "MESSAGE INFO")
+    _d2d_explain_bullets(
+        [
+            f"source_message_id={message_id}",
+            f"source_channel_id={source_channel_id} (name={source_channel_name!r})",
+            f"source_guild_id={source_guild_id}",
+            f"author=@{author_name}",
+        ]
+    )
+    _d2d_explain_section("2", "MESSAGE SNAPSHOT")
+    _d2d_explain_bullets([f"content_preview={prev!r}" if prev else "content_preview=(empty or non-text)"])
+    _d2d_explain_section("3", "ELI5 SUMMARY")
+    print(
+        "   Bottom line: The same normalized deal (body + embed/attachment fingerprints) from this source guild was "
+        f"already forwarded to this destination within the last {ttl_seconds}s — this message is not posted again.",
+        flush=True,
+    )
+    _d2d_explain_section("4", "HUMAN DECISION SUMMARY")
+    _d2d_explain_bullets(
+        [
+            "Yes (skip): hash matched a recent forward for the same destination scope and same source guild.",
+            "No (would send): first sighting of this content hash for that guild+destination inside the TTL window.",
+            "Cross-channel: multiple source channels in one server posting the same text collapse to a single mirror post.",
+        ]
+    )
+    _d2d_explain_section("5", "RULES THAT FIRED")
+    _d2d_explain_bullets([_d2d_explain_rule_source("_should_skip_due_to_duplicate — guild-scoped destination dedupe")])
+    if VERBOSE:
+        _d2d_explain_section("6", "RAW FLAGS / TRACE")
+        _d2d_explain_bullets(
+            [
+                "decision_tag=DUPLICATE SKIP",
+                f"dedupe_scope={dedupe_scope}",
+                f"content_hash_md5_prefix={hshort}",
+                f"seconds_since_last_forward={seconds_since_last}",
+                f"ttl_seconds={ttl_seconds}",
+            ]
+        )
+    _d2d_explain_section("7", "DESTINATION DECISION")
+    _d2d_explain_bullets(
+        [
+            "Decision: DUPLICATE SKIP — no webhook POST (not posted to Discord).",
+            f"dedupe_scope={dedupe_scope} (resolved destination channel when available).",
+        ]
+    )
+    _d2d_explain_section("8", "FAILURE HINTS")
+    _d2d_explain_bullets(
+        [
+            "If distinct deals are wrongly skipped, increase duplicate_ttl_seconds in config/settings.json or verify sources are not identical.",
+            "If hashes differ for the same deal, check REST enrichment (HTTP 403 on read history yields truncated gateway bodies).",
+        ]
+    )
+    _d2d_explain_banner_close()
+
+
+def explain_d2d_link_preview_transform(
+    *,
+    message_id: str,
+    source_channel_id: int,
+    urls_wrapped: bool,
+    embeds_removed: int,
+    embeds_before: int,
+    embeds_after: int,
+) -> None:
+    if not urls_wrapped and embeds_removed <= 0:
+        return
+    _d2d_explain_flow_header("D2D FORWARDER — Link preview suppression")
+    _d2d_explain_section("1", "MESSAGE INFO")
+    _d2d_explain_bullets([f"source_message_id={message_id}", f"source_channel_id={source_channel_id}"])
+    _d2d_explain_section("3", "ELI5 SUMMARY")
+    parts = []
+    if urls_wrapped:
+        parts.append("Wrapped http(s) links in angle brackets so Discord will not unfurl large site cards in the body.")
+    if embeds_removed > 0:
+        parts.append(
+            f"Removed {embeds_removed} link-unfurl embed(s) that duplicated URL(s) already present in the text."
+        )
+    print(f"   Bottom line: {' '.join(parts)}", flush=True)
+    _d2d_explain_section("4", "HUMAN DECISION SUMMARY")
+    _d2d_explain_bullets(
+        [
+            "Decision tag: SUPPRESSED (link preview noise reduction).",
+            "This is not a routing change — same destination webhook; only the rendered shape changes.",
+        ]
+    )
+    _d2d_explain_section("5", "RULES THAT FIRED")
+    rules_lp: List[str] = []
+    if urls_wrapped:
+        rules_lp.append(
+            _d2d_explain_rule_source("_suppress_discord_link_previews_in_text — markdown + bare URL wrapping")
+        )
+    if embeds_removed > 0:
+        rules_lp.append(
+            _d2d_explain_rule_source("_drop_link_preview_embeds_covered_by_content — strip redundant unfurl embeds")
+        )
+    if rules_lp:
+        _d2d_explain_bullets(rules_lp)
+    if VERBOSE:
+        _d2d_explain_section("6", "RAW FLAGS / TRACE")
+        _d2d_explain_bullets(
+            [
+                f"urls_angle_bracketed={'yes' if urls_wrapped else 'no'}",
+                f"embed_count_before={embeds_before}",
+                f"embed_count_after={embeds_after}",
+                f"link_preview_embeds_removed={embeds_removed}",
+            ]
+        )
+    _d2d_explain_section("7", "DESTINATION DECISION")
+    _d2d_explain_bullets(["Still: SINGLE ROUTE — forward proceeds to the mapped webhook with adjusted payload."])
+    _d2d_explain_banner_close()
+
+
+def explain_d2d_forward_sent(
+    *,
+    decision_tag: str,
+    message_id: str,
+    src_ctx: str,
+    dest_ctx: str,
+    dest_channel_id: Optional[int],
+    dest_message_id: Optional[str],
+    simulated: bool,
+    extra_human: Optional[List[str]] = None,
+) -> None:
+    """Post-send explainable block for a successful webhook forward."""
+    _d2d_explain_flow_header("D2D FORWARDER — Webhook send")
+    _d2d_explain_section("1", "MESSAGE INFO")
+    _d2d_explain_bullets([f"source_message_id={message_id}"])
+    _d2d_explain_section("3", "ELI5 SUMMARY")
+    sim = "simulated only — not posted" if simulated else "posted to Discord via webhook"
+    print(
+        f"   Bottom line: Message mirrored from {src_ctx} to {dest_ctx} ({sim}).",
+        flush=True,
+    )
+    _d2d_explain_section("4", "HUMAN DECISION SUMMARY")
+    bullets = [
+        f"Decision tag: {decision_tag}.",
+        "Source channel is in CHANNEL_MAP; payload sent to the mapped webhook URL.",
+    ]
+    if extra_human:
+        bullets.extend(extra_human)
+    _d2d_explain_bullets(bullets)
+    _d2d_explain_section("5", "RULES THAT FIRED")
+    _d2d_explain_bullets([_d2d_explain_rule_source("_forward_to_webhook — pure forwarder path")])
+    _d2d_explain_section("7", "DESTINATION DECISION")
+    dest_line = f"destination_channel_id={dest_channel_id}" if dest_channel_id is not None else "destination_channel_id=(unresolved)"
+    mid = dest_message_id or "(none)"
+    _d2d_explain_bullets(
+        [
+            dest_line,
+            f"destination_webhook_message_id={mid}",
+            "route-map: source channel → channel_map.json webhook (unchanged at send time).",
+            f"actual_send={'no (simulation)' if simulated else 'yes (webhook POST)'}",
+        ]
+    )
+    if VERBOSE:
+        _d2d_explain_section("6", "RAW FLAGS / TRACE")
+        _d2d_explain_bullets([f"summary_ctx: src={src_ctx} dest={dest_ctx}"])
+    _d2d_explain_banner_close()
+
+
+def explain_d2d_edit_sync_skipped_no_mapping(
+    *,
+    source_message_id: str,
+    src_ctx: str,
+) -> None:
+    _d2d_explain_flow_header("D2D FORWARDER — Edit sync")
+    _d2d_explain_section("1", "MESSAGE INFO")
+    _d2d_explain_bullets([f"source_message_id={source_message_id}", f"source={src_ctx}"])
+    _d2d_explain_section("3", "ELI5 SUMMARY")
+    print(
+        "   Bottom line: Discord sent MESSAGE_UPDATE before we had stored the mirrored message id — edit is queued until the first forward completes.",
+        flush=True,
+    )
+    _d2d_explain_section("4", "HUMAN DECISION SUMMARY")
+    _d2d_explain_bullets(
+        [
+            "Cannot PATCH destination: no destination message id on record yet.",
+            "Update payload is queued (_queue_pending_edit_update); it will apply after the create-forward records dest ids.",
+        ]
+    )
+    _d2d_explain_section("5", "RULES THAT FIRED")
+    _d2d_explain_bullets([_d2d_explain_rule_source("_forward_to_webhook(edit_existing=True) — early exit when mapping missing")])
+    _d2d_explain_section("8", "FAILURE HINTS")
+    _d2d_explain_bullets(
+        [
+            "If this repeats forever, verify channel_map.json maps this source channel and the initial MESSAGE_CREATE forward succeeds.",
+            "HTTP 403 on REST fetch can delay or truncate content; fix Read Message History on the source channel.",
+        ]
+    )
+    _d2d_explain_banner_close()
+
+
+def explain_d2d_inprocess_message_id_guard_skip(*, source_message_id: str) -> None:
+    """Same Discord message id forwarded twice within 30s in-process (reconnect guard)."""
+    _d2d_explain_flow_header("D2D FORWARDER — In-process message id guard")
+    _d2d_explain_section("3", "ELI5 SUMMARY")
+    print(
+        "   Bottom line: This source message id was already sent through the webhook path in the last 30 seconds — skipping a second POST.",
+        flush=True,
+    )
+    _d2d_explain_section("4", "HUMAN DECISION SUMMARY")
+    _d2d_explain_bullets(
+        [
+            "Decision tag: DUPLICATE SKIP (in-process message_id window).",
+            "Distinct from content-hash dedupe: this guard keys only on Discord message id.",
+        ]
+    )
+    _d2d_explain_section("5", "RULES THAT FIRED")
+    _d2d_explain_bullets([_d2d_explain_rule_source("_forward_to_webhook — _recent_forward_ids 30s window")])
+    if VERBOSE:
+        _d2d_explain_section("6", "RAW FLAGS / TRACE")
+        _d2d_explain_bullets([f"source_message_id={source_message_id}", "window_seconds=30"])
+    _d2d_explain_section("7", "DESTINATION DECISION")
+    _d2d_explain_bullets(["No webhook POST (second send suppressed)."])
+    _d2d_explain_banner_close()
+
+
+def explain_d2d_edit_sync_applied(*, source_message_id: str, src_ctx: str, dest_ctx: str) -> None:
+    _d2d_explain_flow_header("D2D FORWARDER — Edit sync (PATCH)")
+    _d2d_explain_section("3", "ELI5 SUMMARY")
+    print(
+        f"   Bottom line: Updated the existing mirror post for source message {source_message_id} instead of creating a duplicate.",
+        flush=True,
+    )
+    _d2d_explain_section("7", "DESTINATION DECISION")
+    _d2d_explain_bullets([f"Source {src_ctx} -> Destination {dest_ctx}", "actual_send=yes (webhook PATCH)"])
+    _d2d_explain_section("5", "RULES THAT FIRED")
+    _d2d_explain_bullets([_d2d_explain_rule_source("_webhook_patch_message — edit_existing path")])
+    _d2d_explain_banner_close()
+
+
 # Standalone log writers (compatible paths)
 _LOGS_DIR = os.path.join(_project_root, "logs")
 _DISCUM_LOGS_PATH = os.path.join(_LOGS_DIR, "Botlogs", "discumlogs.json")
@@ -1944,15 +2223,18 @@ def _should_skip_due_to_duplicate(
 
                     content_preview = (message_dict.get("content") or "")[:80]
 
-                    log_forwarder(
-                        f"DUPLICATE SKIP: same body/embeds from source guild {gid_key} within {time_since}s (ttl={_DUPLICATE_TTL_SECONDS}s)",
-                        channel_name=channel_name,
-                        user_name=author_name,
+                    explain_d2d_duplicate_skip(
+                        message_id=str(message_dict.get("id") or ""),
+                        source_channel_id=int(channel_id),
+                        source_channel_name=str(channel_name),
+                        source_guild_id=str(gid_key),
+                        author_name=str(author_name),
+                        dedupe_scope=str(scope),
+                        content_hash=str(content_hash),
+                        ttl_seconds=int(_DUPLICATE_TTL_SECONDS),
+                        seconds_since_last=float(time_since),
+                        content_preview=str(content_preview),
                     )
-                    if VERBOSE:
-                        if content_preview:
-                            log_info(f"  Content preview: {content_preview}...")
-                        log_info(f"  Dedupe scope: {scope} | destination+guild+content hash")
                 except Exception:
                     log_forwarder(f"DUPLICATE SKIP (posted {time_since}s ago)")
 
@@ -2755,20 +3037,13 @@ def message_handler(resp):
         friendly_channel_name: Optional[str] = None
         friendly_guild_name: Optional[str] = None
         friendly_guild_id: Optional[int] = None
+        category_id: Any = None
         if channel_in_map:
             source_lookup = _get_source_channel_details(channelID, guildID)
             friendly_channel_name = source_lookup.get("channel_name")
             friendly_guild_name = source_lookup.get("guild_name")
             friendly_guild_id = source_lookup.get("guild_id")
             category_id = source_lookup.get("category_id")
-            if VERBOSE:
-                ctx_parts = [f"Guild-ID:{friendly_guild_id or guildID or '?'}"]
-                if category_id is not None:
-                    ctx_parts.append(f"Category-ID:{category_id}")
-                ctx = " [" + ", ".join(ctx_parts) + "]" if ctx_parts else ""
-                channel_segment = f"{friendly_channel_name or channelID} <#{channelID}>{ctx}"
-                guild_segment = f"{friendly_guild_name or 'Unknown'} (Guild-ID:{friendly_guild_id or guildID or '?'})"
-                print(f"[D2D] [INFO] Message detected in monitored {channel_segment} | {guild_segment}")
 
         # Get message details for backend logging (with error handling)
         username = "Unknown"
@@ -2824,6 +3099,25 @@ def message_handler(resp):
             })
         except Exception:
             pass  # Don't crash if logging fails
+
+        if VERBOSE and channel_in_map:
+            try:
+                ctx_parts = [f"Guild-ID:{friendly_guild_id or guildID or '?'}"]
+                if category_id is not None:
+                    ctx_parts.append(f"Category-ID:{category_id}")
+                ctx = " [" + ", ".join(ctx_parts) + "]" if ctx_parts else ""
+                channel_segment = f"{friendly_channel_name or channelID} <#{channelID}>{ctx}"
+                guild_segment = f"{friendly_guild_name or 'Unknown'} (Guild-ID:{friendly_guild_id or guildID or '?'})"
+                wh = "yes" if is_webhook else "no"
+                print(
+                    f"{_F.CYAN}[D2D]{_S.RESET_ALL} {_F.WHITE}1) MESSAGE INFO{_S.RESET_ALL} | "
+                    f"id={message_id_str} | ch={channel_segment} | guild={guild_segment} | "
+                    f"@{username} | webhook_msg={wh} || "
+                    f"{_F.WHITE}3) ELI5{_S.RESET_ALL}: monitored source — next enrich, dedupe-at-forward, webhook send",
+                    flush=True,
+                )
+            except Exception:
+                pass
 
         # MESSAGE_UPDATE:
         # - During "short embed hydration" window: update the retry queue snapshot only.
@@ -3415,11 +3709,12 @@ def _urls_in_text_for_link_preview_match(msg_text: str) -> set:
     return {x for x in out if x}
 
 
-def _suppress_discord_link_previews_in_text(msg_text: str) -> str:
-    """Wrap markdown and bare http(s) links in <> so Discord does not unfurl large previews."""
+def _suppress_discord_link_previews_in_text(msg_text: str) -> Tuple[str, bool]:
+    """Wrap markdown and bare http(s) links in <> so Discord does not unfurl large previews. Returns (text, changed)."""
 
     if not isinstance(msg_text, str) or not msg_text.strip():
-        return msg_text
+        return msg_text, False
+    orig = msg_text
 
     def md_sub(m: Any) -> str:
         label, url = m.group(1), m.group(2).strip()
@@ -3438,7 +3733,7 @@ def _suppress_discord_link_previews_in_text(msg_text: str) -> str:
         return f"<{u}>"
 
     s = re.sub(r"(?<!<)(https?://[^\s<]+)", bare_sub, s)
-    return s
+    return s, s != orig
 
 
 def _drop_link_preview_embeds_covered_by_content(
@@ -3759,9 +4054,10 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
     except Exception:
         pass
 
+    _link_wrap_changed = False
     try:
         if isinstance(msg_text, str) and msg_text.strip():
-            msg_text = _suppress_discord_link_previews_in_text(msg_text)
+            msg_text, _link_wrap_changed = _suppress_discord_link_previews_in_text(msg_text)
     except Exception:
         pass
 
@@ -3843,10 +4139,24 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
                 print(f"[WARN] Invalid embed format, skipping")
             continue
 
+    _emb_ct_before = len(valid_embeds)
     try:
         valid_embeds = _drop_link_preview_embeds_covered_by_content(valid_embeds, str(msg_text or ""))
     except Exception:
         pass
+    _emb_removed = _emb_ct_before - len(valid_embeds)
+    if _link_wrap_changed or _emb_removed > 0:
+        try:
+            explain_d2d_link_preview_transform(
+                message_id=str(m.get("id") or ""),
+                source_channel_id=int(channelID),
+                urls_wrapped=bool(_link_wrap_changed),
+                embeds_removed=int(_emb_removed),
+                embeds_before=int(_emb_ct_before),
+                embeds_after=len(valid_embeds),
+            )
+        except Exception:
+            pass
 
     # Process attachments for webhook payload
     attachment_urls: List[str] = []
@@ -3937,10 +4247,13 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
             pass
 
         if not webhook or not dest_ids:
-            if VERBOSE:
+            try:
                 src_details = _get_source_channel_details(channelID, guildID) if guildID else None
                 src_ctx = _fmt_channel_context(channelID, details=src_details)
-                log_warn(f"[D2D] Edit sync skipped for {src_id}: no destination mapping ({src_ctx} not in channel_map.json)")
+                explain_d2d_edit_sync_skipped_no_mapping(source_message_id=src_id, src_ctx=src_ctx)
+            except Exception:
+                if VERBOSE:
+                    log_warn(f"[D2D] Edit sync skipped for {src_id}: no destination mapping")
             # MESSAGE_UPDATE can arrive before we have recorded the destination mapping.
             # Queue this update and apply it once the create-forward records dest message id(s).
             try:
@@ -3974,23 +4287,29 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
                     dest_ids=dest_ids,
                     signature=signature,
                 )
+                dest_cid = None
+                try:
+                    meta = _resolve_webhook_destination_metadata(webhook) if webhook else {}
+                    if isinstance(meta, dict) and meta.get("channel_id"):
+                        dest_cid = meta["channel_id"]
+                except Exception:
+                    pass
+                src_details = _get_source_channel_details(channelID, guildID) if guildID else None
+                src_ctx = _fmt_channel_context(channelID, details=src_details)
+                if dest_cid:
+                    _refresh_destination_channel_file_lookup()
+                    dest_meta = _DEST_CHANNEL_FULL_LOOKUP.get(int(dest_cid))
+                    dest_ctx = _fmt_channel_context(dest_cid, details=dest_meta)
+                else:
+                    dest_ctx = "Webhook"
                 if VERBOSE:
-                    dest_cid = None
                     try:
-                        meta = _resolve_webhook_destination_metadata(webhook) if webhook else {}
-                        if isinstance(meta, dict) and meta.get("channel_id"):
-                            dest_cid = meta["channel_id"]
+                        explain_d2d_edit_sync_applied(
+                            source_message_id=src_id, src_ctx=src_ctx, dest_ctx=dest_ctx
+                        )
                     except Exception:
                         pass
-                    src_details = _get_source_channel_details(channelID, guildID) if guildID else None
-                    src_ctx = _fmt_channel_context(channelID, details=src_details)
-                    if dest_cid:
-                        _refresh_destination_channel_file_lookup()
-                        dest_meta = _DEST_CHANNEL_FULL_LOOKUP.get(int(dest_cid))
-                        dest_ctx = _fmt_channel_context(dest_cid, details=dest_meta)
-                        log_d2d(f"Edited mirror message: Source {src_ctx} -> Destination {dest_ctx}")
-                    else:
-                        log_d2d(f"Edited mirror message: Source {src_ctx} -> Webhook")
+                log_d2d(f"Edited mirror message: Source {src_ctx} -> Destination {dest_ctx}")
                 return
             # Patch failed → fall back to replace
             needs_replace = True
@@ -4068,6 +4387,40 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
 
             log_entry, summary = _build_log_entry(m, channelID, channelName, dest_channel_id, dest_channel_name, username, guildID, content, True, None, webhook)
             timestamp = time.strftime("%H:%M:%S")
+            if VERBOSE:
+                try:
+                    src_details = _get_source_channel_details(channelID, guildID) if guildID else None
+                    src_ctx = _fmt_channel_context(channelID, details=src_details)
+                    _refresh_destination_channel_file_lookup()
+                    dest_meta = (
+                        _DEST_CHANNEL_FULL_LOOKUP.get(int(dest_channel_id)) if dest_channel_id is not None else None
+                    )
+                    dest_ctx = (
+                        _fmt_channel_context(dest_channel_id, details=dest_meta)
+                        if dest_channel_id is not None
+                        else str(dest_channel_name or "Unknown")
+                    )
+                    extra = (
+                        [f"Total webhook posts for this forward: {len(created_ids)} (2000-char chunking)."]
+                        if len(created_ids) > 1
+                        else None
+                    )
+                    explain_d2d_forward_sent(
+                        decision_tag=(
+                            "SINGLE ROUTE (chunked edit repost)"
+                            if edit_existing
+                            else "SINGLE ROUTE (chunked)"
+                        ),
+                        message_id=str(m.get("id") or ""),
+                        src_ctx=src_ctx,
+                        dest_ctx=dest_ctx,
+                        dest_channel_id=int(dest_channel_id) if dest_channel_id is not None else None,
+                        dest_message_id=str(created_ids[0]) if created_ids else None,
+                        simulated=False,
+                        extra_human=extra,
+                    )
+                except Exception:
+                    pass
             log_d2d(f"{summary} (chunked)")
         except Exception:
             timestamp = time.strftime("%H:%M:%S")
@@ -4132,7 +4485,12 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
                 if msg_id_key:
                     if msg_id_key in _recent_forward_ids:
                         if VERBOSE:
-                            log_info(f"Duplicate message_id {msg_id_key} within 30s window - skipping webhook forward")
+                            try:
+                                explain_d2d_inprocess_message_id_guard_skip(source_message_id=msg_id_key)
+                            except Exception:
+                                log_info(
+                                    f"Duplicate message_id {msg_id_key} within 30s window - skipping webhook forward"
+                                )
                         return
                     _recent_forward_ids[msg_id_key] = now_ts
         except Exception:
@@ -4345,7 +4703,33 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
     # Build log entry for console output (no SOL write - datamanagerbot.py handles SOL archiving)
     try:
         log_entry, summary = _build_log_entry(m, channelID, channelName, dest_channel_id, dest_channel_name, username, guildID, content, success, error_msg, webhook)
-        
+
+        if success and VERBOSE:
+            try:
+                src_details = _get_source_channel_details(channelID, guildID) if guildID else None
+                src_ctx = _fmt_channel_context(channelID, details=src_details)
+                _refresh_destination_channel_file_lookup()
+                dest_meta = (
+                    _DEST_CHANNEL_FULL_LOOKUP.get(int(dest_channel_id)) if dest_channel_id is not None else None
+                )
+                dest_ctx = (
+                    _fmt_channel_context(dest_channel_id, details=dest_meta)
+                    if dest_channel_id is not None
+                    else str(dest_channel_name or "Unknown")
+                )
+                route_tag = "SINGLE ROUTE (edit sync repost)" if edit_existing else "SINGLE ROUTE"
+                explain_d2d_forward_sent(
+                    decision_tag=route_tag,
+                    message_id=str(m.get("id") or ""),
+                    src_ctx=src_ctx,
+                    dest_ctx=dest_ctx,
+                    dest_channel_id=int(dest_channel_id) if dest_channel_id is not None else None,
+                    dest_message_id=str(message_id) if message_id else None,
+                    simulated=False,
+                )
+            except Exception:
+                pass
+
         # Console output (summary already has <#id> clickable refs)
         log_d2d(summary)
     except Exception as log_err:
