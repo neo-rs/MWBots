@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
-from fetchall_logging import log_fetchall, log_warn
+from fetchall_logging import log_fetchall, log_info, log_warn
 import fetchall_config as cfg
 from fetchall_utils import append_image_attachments_as_embeds, chunk_text, format_embeds_for_forwarding, is_image_attachment
 
@@ -1139,6 +1139,54 @@ def _select_source_text_channels_from_api(
     return out
 
 
+def _channel_name_matches_status_emoji_prefix(name: str) -> bool:
+    """True if channel name looks like a 'drop' lane (🟢🟡🔴🟠 or calendar). Not content-based."""
+    s = str(name or "").strip()
+    if not s:
+        return False
+    for p in ("🟢", "🟡", "🔴", "🟠"):
+        if s.startswith(p):
+            return True
+    if s.startswith("📅"):
+        return True
+    if s.startswith("\U0001f5d3") or s.startswith("🗓"):
+        return True
+    return False
+
+
+def _apply_status_emoji_channel_filter(
+    pairs: List[Tuple[int, str]], *, source_guild_id: int, context: str
+) -> List[Tuple[int, str]]:
+    """
+    Optional filter: keep only channels whose names start with status/calendar emoji.
+    When enabled, fetchall prune may delete mirrors for sources no longer in the kept set.
+    """
+    if not bool(getattr(cfg, "FETCHMIRROR_REQUIRE_STATUS_EMOJI_PREFIX", False)):
+        return list(pairs or [])
+    kept: List[Tuple[int, str]] = []
+    skipped = 0
+    for cid, cname in pairs or []:
+        if _channel_name_matches_status_emoji_prefix(cname):
+            kept.append((int(cid), str(cname)))
+        else:
+            skipped += 1
+            try:
+                log_info(
+                    f"{context} guild={source_guild_id} skip channel_id={cid} name={cname!r} (require status/calendar emoji prefix)",
+                    event="channel_filter",
+                )
+            except Exception:
+                pass
+    if skipped:
+        log_fetchall(
+            f"{context} source_guild={source_guild_id} status_emoji_prefix filter dropped={skipped} kept={len(kept)}",
+            event="channel_filter",
+            dropped=int(skipped),
+            kept=int(len(kept)),
+        )
+    return kept
+
+
 def _summarize_api_channels(channels: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Best-effort summary for debugging (no secrets)."""
     type_counts: Dict[int, int] = {}
@@ -1540,6 +1588,13 @@ async def run_fetchall(
     if ignored_ids:
         log_fetchall(f"source={source_guild_id} ignored_channel_ids={len(ignored_ids)} channels (excluded from fetch): {sorted(ignored_ids)[:15]}{'...' if len(ignored_ids) > 15 else ''}")
 
+    if bool(getattr(cfg, "FETCHMIRROR_REQUIRE_STATUS_EMOJI_PREFIX", False)):
+        log_fetchall(
+            "config fetchmirror_require_status_emoji_prefix=ON — only channels named with leading 🟢🟡🔴🟠📅🗓 are mirrored; "
+            "fetchall prune may delete other mirrors as 'orphaned'",
+            event="config",
+        )
+
     src_channels_to_mirror: List[Tuple[int, str]] = []
     mode = "bot"
     if source_guild is not None:
@@ -1604,6 +1659,10 @@ async def run_fetchall(
             except Exception:
                 pass
         status, api_channels = await _fetch_guild_channels_via_user_token(source_guild_id=source_guild_id, user_token=token)
+        log_fetchall(
+            f"FETCHALL REST GET /guilds/{source_guild_id}/channels http={int(status or 0)} rows={len(api_channels or [])} (bot not in source guild; user token list)",
+            event="discord_api",
+        )
         if not api_channels:
             if progress_cb is not None:
                 try:
@@ -1649,6 +1708,15 @@ async def run_fetchall(
             if dropped > 0:
                 log_warn(f"[FETCHALL] source={source_guild_id} filtered to channels with recent activity: kept={len(filtered)} dropped={dropped} (fetchall_only_channels_with_recent_activity_days={activity_days})")
             src_channels_to_mirror = filtered
+
+    log_fetchall(
+        f"FETCHALL mirror candidates (before status-emoji filter) count={len(src_channels_to_mirror)} mode={mode}",
+        event="fetchall_enumerate",
+    )
+
+    src_channels_to_mirror = _apply_status_emoji_channel_filter(
+        src_channels_to_mirror, source_guild_id=int(source_guild_id), context="FETCHALL"
+    )
 
     # Build existing mirror index by topic (scan across ALL destination channels, including overflow categories)
     existing_by_source: dict[int, discord.TextChannel] = {}
@@ -2000,6 +2068,10 @@ async def run_fetchsync(
 
     # Always enumerate channels via user token (source access is assumed to be via user token).
     status, api_channels = await _fetch_guild_channels_via_user_token(source_guild_id=source_guild_id, user_token=token)
+    log_fetchall(
+        f"FETCHSYNC REST GET /guilds/{source_guild_id}/channels http={int(status or 0)} rows={len(api_channels or [])}",
+        event="discord_api",
+    )
     if not api_channels:
         return {
             "ok": False,
@@ -2010,6 +2082,9 @@ async def run_fetchsync(
         api_channels,
         source_category_ids=_cats,
         ignored_channel_ids=ignored_ids,
+    )
+    src_channels_to_mirror = _apply_status_emoji_channel_filter(
+        src_channels_to_mirror, source_guild_id=int(source_guild_id), context="FETCHSYNC"
     )
     if not src_channels_to_mirror:
         extra = {
@@ -2107,6 +2182,14 @@ async def run_fetchsync(
     send_min_interval = float(getattr(cfg, "SEND_MIN_INTERVAL_SECONDS", 0.0) or 0.0)
     min_chars = int(getattr(cfg, "FETCHSYNC_MIN_CONTENT_CHARS", 25) or 25)
     channels_total = int(len(src_channels_to_mirror or []))
+
+    log_fetchall(
+        f"FETCHSYNC plan source_guild={source_guild_id} channels_selected={channels_total} "
+        f"REST_backfill_limit={per_channel_limit} max_msgs_per_ch_per_run={max_per_channel} "
+        f"send_spacing_s={send_min_interval} min_content_chars={min_chars} "
+        f"cursors=read/write in fetchall_mappings.json (not an in-memory Discord cache)",
+        event="fetchsync_plan",
+    )
 
     if progress_cb is not None:
         try:
@@ -2385,6 +2468,10 @@ async def run_fetchsync(
 
         dest_channel = mirror_by_source.get(sid)
         if dest_channel is None and not dryrun:
+            log_info(
+                f"FETCHSYNC skip channel_id={sid} ({src_name!r}) — no mirror TextChannel in destination (create failed or dryrun)",
+                event="fetchsync_skip",
+            )
             continue
 
         cursor = _get_cursor(entry, source_channel_id=sid)
@@ -2398,10 +2485,23 @@ async def run_fetchsync(
             cursor = ""
         total_fetched = 0
         last_cursor_id: str = ""
+        api_reads = 0
+        sent_before_ch = int(sent)
+
+        log_info(
+            f"FETCHSYNC channel_id={sid} ({src_name!r}) mode={'backfill' if not cursor else 'incremental'} "
+            f"stored_cursor={'none' if not cursor else str(cursor)[:24] + '...'}",
+            event="fetchsync_channel",
+        )
 
         if not cursor:
             ok, msgs, reason = await _fetch_channel_messages_page(
                 source_channel_id=sid, user_token=token, limit=per_channel_limit, after=None
+            )
+            api_reads += 1
+            log_fetchall(
+                f"FETCHSYNC REST GET /channels/{sid}/messages limit={per_channel_limit} after=(none) ok={ok} count={len(msgs) if ok else 0} reason={reason or '-'}",
+                event="discord_api",
             )
             if not ok:
                 log_warn(f"[FETCHSYNC] source_channel_id={sid} fetch_failed reason={reason}")
@@ -2418,8 +2518,15 @@ async def run_fetchsync(
             sent += int(s_inc)
             would_send += int(w_inc)
             errors += int(e_inc)
+            cursor_saved = False
             if new_cursor:
                 persist_channel_cursor(source_guild_id=source_guild_id, source_channel_id=sid, last_seen_message_id=str(new_cursor))
+                cursor_saved = True
+            log_fetchall(
+                f"FETCHSYNC channel_summary id={sid} api_reads={api_reads} posts_sent={int(sent) - sent_before_ch} "
+                f"cursor_persisted={'yes' if cursor_saved else 'no'}",
+                event="fetchsync_channel",
+            )
             continue
 
         after = cursor
@@ -2427,6 +2534,11 @@ async def run_fetchsync(
             page_limit = min(50, max_per_channel - total_fetched)
             ok, msgs, reason = await _fetch_channel_messages_page(
                 source_channel_id=sid, user_token=token, limit=page_limit, after=after
+            )
+            api_reads += 1
+            log_fetchall(
+                f"FETCHSYNC REST GET /channels/{sid}/messages limit={page_limit} after={str(after)[:24]} ok={ok} n={len(msgs) if ok else 0}",
+                event="discord_api",
             )
             if not ok:
                 log_warn(f"[FETCHSYNC] source_channel_id={sid} fetch_failed reason={reason}")
@@ -2455,8 +2567,16 @@ async def run_fetchsync(
             if e_inc:
                 break
 
+        cursor_saved = False
         if last_cursor_id:
             persist_channel_cursor(source_guild_id=source_guild_id, source_channel_id=sid, last_seen_message_id=last_cursor_id)
+            cursor_saved = True
+
+        log_fetchall(
+            f"FETCHSYNC channel_summary id={sid} api_reads={api_reads} posts_sent={int(sent) - sent_before_ch} "
+            f"msgs_fetched={total_fetched} cursor_persisted={'yes' if cursor_saved else 'no'}",
+            event="fetchsync_channel",
+        )
 
         if progress_cb is not None:
             try:
@@ -2497,4 +2617,90 @@ async def run_fetchsync(
         "sent": sent,
         "errors": errors,
     }
+
+
+async def run_fetch_auto_sequence_for_entry(
+    *,
+    bot,
+    entry: Dict[str, Any],
+    destination_guild,
+    source_user_token: str,
+    prune_inactive: bool = False,
+    progress_cb: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+) -> Dict[str, Any]:
+    """
+    Same order as the auto-poller: run_fetchall then pause then run_fetchsync.
+    Use prune_inactive=False to match the background poller (no inactive mirror deletion this pass).
+    """
+    gap = float(getattr(cfg, "FETCH_AUTO_SEQUENCE_SLEEP_SECONDS", 1.0) or 0.0)
+    sgid = int(entry.get("source_guild_id", 0) or 0)
+    log_fetchall(
+        f"AUTO_SEQUENCE start source_guild={sgid} prune_inactive={prune_inactive} pause_fetchall_to_fetchsync_s={gap}",
+        event="auto_sequence",
+    )
+    fa = await run_fetchall(
+        bot=bot,
+        entry=entry,
+        destination_guild=destination_guild,
+        source_user_token=source_user_token,
+        progress_cb=progress_cb,
+        prune_inactive=prune_inactive,
+    )
+    if gap > 0:
+        await asyncio.sleep(gap)
+    fs = await run_fetchsync(
+        bot=bot,
+        entry=entry,
+        destination_guild=destination_guild,
+        source_user_token=source_user_token,
+        dryrun=False,
+        progress_cb=progress_cb,
+    )
+    ok = bool(fa.get("ok")) and bool(fs.get("ok"))
+    sent_n = int(fs.get("sent", 0) or 0)
+    log_fetchall(
+        f"AUTO_SEQUENCE done source_guild={sgid} fetchall_ok={bool(fa.get('ok'))} fetchsync_ok={bool(fs.get('ok'))} sent={sent_n}",
+        event="auto_sequence",
+    )
+    return {
+        "ok": ok,
+        "fetchall": fa,
+        "fetchsync": fs,
+        "sent": sent_n,
+        "source_guild_id": sgid,
+    }
+
+
+async def run_fetch_auto_sequence_all_entries(
+    *,
+    bot,
+    entries: List[Dict[str, Any]],
+    destination_guild,
+    source_user_token: str,
+    prune_inactive: bool = False,
+    progress_cb: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+) -> Dict[str, Any]:
+    """Run auto sequence for each mapping; sleeps FETCH_AUTO_SEQUENCE_SLEEP_SECONDS between entries (after each full pair)."""
+    gap = float(getattr(cfg, "FETCH_AUTO_SEQUENCE_SLEEP_SECONDS", 1.0) or 0.0)
+    results: List[Dict[str, Any]] = []
+    total_sent = 0
+    for i, entry in enumerate(entries or []):
+        if i > 0 and gap > 0:
+            await asyncio.sleep(gap)
+        r = await run_fetch_auto_sequence_for_entry(
+            bot=bot,
+            entry=entry,
+            destination_guild=destination_guild,
+            source_user_token=source_user_token,
+            prune_inactive=prune_inactive,
+            progress_cb=progress_cb,
+        )
+        results.append(r)
+        total_sent += int(r.get("sent", 0) or 0)
+    all_ok = all(bool(x.get("ok")) for x in results) if results else True
+    log_fetchall(
+        f"AUTO_SEQUENCE batch_done entries={len(results)} all_ok={all_ok} total_sent={total_sent}",
+        event="auto_sequence",
+    )
+    return {"ok": all_ok, "results": results, "total_sent": total_sent, "entry_count": len(results)}
 

@@ -50,10 +50,14 @@ try:
     run_fetchsync = getattr(_fetchall_mod, "run_fetchsync", None)
     iter_fetchall_entries = getattr(_fetchall_mod, "iter_fetchall_entries", None)
     run_startup_clear = getattr(_fetchall_mod, "run_startup_clear", None)
+    run_fetch_auto_sequence_for_entry = getattr(_fetchall_mod, "run_fetch_auto_sequence_for_entry", None)
+    run_fetch_auto_sequence_all_entries = getattr(_fetchall_mod, "run_fetch_auto_sequence_all_entries", None)
     _FETCHALL_AVAILABLE = bool(run_fetchall and run_fetchsync and iter_fetchall_entries)
 except Exception as _e:
     _FETCHALL_AVAILABLE = False
     run_fetchall = run_fetchsync = iter_fetchall_entries = run_startup_clear = None  # type: ignore
+    run_fetch_auto_sequence_for_entry = None  # type: ignore
+    run_fetch_auto_sequence_all_entries = None  # type: ignore
 
 # Cache from source_channels.json (written by discumbot) for guild name only. Channel display is always <#channel_id>.
 _SOURCE_CHANNEL_FULL: Dict[int, Tuple[int, str]] = {}  # channel_id -> (guild_id, guild_name)
@@ -1729,12 +1733,14 @@ class DiscumCommandBot(commands.Bot):
         """Send a reply when a prefix command fails so the user always sees feedback."""
         try:
             if isinstance(error, commands.MissingPermissions):
-                await ctx.send("[FETCHALL] You need **Manage Channels** permission in this server to run !fetchall / !fetchsync.")
+                await ctx.send(
+                    "[FETCHALL] You need **Manage Channels** permission to run !fetchall / !fetchsync / !fetchcycle."
+                )
                 return
             if isinstance(error, commands.CommandNotFound):
                 return  # ignore wrong prefix / unknown command
             name = getattr(ctx.command, "name", None) if ctx.command else None
-            if name in ("fetchall", "fetchsync"):
+            if name in ("fetchall", "fetchsync", "fetchcycle"):
                 msg = str(getattr(error, "original", error) or error)
                 await ctx.send(f"[FETCHALL] Command failed: {msg[:400]}")
         except Exception:
@@ -1766,6 +1772,7 @@ class DiscumCommandBot(commands.Bot):
 
     async def on_ready(self) -> None:
         global run_fetchsync, run_fetchall, iter_fetchall_entries, _FETCHALL_AVAILABLE
+        global run_fetch_auto_sequence_for_entry, run_fetch_auto_sequence_all_entries
         print(f"[INFO] Logged in as {self.user}")
         app_id = self.user.id if self.user else None
         if app_id and MIRRORWORLD_SERVER_ID:
@@ -1822,12 +1829,16 @@ class DiscumCommandBot(commands.Bot):
                         _run_fetchsync = getattr(_fm, "run_fetchsync", None)
                         _run_fetchall = getattr(_fm, "run_fetchall", None)
                         _iter_entries = getattr(_fm, "iter_fetchall_entries", None)
+                        _run_seq = getattr(_fm, "run_fetch_auto_sequence_for_entry", None)
+                        _run_seq_all = getattr(_fm, "run_fetch_auto_sequence_all_entries", None)
                         if _run_startup_clear is not None:
                             print("[FETCHALL] run_startup_clear loaded from fetchall.py at runtime", flush=True)
                         if _run_fetchsync and _run_fetchall and _iter_entries:
                             run_fetchsync = _run_fetchsync
                             run_fetchall = _run_fetchall
                             iter_fetchall_entries = _iter_entries
+                            run_fetch_auto_sequence_for_entry = _run_seq
+                            run_fetch_auto_sequence_all_entries = _run_seq_all
                             _FETCHALL_AVAILABLE = True
                             print("[FETCHALL] run_fetchsync/run_fetchall/iter_fetchall_entries set at runtime (commands and auto-poller available)", flush=True)
                 if _run_startup_clear is None:
@@ -1869,29 +1880,38 @@ class DiscumCommandBot(commands.Bot):
                             break
                     for entry in entries or []:
                         try:
-                            await run_fetchall(
-                                bot=self,
-                                entry=entry,
-                                destination_guild=dest_guild,
-                                source_user_token=effective_user_token,
-                                progress_cb=None,
-                                prune_inactive=False,
-                            )
+                            if run_fetch_auto_sequence_for_entry:
+                                await run_fetch_auto_sequence_for_entry(
+                                    bot=self,
+                                    entry=entry,
+                                    destination_guild=dest_guild,
+                                    source_user_token=effective_user_token,
+                                    prune_inactive=False,
+                                    progress_cb=None,
+                                )
+                            else:
+                                await run_fetchall(
+                                    bot=self,
+                                    entry=entry,
+                                    destination_guild=dest_guild,
+                                    source_user_token=effective_user_token,
+                                    progress_cb=None,
+                                    prune_inactive=False,
+                                )
+                                await asyncio.sleep(1.0)
+                                await run_fetchsync(
+                                    bot=self,
+                                    entry=entry,
+                                    destination_guild=dest_guild,
+                                    source_user_token=effective_user_token,
+                                    dryrun=False,
+                                    progress_cb=None,
+                                )
                         except Exception as e:
-                            print(f"[WARN] [FETCHALL] auto poll (create+prune) failed: {e}", flush=True)
-                        await asyncio.sleep(1.0)
-                        try:
-                            await run_fetchsync(
-                                bot=self,
-                                entry=entry,
-                                destination_guild=dest_guild,
-                                source_user_token=effective_user_token,
-                                dryrun=False,
-                                progress_cb=None,
-                            )
-                        except Exception as e:
-                            print(f"[WARN] [FETCHSYNC] auto poll failed: {e}", flush=True)
-                        await asyncio.sleep(1.0)
+                            print(f"[WARN] [FETCHALL] auto poll sequence failed: {e}", flush=True)
+                        await asyncio.sleep(
+                            float(getattr(_fetchall_cfg, "FETCH_AUTO_SEQUENCE_SLEEP_SECONDS", 1.0) or 1.0)
+                        )
                     elapsed = max(0.0, time.time() - started)
                     sleep_for = float(poll_s) - float(elapsed)
                     if sleep_for < 5.0:
@@ -2021,6 +2041,62 @@ async def _cmd_fetchall(ctx: commands.Context, source_guild_id: int = 0) -> None
         await msg.edit(content=f"Fetchall done: {ok}/{len(entries)} mapping(s) ok.")
     except Exception as e:
         await msg.edit(content=f"Fetchall error: {e}")
+        raise
+
+
+@bot.command(name="fetchcycle")
+@commands.has_permissions(manage_channels=True)
+async def _cmd_fetchcycle(ctx: commands.Context, source_guild_id: int = 0) -> None:
+    """Auto-poller equivalent for one pass: fetchall (prune_inactive=false) then fetchsync per mapping."""
+    if not run_fetch_auto_sequence_all_entries or not iter_fetchall_entries:
+        await ctx.send(
+            "[FETCHALL] fetchcycle not loaded. Restart the bot or run from MWDiscumBot with fetchall.py present."
+        )
+        return
+    user_tok = USER_TOKEN or _get_browse_user_token()
+    if not user_tok:
+        await ctx.send("[FETCHALL] Set DISCUM_USER_DISCUMBOT in config/tokens.env and restart.")
+        return
+    entries = list(iter_fetchall_entries())
+    if not entries:
+        await ctx.send("No fetchall mappings. Add MWDiscumBot/config/fetchall_mappings.json entries.")
+        return
+    if source_guild_id:
+        entries = [e for e in entries if int(e.get("source_guild_id", 0) or 0) == source_guild_id]
+    if not entries:
+        await ctx.send(f"No mapping for source_guild_id `{source_guild_id}`.")
+        return
+    msg = await ctx.send(f"Fetchcycle (auto-style) running ({len(entries)} mapping(s))…")
+    try:
+        async def _progress_async(payload):
+            if msg is None:
+                return
+            try:
+                stage = str(payload.get("stage", ""))
+                sent = int(payload.get("sent", 0) or 0)
+                ch_done = int(payload.get("channels_processed", 0) or 0)
+                ch_total = int(payload.get("channels_total", 0) or 0)
+                await msg.edit(
+                    content=f"Fetchcycle: {stage} | sent={sent} | channels {ch_done}/{ch_total}"
+                )
+            except Exception:
+                pass
+
+        batch = await run_fetch_auto_sequence_all_entries(
+            bot=ctx.bot,
+            entries=entries,
+            destination_guild=ctx.guild,
+            source_user_token=user_tok,
+            prune_inactive=False,
+            progress_cb=_progress_async,
+        )
+        ts = int(batch.get("total_sent", 0) or 0)
+        okn = sum(1 for r in (batch.get("results") or []) if r.get("ok"))
+        await msg.edit(
+            content=f"Fetchcycle done: {okn}/{len(entries)} ok, total_sent={ts} (same order as auto-poller)."
+        )
+    except Exception as e:
+        await msg.edit(content=f"Fetchcycle error: {e}")
         raise
 
 

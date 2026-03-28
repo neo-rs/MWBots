@@ -37,6 +37,13 @@ FETCHSYNC_ONLY_RECENT_MESSAGE_DAYS: int = 0
 # fetchall_only_channels_with_recent_activity_days: only create/sync channels that have at least one message in the last N days
 FETCHALL_ONLY_CHANNELS_WITH_RECENT_ACTIVITY_DAYS: int = 0
 
+# When True, only mirror channels whose names start with a status/calendar emoji (🟢🟡🔴🟠📅🗓️).
+# Mirrors for excluded sources may be pruned on the next fetchall (prune sees them as "not in selected set").
+FETCHMIRROR_REQUIRE_STATUS_EMOJI_PREFIX: bool = False
+
+# Pause between fetchall→fetchsync in auto sequence (matches manual !fetchcycle and auto-poller).
+FETCH_AUTO_SEQUENCE_SLEEP_SECONDS: float = 1.0
+
 
 def _parse_int_set(values: Any) -> Set[int]:
     out: Set[int] = set()
@@ -106,6 +113,7 @@ def init(settings: Dict[str, Any]) -> None:
     global FETCHALL_STARTUP_CLEAR_ENABLED, FETCHALL_STARTUP_CLEAR_CATEGORY_IDS
     global FETCHALL_STARTUP_CLEAR_ONLY_MIRROR_CHANNELS, FETCHALL_STARTUP_CLEAR_ALL_CHANNELS, FETCHALL_STARTUP_CLEAR_DELAY_SECONDS
     global FETCHSYNC_ONLY_RECENT_MESSAGE_DAYS, FETCHALL_ONLY_CHANNELS_WITH_RECENT_ACTIVITY_DAYS
+    global FETCHMIRROR_REQUIRE_STATUS_EMOJI_PREFIX, FETCH_AUTO_SEQUENCE_SLEEP_SECONDS
 
     DESTINATION_GUILD_IDS = _parse_int_set(settings.get("destination_guild_ids"))
     FETCHALL_DEFAULT_DEST_CATEGORY_ID = _get_int(settings, "fetchall_default_destination_category_id", 0)
@@ -140,3 +148,12 @@ def init(settings: Dict[str, Any]) -> None:
     FETCHALL_STARTUP_CLEAR_DELAY_SECONDS = _get_int(settings, "fetchall_startup_clear_delay_seconds", 0)
     FETCHSYNC_ONLY_RECENT_MESSAGE_DAYS = _get_int(settings, "fetchsync_only_recent_message_days", 0)
     FETCHALL_ONLY_CHANNELS_WITH_RECENT_ACTIVITY_DAYS = _get_int(settings, "fetchall_only_channels_with_recent_activity_days", 0)
+    FETCHMIRROR_REQUIRE_STATUS_EMOJI_PREFIX = bool(settings.get("fetchmirror_require_status_emoji_prefix", False))
+    try:
+        FETCH_AUTO_SEQUENCE_SLEEP_SECONDS = float(settings.get("fetch_auto_sequence_sleep_seconds", 1.0) or 1.0)
+        if FETCH_AUTO_SEQUENCE_SLEEP_SECONDS < 0:
+            FETCH_AUTO_SEQUENCE_SLEEP_SECONDS = 0.0
+        if FETCH_AUTO_SEQUENCE_SLEEP_SECONDS > 30:
+            FETCH_AUTO_SEQUENCE_SLEEP_SECONDS = 30.0
+    except Exception:
+        FETCH_AUTO_SEQUENCE_SLEEP_SECONDS = 1.0
