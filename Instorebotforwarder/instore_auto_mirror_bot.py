@@ -41,6 +41,11 @@ if str(_REPO_ROOT) not in sys.path:
 from mirror_world_config import load_config_with_secrets, is_placeholder_secret, mask_secret
 from RSForwarder import affiliate_rewriter
 
+try:
+    from explainable_log import ExplainableLog
+except ImportError:
+    from Instorebotforwarder.explainable_log import ExplainableLog
+
 log = logging.getLogger("instorebotforwarder")
 
 
@@ -959,6 +964,7 @@ class InstorebotForwarder:
         dest_channel_id: Optional[int] = None,
         source_channel_id: Optional[int] = None,
         source_label: Optional[str] = None,
+        trace_acc: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Optional[str], Optional[str]]:
         """Fetch one eBay sold search page; return (html, error). Uses Playwright first when enabled (eBay is JS-rendered); else aiohttp with Playwright fallback on challenge."""
         if self._playwright_enabled():
@@ -982,6 +988,10 @@ class InstorebotForwarder:
                     source_channel_id=source_channel_id,
                     source_label=source_label,
                 )
+                if trace_acc is not None:
+                    trace_acc["pw_fail_count"] = int(trace_acc.get("pw_fail_count") or 0) + 1
+                    trace_acc["pw_fail_last_err"] = str(pw_err or "")[:220]
+                    trace_acc["pw_fail_sample_url"] = url[:160]
             # Fall through to aiohttp only when Playwright failed
         else:
             pw_crashed = False
@@ -1019,6 +1029,8 @@ class InstorebotForwarder:
                                 source_channel_id=source_channel_id,
                                 source_label=source_label,
                             )
+                            if trace_acc is not None:
+                                trace_acc["pw_skip_crash_count"] = int(trace_acc.get("pw_skip_crash_count") or 0) + 1
                             return html_txt, None  # no prices; caller will handle
 
                         pw_html, pw_err = await self._fetch_ebay_sold_page_playwright(url)
@@ -1039,6 +1051,10 @@ class InstorebotForwarder:
                             source_channel_id=source_channel_id,
                             source_label=source_label,
                         )
+                        if trace_acc is not None:
+                            trace_acc["pw_fail_count"] = int(trace_acc.get("pw_fail_count") or 0) + 1
+                            trace_acc["pw_fail_last_err"] = str(pw_err or "")[:220]
+                            trace_acc["pw_fail_sample_url"] = url[:160]
                         return html_txt, None  # return challenge HTML so caller sees no prices
                     return html_txt, None
         except asyncio.TimeoutError:
@@ -1109,6 +1125,7 @@ class InstorebotForwarder:
         dest_channel_id: Optional[int] = None,
         source_channel_id: Optional[int] = None,
         source_label: Optional[str] = None,
+        trace_acc: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Optional[Dict[str, Dict[str, str]]], Optional[str]]:
         """
         For a search keyword, fetch eBay sold listings for New (1000), Pre-owned (3000), Refurbished (2000),
@@ -1149,6 +1166,9 @@ class InstorebotForwarder:
             ("pre_owned", 3000),
             ("refurbished", 2000),
         ]
+        if trace_acc is not None:
+            trace_acc["ebay_keyword"] = q[:200]
+            trace_acc["conditions_attempted"] = len(condition_ids)
         result: Dict[str, Dict[str, str]] = {}
         for cond_key, cond_id in condition_ids:
             url = self._ebay_sold_search_url(q, condition_id=cond_id)
@@ -1165,6 +1185,7 @@ class InstorebotForwarder:
                 dest_channel_id=dest_channel_id,
                 source_channel_id=source_channel_id,
                 source_label=source_label,
+                trace_acc=trace_acc,
             )
             if err or not html:
                 _log_flow(
@@ -1736,6 +1757,316 @@ class InstorebotForwarder:
     def _verbose_flow_logs(self) -> bool:
         return bool((self.config or {}).get("verbose_flow_logs", False))
 
+    def _explainable_enabled(self) -> bool:
+        """ELI5 + human-decision blocks for filter/eBay/forward paths (default on)."""
+        return bool((self.config or {}).get("explainable_logging_enabled", True))
+
+    def _explainable_technical(self) -> bool:
+        """Raw key=value trace section (6). Env overrides config."""
+        ev = str(os.environ.get("INSTORE_EXPLAINABLE_TECHNICAL", "") or "").strip().lower()
+        if ev in ("1", "true", "yes", "on"):
+            return True
+        return bool((self.config or {}).get("explainable_logging_technical", False))
+
+    def _explainable(self) -> ExplainableLog:
+        return ExplainableLog(log, enabled=self._explainable_enabled(), technical=self._explainable_technical())
+
+    @staticmethod
+    def _filter_reason_discount_pct(reason: str) -> Optional[int]:
+        r = (reason or "").strip()
+        m = re.match(r"^discount_too_low_(\d+)%$", r)
+        if m:
+            try:
+                return int(m.group(1))
+            except Exception:
+                return None
+        return None
+
+    def _explain_filter_skip_amazon_80(
+        self,
+        *,
+        reason: str,
+        dest_channel_id: int,
+        message: discord.Message,
+        asin: str,
+    ) -> None:
+        if not self._explainable_enabled():
+            return
+        ex = self._explainable()
+        src_id = int(message.channel.id)
+        pct = self._filter_reason_discount_pct(reason)
+        bottom = "BLOCKED / NO ROUTE — this lead did not pass the strict gate for the amazon-80-off bucket."
+        saw = [
+            f"Source channel <#{src_id}> ({self._source_channel_log_label(src_id)})",
+            f"Target bucket <#{dest_channel_id}> requires Amazon ASIN, deal keywords, and ≥80% discount.",
+        ]
+        if asin:
+            saw.append(f"ASIN was resolved: {asin.upper()}")
+        else:
+            saw.append("No usable Amazon ASIN on this message.")
+
+        winning: List[str] = []
+        losing: List[str] = []
+        notes: List[str] = []
+
+        if reason == "no_amazon_link":
+            bottom = "BLOCKED / NO ROUTE — missing usable Amazon link/ASIN for this bucket."
+            losing.append("Gate failed: no Amazon ASIN/link to anchor the deal card.")
+            notes.append("Other buckets may still accept this message; this gate is only for the 80%-off channel.")
+        elif reason == "no_keyword":
+            losing.append('Gate failed: message text/embeds did not contain required keywords (e.g. "glitch", "price error").')
+            winning.append("If those phrases appear in the source next time, the keyword gate can pass.")
+        elif reason.startswith("discount_too_low"):
+            losing.append(
+                f"Gate failed: computed discount from list/current prices is below 80% (saw {pct if pct is not None else 'unknown'}%)."
+            )
+            winning.append("Needs both a believable before price and current price so discount can reach 80%.")
+        else:
+            losing.append(f"Gate failed: {reason}")
+
+        ex.start(
+            "FILTER SKIP (strict 80% bucket)",
+            message_id=str(message.id),
+            destination=f"<#{dest_channel_id}>",
+            decision_tag="BLOCKED / NO ROUTE",
+            filter_reason=reason,
+        )
+        ex.section(
+            3,
+            "ELI5 SUMMARY",
+            [
+                f"Bottom line: {bottom}",
+                "",
+                "What the bot saw:",
+                *[f"- {x}" for x in saw],
+                "",
+                "Final decision:",
+                "- Do not post to the 80%-off destination for this message.",
+            ],
+        )
+        win_lines = [f"- {x}" for x in winning] if winning else ["- (see losing conditions)"]
+        note_lines = [f"- {x}" for x in notes] if notes else ["- Threshold and keyword rules are fixed for this destination id."]
+        ex.section(
+            4,
+            "HUMAN DECISION SUMMARY",
+            [
+                "Winning conditions (what would pass):",
+                *win_lines,
+                "",
+                "Losing / rejected:",
+                *[f"- {x}" for x in losing],
+                "",
+                "Notes:",
+                *note_lines,
+            ],
+        )
+        ex.trace(
+            {
+                "reason": reason,
+                "dest_channel_id": str(dest_channel_id),
+                "source_channel_id": str(src_id),
+                "asin": (asin or "").upper(),
+                "discount_pct_seen": "" if pct is None else str(pct),
+            }
+        )
+        ex.emit()
+
+    def _explain_ebay_sold_comps_outcome(
+        self,
+        *,
+        trace_acc: Dict[str, Any],
+        message_id: str,
+        dest_channel_id: Optional[int],
+        source_channel_id: Optional[int],
+        source_label: Optional[str],
+        title_sample: str,
+        ebay_err: Optional[str],
+        had_any_comp_data: bool,
+    ) -> None:
+        if not self._explainable_enabled():
+            return
+        pw_fail = int(trace_acc.get("pw_fail_count") or 0)
+        pw_skip = int(trace_acc.get("pw_skip_crash_count") or 0)
+        err_s = (ebay_err or "").strip()
+        if pw_fail == 0 and pw_skip == 0 and not err_s:
+            return
+
+        ex = self._explainable()
+        ex.start(
+            "EBAY SOLD COMPS",
+            message_id=message_id,
+            destination=(f"<#{dest_channel_id}>" if dest_channel_id else ""),
+            source=(f"<#{source_channel_id}>" if source_channel_id else ""),
+            source_label=source_label or "",
+        )
+
+        kw = str(trace_acc.get("ebay_keyword") or title_sample or "")[:100]
+        conds = int(trace_acc.get("conditions_attempted") or 3)
+        last_err = str(trace_acc.get("pw_fail_last_err") or "")[:160]
+        sample_url = str(trace_acc.get("pw_fail_sample_url") or "")[:120]
+
+        if pw_fail > 0:
+            bottom = (
+                "FALLBACK USED — eBay sold-listing prices were not available. "
+                "Playwright (headless browser) crashed while loading eBay search pages."
+            )
+        elif err_s:
+            bottom = f"FALLBACK USED — eBay comp scrape did not return usable ranges ({err_s[:80]})."
+        else:
+            bottom = "eBay comp fetch finished with guard-rail skips (see notes)."
+
+        saw = [
+            f"We run up to {conds} separate eBay sold searches (New, Pre-owned, Refurbished) from the product title.",
+            f"Title/keyword used (trimmed): {kw!r}" if kw else "Title/keyword: (empty)",
+        ]
+        if pw_fail > 0:
+            saw.append(f"Playwright reported failure on {pw_fail} fetch(es); last error: {last_err!r}" if last_err else f"Playwright failed {pw_fail} time(s).")
+        if pw_skip > 0:
+            saw.append(
+                f"After a crash, aiohttp sometimes still returns eBay's challenge HTML; we skip re-launching Playwright ({pw_skip} skip(s)) to avoid hammering a broken browser."
+            )
+
+        decision_lines = [
+            "- Amazon embed generation continues.",
+            "- eBay comp lines in the card may show N/A or omit the comps block when there is no data.",
+        ]
+        if had_any_comp_data:
+            decision_lines.insert(0, "- Some condition buckets may still have price ranges if any fetch succeeded.")
+
+        ex.section(
+            3,
+            "ELI5 SUMMARY",
+            [
+                f"Bottom line: {bottom}",
+                "",
+                "What the bot saw:",
+                *[f"- {x}" for x in saw],
+                "",
+                "Final decision:",
+                *decision_lines,
+            ],
+        )
+        ex.section(
+            4,
+            "HUMAN DECISION SUMMARY",
+            [
+                "Winning (for eBay data):",
+                "- Playwright loads real search results without crash, or aiohttp returns parseable HTML (no bot challenge).",
+                "",
+                "Losing (this run):",
+                *(
+                    ["- Playwright: Target crashed / browser disconnected (common on constrained hosts)."]
+                    if pw_fail > 0
+                    else ["- See ELI5."]
+                ),
+                "",
+                "Notes:",
+                "- This does not block posting the Amazon deal card by itself.",
+                "- Three fetches per lead is expected (one per condition); repeated log lines are normal unless aggregated here.",
+            ],
+        )
+        ex.section(
+            8,
+            "FAILURE HINTS",
+            [
+                "- If crashes persist: check Playwright/Chromium deps, memory, and `--no-sandbox` style flags on the server.",
+                "- eBay may serve a bot challenge page; challenge + Playwright crash together triggers skip-after-crash.",
+            ],
+        )
+        ex.trace(
+            {
+                "pw_fail_count": pw_fail,
+                "pw_skip_after_crash_count": pw_skip,
+                "pw_fail_last_err": last_err,
+                "pw_fail_sample_url": sample_url,
+                "ebay_scrape_err": err_s[:200],
+                "had_any_comp_data": str(bool(had_any_comp_data)),
+            }
+        )
+        ex.emit()
+
+    def _explain_forward_posted(
+        self,
+        *,
+        src_channel_id: int,
+        dest_channel_id: int,
+        path: str,
+        extra: str,
+        message_id: Optional[str],
+    ) -> None:
+        if not self._explainable_enabled():
+            return
+        label = self._source_channel_log_label(int(src_channel_id))
+        ex = self._explainable()
+        meta: Dict[str, Any] = dict(
+            decision_tag="SINGLE ROUTE",
+            path=path,
+            destination=f"<#{dest_channel_id}>",
+            source=f"<#{src_channel_id}>",
+        )
+        if message_id:
+            meta["message_id"] = message_id
+        ex.start("FORWARD (posted)", **meta)
+        lines = [
+            "Bottom line: SINGLE ROUTE — the bot posted one structured message to the destination channel.",
+            "",
+            "What the bot saw:",
+            f"- Watched source <#{src_channel_id}> ({label})",
+            f"- Routed output to <#{dest_channel_id}>",
+            "",
+            "Final decision:",
+            f"- Actual send (not a dry run); assembly path: {path}",
+        ]
+        if (extra or "").strip():
+            lines.extend(["", f"Details: {extra.strip()}"])
+        ex.section(3, "ELI5 SUMMARY", lines)
+        ex.section(
+            7,
+            "DESTINATION DECISION",
+            [
+                f"- decision_tag=SINGLE ROUTE",
+                f"- destination_id={dest_channel_id}",
+                f"- destination_mention=<#{dest_channel_id}>",
+                f"- path={path}",
+                "- simulated=no",
+            ],
+        )
+        ex.trace({"src_channel_id": str(src_channel_id), "dest_channel_id": str(dest_channel_id), "path": path, "extra": (extra or "").strip()})
+        ex.emit()
+
+    def _explain_duplicate_amz_deals_sig(self, *, channel_id: int, message_id: int) -> None:
+        if not self._explainable_enabled():
+            return
+        ex = self._explainable()
+        ex.start(
+            "DUPLICATE SKIP (gemini amz deals)",
+            message_id=str(message_id),
+            source=f"<#{channel_id}>",
+            decision_tag="DUPLICATE SKIP",
+        )
+        ex.section(
+            3,
+            "ELI5 SUMMARY",
+            [
+                "Bottom line: DUPLICATE SKIP — this cleaned deal text + Amazon URL was already forwarded recently (signature TTL window).",
+                "",
+                "What the bot saw:",
+                f"- Source message {message_id} on <#{channel_id}>",
+                "",
+                "Final decision:",
+                "- Do not post another Gemini rephrase for the same signature within the dedupe window.",
+            ],
+        )
+        ex.section(
+            4,
+            "HUMAN DECISION SUMMARY",
+            [
+                "Winning: first occurrence in the TTL window posts normally.",
+                "Losing: repeat of the same normalized content + same Amazon destination within ~6 hours.",
+            ],
+        )
+        ex.emit()
+
     def _source_channel_log_label(self, channel_id: int) -> str:
         raw = (self.config or {}).get("source_channel_log_labels") or {}
         if not isinstance(raw, dict):
@@ -1753,6 +2084,7 @@ class InstorebotForwarder:
         dest_channel_id: int,
         path: str,
         extra: str = "",
+        message_id: Optional[str] = None,
     ) -> None:
         if self._verbose_flow_logs():
             return
@@ -1766,6 +2098,13 @@ class InstorebotForwarder:
             path,
             tail,
         )
+        self._explain_forward_posted(
+            src_channel_id=int(src_channel_id),
+            dest_channel_id=int(dest_channel_id),
+            path=path,
+            extra=extra or "",
+            message_id=message_id,
+        )
 
     def _emit_startup_dashboard(self) -> None:
         """One-time readable summary: integrations + channel map (calm logs)."""
@@ -1775,6 +2114,12 @@ class InstorebotForwarder:
             "[BOOT] Log detail: %s (verbose_flow_logs=%s)",
             "calm - [FORWARD] + errors only, no per-step [FLOW:SCAN] noise" if calm else "verbose - all [FLOW:*] lines",
             (not calm),
+        )
+        log.info(
+            "[BOOT] Explainable logging: enabled=%s technical=%s (set explainable_logging_enabled=false to disable ELI5 blocks; "
+            "INSTORE_EXPLAINABLE_TECHNICAL=1 or explainable_logging_technical=true for section 6 trace)",
+            self._explainable_enabled(),
+            self._explainable_technical(),
         )
         try:
             gu = len(self.bot.guilds or [])
@@ -4602,6 +4947,7 @@ class InstorebotForwarder:
                         dest_channel_id=int(dest_channel_id),
                         path="mirror_as_is",
                         extra="",
+                        message_id=str(message.id),
                     )
                 except Exception:
                     pass
@@ -4781,6 +5127,7 @@ class InstorebotForwarder:
                 dest_channel_id=int(dest_channel_id),
                 path="affiliated_leads",
                 extra="",
+                message_id=str(message.id),
             )
         except Exception:
             return
@@ -4836,6 +5183,7 @@ class InstorebotForwarder:
         sig = self._amz_deals_signature(cleaned_block, raw_url)
         if self._amz_deals_sig_seen(sig):
             _log_flow("FILTER_SKIP", reason="amz_deals_duplicate_sig", channel_id=str(message.channel.id), message_id=str(message.id))
+            self._explain_duplicate_amz_deals_sig(channel_id=int(message.channel.id), message_id=int(message.id))
             return
 
         desc_in = self._neutralize_mentions(cleaned_block)
@@ -4906,6 +5254,7 @@ class InstorebotForwarder:
                 dest_channel_id=int(dest_channel_id),
                 path="gemini_rephrase_amz_deals",
                 extra=f"asin={asin_ex}" if asin_ex else "",
+                message_id=str(message.id),
             )
         except Exception:
             return
@@ -5311,18 +5660,21 @@ class InstorebotForwarder:
         ebay_sold_new_near = "N/A"
         ebay_upside_str = ""
         ebay_refurb_preowned_line = ""
+        ebay_trace: Dict[str, Any] = {}
         if self._ebay_scrape_enabled() and title:
             _log_flow("EBAY_START", title=(title or "")[:50])
+            scrape_return_err = ""
             try:
-                ebay_ranges, ebay_err = await self._scrape_ebay_sold_ranges(
+                ebay_ranges, scrape_return_err = await self._scrape_ebay_sold_ranges(
                     title,
                     dest_channel_id=dest_id,
                     source_channel_id=(src_id or None),
                     source_label=source_label,
+                    trace_acc=ebay_trace,
                 )
-                if ebay_err:
-                    ebay_sold_err = ebay_err
-                    _log_flow("EBAY_SCRAPE_FAIL", err=ebay_err[:120])
+                if scrape_return_err:
+                    ebay_sold_err = scrape_return_err
+                    _log_flow("EBAY_SCRAPE_FAIL", err=scrape_return_err[:120])
                 elif ebay_ranges:
                     q = self._ebay_keyword_from_title(title)
                     ebay_comps_url = self._ebay_sold_search_url(q) if q else ""
@@ -5360,6 +5712,22 @@ class InstorebotForwarder:
             except Exception as e:
                 ebay_sold_err = str(e)[:200]
                 _log_flow("EBAY_SCRAPE_EXC", err=ebay_sold_err[:120])
+            had_ebay_data = (
+                bool(ebay_comps_url)
+                or (ebay_sold_new != "N/A")
+                or (ebay_sold_pre_owned != "N/A")
+                or (ebay_sold_refurbished != "N/A")
+            )
+            self._explain_ebay_sold_comps_outcome(
+                trace_acc=ebay_trace,
+                message_id=str(message.id),
+                dest_channel_id=int(dest_id) if dest_id else None,
+                source_channel_id=int(src_id) if src_id else None,
+                source_label=source_label,
+                title_sample=(title or "")[:200],
+                ebay_err=(ebay_sold_err or scrape_return_err or None),
+                had_any_comp_data=had_ebay_data,
+            )
         elif self._ebay_scrape_enabled() and not title:
             _log_flow("EBAY_SKIP", reason="no_title")
 
@@ -5404,6 +5772,12 @@ class InstorebotForwarder:
             # Check 1: Must have Amazon link (already verified above, but double-check)
             if not asin or not det:
                 _log_flow("FILTER_SKIP", channel=dest_id, reason="no_amazon_link")
+                self._explain_filter_skip_amazon_80(
+                    reason="no_amazon_link",
+                    dest_channel_id=int(dest_id),
+                    message=message,
+                    asin=asin or "",
+                )
                 if dedupe_reserved and asin:
                     self._dedupe_release(asin)
                 return None, {"urls": urls, "amazon": {"asin": asin, "final_url": final_url, "url_used": det.url_used if det else None}, "filter_reason": "no_amazon_link"}
@@ -5427,6 +5801,12 @@ class InstorebotForwarder:
             )
             if not has_keyword:
                 _log_flow("FILTER_SKIP", channel=dest_id, reason="no_keyword")
+                self._explain_filter_skip_amazon_80(
+                    reason="no_keyword",
+                    dest_channel_id=int(dest_id),
+                    message=message,
+                    asin=asin or "",
+                )
                 if dedupe_reserved and asin:
                     self._dedupe_release(asin)
                 return None, {"urls": urls, "amazon": {"asin": asin, "final_url": final_url, "url_used": det.url_used if det else None}, "filter_reason": "no_keyword"}
@@ -5439,10 +5819,17 @@ class InstorebotForwarder:
                 if (not cur_sym) or (not bef_sym) or (cur_sym == bef_sym):
                     discount_pct = int(round(((bef_val - cur_val) / bef_val) * 100.0))
             if discount_pct is None or discount_pct < 80:
-                _log_flow("FILTER_SKIP", channel=dest_id, reason=f"discount_too_low_{discount_pct or 'none'}%")
+                fr = f"discount_too_low_{discount_pct or 'none'}%"
+                _log_flow("FILTER_SKIP", channel=dest_id, reason=fr)
+                self._explain_filter_skip_amazon_80(
+                    reason=fr,
+                    dest_channel_id=int(dest_id),
+                    message=message,
+                    asin=asin or "",
+                )
                 if dedupe_reserved and asin:
                     self._dedupe_release(asin)
-                return None, {"urls": urls, "amazon": {"asin": asin, "final_url": final_url, "url_used": det.url_used if det else None}, "filter_reason": f"discount_too_low_{discount_pct or 'none'}%"}
+                return None, {"urls": urls, "amazon": {"asin": asin, "final_url": final_url, "url_used": det.url_used if det else None}, "filter_reason": fr}
 
         tpl, tpl_key = self._pick_template(dest_id, enrich_failed=False)
         _log_flow("TEMPLATE", key=tpl_key)
@@ -5612,6 +5999,7 @@ class InstorebotForwarder:
                 dest_channel_id=int(dest_id),
                 path="amazon_embed",
                 extra=ex,
+                message_id=str(message.id),
             )
             if reserved and asin:
                 self._dedupe_commit(asin)
