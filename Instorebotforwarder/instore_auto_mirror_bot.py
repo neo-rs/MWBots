@@ -17,6 +17,7 @@ import asyncio
 import html as _html
 import hashlib
 import hmac
+import importlib.util
 import json
 import logging
 import os
@@ -41,10 +42,22 @@ if str(_REPO_ROOT) not in sys.path:
 from mirror_world_config import load_config_with_secrets, is_placeholder_secret, mask_secret
 from RSForwarder import affiliate_rewriter
 
-try:
-    from explainable_log import ExplainableLog
-except ImportError:
-    from Instorebotforwarder.explainable_log import ExplainableLog
+
+def _load_explainable_log_class() -> Any:
+    """Load explainable_log.py from this directory (Oracle: mirror-world/Instorebotforwarder, not a package)."""
+    path = Path(__file__).resolve().parent / "explainable_log.py"
+    spec = importlib.util.spec_from_file_location("instore_explainable_log", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Instorebotforwarder ExplainableLog: file not found or unloadable: {path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    cls = getattr(mod, "ExplainableLog", None)
+    if cls is None:
+        raise ImportError(f"Instorebotforwarder ExplainableLog: class missing in {path}")
+    return cls
+
+
+ExplainableLog = _load_explainable_log_class()
 
 log = logging.getLogger("instorebotforwarder")
 
