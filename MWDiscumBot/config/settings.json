@@ -9,7 +9,7 @@
                              "663388213964046336"
                          ],
     "mirrorworld_server_id":  "1431314516364230689",
-    "duplicate_ttl_seconds":  10,
+    "duplicate_ttl_seconds":  180,
     "skip_webhook_messages":  false,
     "skip_webhook_usernames":  [
                                   "Rerouter"

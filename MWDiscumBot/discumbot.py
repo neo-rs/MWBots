@@ -42,6 +42,7 @@ import discum
 import re
 import threading
 import platform
+from urllib.parse import urlparse
 
 import subprocess
 
@@ -614,10 +615,11 @@ def write_error_log(entry: Dict[str, Any], bot_type: str = "unknown") -> None:
 _discumbot_logger = None
 
 try:
-    _DUPLICATE_TTL_SECONDS = max(0, int(float(cfg_get("DUPLICATE_TTL_SECONDS", "10") or "10")))
+    _DUPLICATE_TTL_SECONDS = max(0, int(float(cfg_get("DUPLICATE_TTL_SECONDS", "180") or "180")))
 except Exception:
-    _DUPLICATE_TTL_SECONDS = 10
-_RECENT_MESSAGE_HASHES: Dict[str, float] = {}  # Key: "channel_id:hash", Value: timestamp
+    _DUPLICATE_TTL_SECONDS = 180
+_RECENT_MESSAGE_HASHES: Dict[str, float] = {}  # Key: scope:guild:hash, Value: timestamp
+_RECENT_MESSAGE_HASHES_LOCK = threading.Lock()
 try:
     _SHORT_EMBED_CHAR_THRESHOLD = max(0, int(float(cfg_get("SHORT_EMBED_CHAR_THRESHOLD", "50") or "50")))
 except Exception:
@@ -1712,17 +1714,37 @@ def _resolve_destination_channel_name(dest_channel_id: Optional[int]) -> str:
     _DEST_CHANNEL_NAME_CACHE[dest_id_int] = {"name": resolved_name, "cached_at": now}
     return resolved_name
 
-# Duplicate detection helpers (matches datamanagerbot logic)
+# Duplicate detection helpers (stable across channels in the same source guild)
+def _normalize_body_for_dedupe_hash(content: str) -> str:
+    """Normalize message body so the same deal in multiple channels hashes the same."""
+    s = str(content or "").strip()
+    if not s:
+        return ""
+    # Unwrap Discord spoiler / formatting noise we still want to treat as same body
+    s = re.sub(r"\[([^\]]*)\]\((https?://[^)\s<>]+)\)", r"\2", s, flags=re.IGNORECASE)
+    s = re.sub(r"<(https?://[^>\s]+)>", r"\1", s, flags=re.IGNORECASE)
+
+    def _norm_url_token(m: Any) -> str:
+        u = m.group(0)
+        try:
+            p = urlparse(u)
+            if p.netloc:
+                path = (p.path or "").rstrip("/")
+                return f"{p.scheme}://{p.netloc.lower()}{path}".lower()
+        except Exception:
+            pass
+        return u.split("?", 1)[0].lower()
+
+    s = re.sub(r"https?://[^\s<>\[\]]+", _norm_url_token, s, flags=re.IGNORECASE)
+    return s[:12000]
+
+
 def _hash_message_content_for_duplicate_check(message_dict: Dict[str, Any]) -> str:
-    """Create a hash of message content for duplicate detection (matches datamanagerbot logic)."""
-    content = (message_dict.get("content") or "")[:500]  # First 500 chars like datamanagerbot
-    # Normalize URLs in content so tracking params don't defeat dedupe.
-    try:
-        content = re.sub(r"https?://\\S+", "<url>", str(content), flags=re.IGNORECASE)
-    except Exception:
-        content = str(content)
-    
-    embed_urls = []
+    """Create a hash of message content + embed/attachment URLs for duplicate detection."""
+    raw = str(message_dict.get("content") or "")
+    content = _normalize_body_for_dedupe_hash(raw[:20000])
+
+    embed_urls: List[str] = []
     embeds = message_dict.get("embeds") or []
     if isinstance(embeds, list):
         for e in embeds:
@@ -1734,13 +1756,12 @@ def _hash_message_content_for_duplicate_check(message_dict: Dict[str, Any]) -> s
                     embed_url = str(embed_url).split("?", 1)[0]
                 except Exception:
                     embed_url = str(embed_url)
-                embed_urls.append(embed_url)
-            # Also include embed title for better duplicate detection
+                embed_urls.append(embed_url.lower())
             embed_title = e.get("title") or ""
             if embed_title:
-                embed_urls.append(embed_title[:100])  # First 100 chars of title
-    
-    attachment_urls = []
+                embed_urls.append(str(embed_title)[:160].lower())
+
+    attachment_urls: List[str] = []
     attachments = message_dict.get("attachments") or []
     if isinstance(attachments, list):
         for a in attachments:
@@ -1752,13 +1773,10 @@ def _hash_message_content_for_duplicate_check(message_dict: Dict[str, Any]) -> s
                     attach_url = str(attach_url).split("?", 1)[0]
                 except Exception:
                     attach_url = str(attach_url)
-                attachment_urls.append(attach_url)
-    
-    # Combine all hashes - use ALL URLs, not just first (matches datamanagerbot)
-    # Use deterministic MD5 hash instead of Python's hash() for consistency across runs
-    all_text = content + "|".join(sorted(embed_urls)) + "|".join(sorted(attachment_urls))
-    combined_hash = hashlib.md5(all_text.encode('utf-8')).hexdigest()
-    return str(combined_hash)
+                attachment_urls.append(attach_url.lower())
+
+    all_text = content + "|" + "|".join(sorted(embed_urls)) + "|" + "|".join(sorted(attachment_urls))
+    return hashlib.md5(all_text.encode("utf-8")).hexdigest()
 
 def _fetch_full_message(channel_id: int, message_id: str) -> Optional[Dict[str, Any]]:
     """Fetch complete message data from REST API (content + embeds) to get full data when gateway truncates."""
@@ -1863,98 +1881,89 @@ def _maybe_enrich_message_embeds(message_dict: Dict[str, Any], channel_id: int, 
     """Legacy function - now calls _maybe_enrich_message for full enrichment."""
     _maybe_enrich_message(message_dict, channel_id, message_id)
 
-def _should_skip_due_to_duplicate(message_dict: Dict[str, Any], channel_id: int, *, dedupe_scope: Optional[str] = None) -> bool:
+def _should_skip_due_to_duplicate(
+    message_dict: Dict[str, Any],
+    channel_id: int,
+    *,
+    dedupe_scope: Optional[str] = None,
+    source_guild_id: Any = None,
+) -> bool:
     """
-    Return True if an equivalent message was forwarded very recently.
-
-    IMPORTANT: We dedupe by destination scope when possible (webhook URL / mapping),
-    not only by source channel id, so multiple sources routing into the same destination
-    don't double-post the same deal.
+    Return True if equivalent content was forwarded recently for the same destination mapping
+    and the same source guild. Multiple monitored channels in one server posting the same deal
+    map to one forward within DUPLICATE_TTL_SECONDS.
     """
     global _RECENT_MESSAGE_HASHES
     try:
-        # Create hash key like datamanagerbot: "channel_id:hash"
         content_hash = _hash_message_content_for_duplicate_check(message_dict)
         scope = str(dedupe_scope).strip() if dedupe_scope else str(channel_id)
         if not scope:
             scope = str(channel_id)
-        key = f"{scope}:{content_hash}"
-        
+        gid_key = "0"
+        try:
+            if source_guild_id is not None and str(source_guild_id).strip():
+                gid_key = str(int(source_guild_id))
+        except Exception:
+            gid_key = str(source_guild_id).strip() or "0"
+        key = f"{scope}:guild:{gid_key}:{content_hash}"
+
         now = time.time()
-        last = _RECENT_MESSAGE_HASHES.get(key, 0)
-        
-        if now - last < _DUPLICATE_TTL_SECONDS:
-            # Log duplicate detection (matches datamanagerbot format)
-            try:
-                author = message_dict.get("author", {}) or {}
-                if not isinstance(author, dict):
-                    author = {}
-                author_name = author.get("username") or author.get("name") or "Unknown"
-                
-                # Try to get channel name (fallback to ID)
-                channel_name = f"Channel-{channel_id}"
+        with _RECENT_MESSAGE_HASHES_LOCK:
+            last = _RECENT_MESSAGE_HASHES.get(key, 0)
+
+            if now - last < _DUPLICATE_TTL_SECONDS:
+                time_since = round(now - last, 1)
                 try:
-                    if hasattr(bot, 'gateway') and bot.gateway and bot.gateway.session:
-                        guild_id = message_dict.get("guild_id")
-                        if guild_id:
-                            guild_data = bot.gateway.session.guild(str(guild_id))
-                            if guild_data:
-                                channels = None
-                                if isinstance(guild_data, dict):
-                                    channels = guild_data.get("channels", {})
-                                elif hasattr(guild_data, "channels"):
-                                    channels = guild_data.channels
-                                
-                                if isinstance(channels, dict):
-                                    channel_data = channels.get(channel_id) or channels.get(str(channel_id))
-                                    if channel_data:
-                                        if isinstance(channel_data, dict):
-                                            channel_name = channel_data.get("name", channel_name)
-                                        elif hasattr(channel_data, "name"):
-                                            channel_name = channel_data.name
+                    author = message_dict.get("author", {}) or {}
+                    if not isinstance(author, dict):
+                        author = {}
+                    author_name = author.get("username") or author.get("name") or "Unknown"
+
+                    channel_name = f"Channel-{channel_id}"
+                    try:
+                        if hasattr(bot, "gateway") and bot.gateway and bot.gateway.session:
+                            guild_id = message_dict.get("guild_id")
+                            if guild_id:
+                                guild_data = bot.gateway.session.guild(str(guild_id))
+                                if guild_data:
+                                    channels = None
+                                    if isinstance(guild_data, dict):
+                                        channels = guild_data.get("channels", {})
+                                    elif hasattr(guild_data, "channels"):
+                                        channels = guild_data.channels
+
+                                    if isinstance(channels, dict):
+                                        channel_data = channels.get(channel_id) or channels.get(str(channel_id))
+                                        if channel_data:
+                                            if isinstance(channel_data, dict):
+                                                channel_name = channel_data.get("name", channel_name)
+                                            elif hasattr(channel_data, "name"):
+                                                channel_name = channel_data.name
+                    except Exception:
+                        pass
+
+                    content_preview = (message_dict.get("content") or "")[:80]
+
+                    log_forwarder(
+                        f"DUPLICATE SKIP: same body/embeds from source guild {gid_key} within {time_since}s (ttl={_DUPLICATE_TTL_SECONDS}s)",
+                        channel_name=channel_name,
+                        user_name=author_name,
+                    )
+                    if VERBOSE:
+                        if content_preview:
+                            log_info(f"  Content preview: {content_preview}...")
+                        log_info(f"  Dedupe scope: {scope} | destination+guild+content hash")
                 except Exception:
-                    pass
-                
-                time_since = round(now - last, 1)
-                content_preview = (message_dict.get("content") or "")[:80]
-                
-                embed_urls = []
-                embeds = message_dict.get("embeds") or []
-                if isinstance(embeds, list):
-                    for e in embeds:
-                        if isinstance(e, dict):
-                            url = e.get("url") or ""
-                            if url:
-                                embed_urls.append(url)
-                
-                log_forwarder(
-                    f"Duplicate message detected (posted {time_since}s ago)",
-                    channel_name=channel_name,
-                    user_name=author_name
-                )
-                if VERBOSE:
-                    if content_preview:
-                        log_info(f"  Content preview: {content_preview}...")
-                    if embed_urls:
-                        log_info(f"  Embed URLs: {embed_urls[0][:80]}...")
-                    if dedupe_scope:
-                        log_info("  Note: Duplicate check prevents same content routed to the SAME destination mapping")
-                    else:
-                        log_info("  Note: Duplicate check prevents same content in SAME source channel")
-            except Exception:
-                time_since = round(now - last, 1)
-                log_forwarder(f"Duplicate message detected (posted {time_since}s ago)")
-            
-            return True
-        
-        # Store this message hash
-        _RECENT_MESSAGE_HASHES[key] = now
-        
-        # Clean old entries (keep only last 1000, like datamanagerbot)
-        if len(_RECENT_MESSAGE_HASHES) > 1000:
-            cutoff_time = now - _DUPLICATE_TTL_SECONDS
-            _RECENT_MESSAGE_HASHES = {k: v for k, v in _RECENT_MESSAGE_HASHES.items() if v > cutoff_time}
-        
+                    log_forwarder(f"DUPLICATE SKIP (posted {time_since}s ago)")
+
+                return True
+
+            _RECENT_MESSAGE_HASHES[key] = now
+
+            if len(_RECENT_MESSAGE_HASHES) > 1000:
+                cutoff_time = now - (_DUPLICATE_TTL_SECONDS * 3)
+                _RECENT_MESSAGE_HASHES = {k: v for k, v in _RECENT_MESSAGE_HASHES.items() if v > cutoff_time}
+
         return False
     except Exception as e:
         if VERBOSE:
@@ -2855,29 +2864,8 @@ def message_handler(resp):
                     print(f"[D2D] [WARN] Edit sync failed for {msg_id}: {e}")
             return
 
-        # CRITICAL: Check for duplicates BEFORE enrichment (on original message content)
-        # This must happen before enrichment to catch duplicates reliably
-        # Check ALL messages (including webhooks) to prevent echo loops
-        # When discumbot forwards via webhook, that webhook message might be in a monitored channel
-        # and get forwarded again, creating duplicates - so we MUST check webhooks too
-        if channel_in_map:
-            webhook_url = (
-                CHANNEL_MAP.get(channelID)
-                or CHANNEL_MAP.get(str(channelID))
-                or ""
-            )
-            # Prefer destination-channel scope so multiple webhooks targeting the same channel
-            # don't double-post the same content.
-            dedupe_scope = webhook_url or f"src:{channelID}"
-            try:
-                meta = _resolve_webhook_destination_metadata(webhook_url) if webhook_url else {}
-                dest_cid = meta.get("channel_id") if isinstance(meta, dict) else None
-                if dest_cid:
-                    dedupe_scope = f"dest:{int(dest_cid)}"
-            except Exception:
-                pass
-            if _should_skip_due_to_duplicate(m, channelID, dedupe_scope=dedupe_scope):
-                return  # Skip duplicate (logging already done in function)
+        # Duplicate detection runs in _forward_to_webhook after the message payload is final
+        # (snapshot merge + REST enrichment in this handler), so hashes match across source channels.
 
         # Create-event replay guard (prevents replays on reconnect).
         if channelID in CHANNEL_MAP:
@@ -2922,8 +2910,7 @@ def message_handler(resp):
                     src_details = _get_source_channel_details(channelID, guildID) if guildID else None
                     src_ctx = _fmt_channel_context(channelID, details=src_details)
                     log_d2d(f"Processing message: Source {src_ctx}")
-                # Duplicate check already happened above before enrichment
-                
+
                 if _should_retry_short_embed(m):
                     restored = _apply_cached_payload_if_richer(m, reason="short embed detection")
                     if restored and not _should_retry_short_embed(m):
@@ -3403,6 +3390,89 @@ def _extract_embed_urls(embeds: List[Dict[str, Any]]) -> List[str]:
 
 _URL_FINDER = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
 
+
+def _norm_url_for_preview_match(u: str) -> str:
+    u = str(u or "").strip().rstrip(").,]'\"")
+    try:
+        p = urlparse(u)
+        if p.netloc:
+            path = (p.path or "").rstrip("/")
+            return f"{p.scheme}://{p.netloc.lower()}{path}".lower()
+    except Exception:
+        pass
+    return u.split("?", 1)[0].lower()
+
+
+def _urls_in_text_for_link_preview_match(msg_text: str) -> set:
+    s = msg_text or ""
+    out: set = set()
+    for m in re.finditer(r"<(https?://[^>\s]+)>", s, re.IGNORECASE):
+        out.add(_norm_url_for_preview_match(m.group(1)))
+    for m in re.finditer(r"\[[^\]]*\]\((https?://[^)\s<>]+)\)", s, re.IGNORECASE):
+        out.add(_norm_url_for_preview_match(m.group(1)))
+    for u in _URL_FINDER.findall(s):
+        out.add(_norm_url_for_preview_match(u))
+    return {x for x in out if x}
+
+
+def _suppress_discord_link_previews_in_text(msg_text: str) -> str:
+    """Wrap markdown and bare http(s) links in <> so Discord does not unfurl large previews."""
+
+    if not isinstance(msg_text, str) or not msg_text.strip():
+        return msg_text
+
+    def md_sub(m: Any) -> str:
+        label, url = m.group(1), m.group(2).strip()
+        if url.startswith("<") and url.endswith(">"):
+            return m.group(0)
+        inner = url[1:-1] if (url.startswith("<") and url.endswith(">")) else url
+        return f"[{label}](<{inner}>)"
+
+    s = re.sub(r"\[([^\]]*)\]\((https?://[^)\s<>]+)\)", md_sub, msg_text, flags=re.IGNORECASE)
+
+    def bare_sub(m: Any) -> str:
+        u = m.group(1)
+        i = m.start(1)
+        if i > 0 and s[i - 1 : i] == "<":
+            return u
+        return f"<{u}>"
+
+    s = re.sub(r"(?<!<)(https?://[^\s<]+)", bare_sub, s)
+    return s
+
+
+def _drop_link_preview_embeds_covered_by_content(
+    embeds: List[Dict[str, Any]], msg_text: str
+) -> List[Dict[str, Any]]:
+    """Remove Discord link-unfurl embeds when the same URL already appears in the message body."""
+    cand = _urls_in_text_for_link_preview_match(msg_text)
+    if not cand:
+        return list(embeds or [])
+    out: List[Dict[str, Any]] = []
+    for e in embeds or []:
+        if not isinstance(e, dict):
+            out.append(e)
+            continue
+        u = str(e.get("url") or "").strip()
+        if u and _norm_url_for_preview_match(u) in cand:
+            continue
+        out.append(e)
+    return out
+
+
+def _forward_dedupe_scope(channel_id: int, webhook: str) -> str:
+    wh = str(webhook or "").strip()
+    scope = wh or f"src:{int(channel_id)}"
+    try:
+        meta = _resolve_webhook_destination_metadata(wh) if wh else {}
+        dest_cid = meta.get("channel_id") if isinstance(meta, dict) else None
+        if dest_cid:
+            scope = f"dest:{int(dest_cid)}"
+    except Exception:
+        pass
+    return scope
+
+
 def _maybe_replace_single_content_url_with_embed_url(msg_text: str, embed_urls: List[str]) -> Tuple[str, bool]:
     """
     If the message body contains a single URL and an embed URL exists (often the resolved/raw URL),
@@ -3630,7 +3700,15 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
                 embeds = m.get("embeds", []) or embeds
         except Exception:
             pass
-        
+
+        if not edit_existing:
+            try:
+                scope = _forward_dedupe_scope(channelID, webhook)
+                if _should_skip_due_to_duplicate(m, channelID, dedupe_scope=scope, source_guild_id=guildID):
+                    return
+            except Exception:
+                pass
+
         # Log original content length from Discord gateway for debugging
         if VERBOSE and content:
             print(f"[DEBUG] Original content from gateway: {len(content)} chars, preview: '{content[:100] if len(content) > 100 else content}...'")
@@ -3680,7 +3758,13 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
             msg_text = _sanitize_mentions_for_destination(msg_text, guild_id=gid_int)
     except Exception:
         pass
-    
+
+    try:
+        if isinstance(msg_text, str) and msg_text.strip():
+            msg_text = _suppress_discord_link_previews_in_text(msg_text)
+    except Exception:
+        pass
+
     # Log content length for debugging truncation issues
     if VERBOSE and msg_text:
         content_len = len(msg_text)
@@ -3758,7 +3842,12 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
             if VERBOSE:
                 print(f"[WARN] Invalid embed format, skipping")
             continue
-    
+
+    try:
+        valid_embeds = _drop_link_preview_embeds_covered_by_content(valid_embeds, str(msg_text or ""))
+    except Exception:
+        pass
+
     # Process attachments for webhook payload
     attachment_urls: List[str] = []
     file_payloads: List[Tuple[str, bytes]] = []
@@ -3810,7 +3899,14 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
     try:
         leftover_urls = [url for url in attachment_urls if url and url not in downloaded_urls]
         if leftover_urls:
-            appendix = "\n".join(leftover_urls[:10])
+            wrapped: List[str] = []
+            for u in leftover_urls[:10]:
+                u = str(u).strip()
+                if u.startswith("<") and u.endswith(">"):
+                    wrapped.append(u)
+                else:
+                    wrapped.append(f"<{u}>")
+            appendix = "\n".join(wrapped)
             if appendix:
                 # Keep under 2000 chars if possible (chunking will handle longer anyway)
                 msg_text = (str(msg_text or "").rstrip() + "\n\n" + appendix).strip()
