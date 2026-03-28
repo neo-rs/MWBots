@@ -18,8 +18,7 @@
     1438970053352751215
   ],
   "source_channel_routes": {
-    "1438969997178306661": "deals",
-    "1435985494356918333": "deals"
+    "1438969997178306661": "deals"
   },
   "output_channels": {
     "personal": "1464853876988706969",
@@ -117,6 +116,11 @@
     }
   },
   "simple_forward_mappings": {
+    "1435985494356918333": {
+      "dest_channel_id": 1487446697146712296,
+      "mode": "price_error_embed_forward",
+      "dedupe_ttl_s": 86400
+    },
     "1435268379521847369": {
       "dest_channel_id": 1457129505050202377,
       "merge_window_s": 3.0,

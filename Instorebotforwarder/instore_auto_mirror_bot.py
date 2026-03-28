@@ -222,6 +222,7 @@ _CALM_FLOW_STAGES = frozenset(
         "SKIP_OOS",
         "EBAY_PW_FAIL",
         "EBAY_PW_SKIP_AFTER_CRASH",
+        "PRICE_ERR_SKIP",
     }
 )
 # Gemini: in calm mode, log only failed/problem outcomes (not every api_request/cache_hit).
@@ -451,6 +452,9 @@ class InstorebotForwarder:
         # Route-specific dedupe for gemini_rephrase_amz_deals
         self._amz_deals_sig_sent_ts: Dict[str, float] = {}
         self._amz_deals_sig_ttl_s: float = 6 * 60 * 60  # 6 hours
+
+        # price_error_embed_forward: strict per-URL (or body-hash) dedupe per destination channel
+        self._price_error_url_sent_ts: Dict[str, float] = {}
 
         self._amazon_scrape_cache: Dict[str, Dict[str, str]] = {}
         self._amazon_scrape_cache_ts: Dict[str, float] = {}
@@ -4551,6 +4555,91 @@ class InstorebotForwarder:
         block = "\n".join([x for x in lines if str(x).strip()]).strip()
         return block
 
+    def _price_error_text_body(self, message: discord.Message) -> str:
+        """Plain text for price-error forward: content + embed title/desc/fields (no attachment URLs)."""
+        lines: List[str] = []
+        content = (message.content or "").strip()
+        if content:
+            lines.append(content)
+        try:
+            for e in (message.embeds or []):
+                eparts: List[str] = []
+                t = (getattr(e, "title", None) or "").strip()
+                if t:
+                    eparts.append(t)
+                d = (getattr(e, "description", None) or "").strip()
+                if d:
+                    eparts.append(d)
+                for f in (getattr(e, "fields", None) or []):
+                    fn = (getattr(f, "name", None) or "").strip()
+                    fv = (getattr(f, "value", None) or "").strip()
+                    row = "\n".join([x for x in (fn, fv) if x])
+                    if row:
+                        eparts.append(row)
+                if eparts:
+                    lines.append("\n\n".join(eparts))
+        except Exception:
+            pass
+        return "\n".join([x for x in lines if str(x).strip()]).strip()
+
+    def _first_attachment_image_url(self, message: discord.Message) -> str:
+        for att in (message.attachments or []):
+            ct = (getattr(att, "content_type", None) or "").lower()
+            fn = (getattr(att, "filename", "") or "").lower()
+            if ct.startswith("image/") or fn.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
+                u = str(getattr(att, "url", "") or "").strip()
+                if u:
+                    return u
+        return ""
+
+    def _normalize_url_for_price_error_dedupe(self, url: str) -> str:
+        raw = (url or "").strip()
+        if not raw:
+            return ""
+        raw = affiliate_rewriter.normalize_input_url(raw) or raw
+        try:
+            p = urlparse(raw)
+            scheme = (p.scheme or "https").lower()
+            host = (p.netloc or "").lower()
+            path = (p.path or "").rstrip("/")
+            qs = (p.query or "").strip()
+            base = f"{scheme}://{host}{path}"
+            return f"{base}?{qs}" if qs else base
+        except Exception:
+            return raw.lower()
+
+    def _price_error_dedupe_ttl_s(self, mapping: Dict[str, Any]) -> float:
+        try:
+            v = float(
+                mapping.get("dedupe_ttl_s")
+                or (self.config or {}).get("price_error_embed_dedupe_ttl_s")
+                or 86400.0
+            )
+        except Exception:
+            v = 86400.0
+        return max(120.0, min(v, 7 * 24 * 3600.0))
+
+    def _price_error_dedupe_prune(self, ttl: float) -> None:
+        now = time.time()
+        for k, ts in list(self._price_error_url_sent_ts.items()):
+            if (now - float(ts)) > ttl:
+                self._price_error_url_sent_ts.pop(k, None)
+
+    def _price_error_dedupe_keys(self, dest_channel_id: int, urls: List[str], body_normalized: str) -> List[str]:
+        did = int(dest_channel_id)
+        keys: List[str] = []
+        if urls:
+            for u in urls:
+                n = self._normalize_url_for_price_error_dedupe(u)
+                if n:
+                    keys.append(f"{did}:url:{n}")
+            return keys
+        b = (body_normalized or "").strip()
+        if not b:
+            return []
+        h = hashlib.sha256(b.encode("utf-8", errors="ignore")).hexdigest()[:40]
+        return [f"{did}:body:{h}"]
+
     def _first_source_embed_media_url(self, message: discord.Message) -> str:
         """First image or thumbnail URL from message embeds (for outbound simple-forward embeds)."""
         try:
@@ -4976,6 +5065,9 @@ class InstorebotForwarder:
         if mode == "gemini_rephrase_amz_deals":
             await self._maybe_gemini_rephrase_amz_deals_forward(message, int(dest_channel_id), mapping)
             return True
+        if mode == "price_error_embed_forward":
+            await self._maybe_price_error_embed_forward(message, int(dest_channel_id), mapping)
+            return True
 
         # Mirror-as-is: forward one message immediately with content + attachments + embeds (no merge, no scrape).
         if mapping.get("mirror_as_is"):
@@ -5083,6 +5175,98 @@ class InstorebotForwarder:
         if to_flush:
             await self._simple_flush_buffer(to_flush)
         return True
+
+    async def _maybe_price_error_embed_forward(
+        self,
+        message: discord.Message,
+        dest_channel_id: int,
+        mapping: Dict[str, Any],
+    ) -> None:
+        """
+        Price Error / Glitched: always one outbound Discord embed (plain source OK).
+        Strict dedupe: any normalized http(s) URL in the message matches a recent forward → skip.
+        If there are no URLs, dedupe by normalized body hash.
+        """
+        if not message.guild:
+            return
+
+        ttl = self._price_error_dedupe_ttl_s(mapping)
+        self._price_error_dedupe_prune(ttl)
+
+        body_raw = self._price_error_text_body(message).strip()
+        urls = self._collect_message_urls(message)
+        desc = self._neutralize_mentions(body_raw).strip()
+        if not desc and urls:
+            desc = "\n".join(urls).strip()
+        if not desc:
+            _log_flow(
+                "PRICE_ERR_SKIP",
+                reason="empty",
+                channel_id=str(message.channel.id),
+                message_id=str(message.id),
+            )
+            return
+
+        keys = self._price_error_dedupe_keys(int(dest_channel_id), urls, desc)
+        if not keys:
+            _log_flow(
+                "PRICE_ERR_SKIP",
+                reason="no_dedupe_keys",
+                channel_id=str(message.channel.id),
+                message_id=str(message.id),
+            )
+            return
+
+        now = time.time()
+        for k in keys:
+            ts = self._price_error_url_sent_ts.get(k)
+            if ts is not None and (now - float(ts)) <= ttl:
+                _log_flow(
+                    "PRICE_ERR_SKIP",
+                    reason="duplicate",
+                    channel_id=str(message.channel.id),
+                    message_id=str(message.id),
+                    dest_channel_id=str(dest_channel_id),
+                )
+                return
+
+        ch = self.bot.get_channel(int(dest_channel_id))
+        if ch is None:
+            try:
+                ch = await self.bot.fetch_channel(int(dest_channel_id))
+            except Exception:
+                ch = None
+        if not isinstance(ch, (discord.TextChannel, discord.Thread, discord.DMChannel)):
+            return
+
+        embed_url = (urls[0] if urls else "").strip()
+        if len(desc) > 4090:
+            desc = desc[:4087] + "..."
+        embed = discord.Embed(description=desc, url=embed_url if embed_url else None)
+
+        img_u = self._first_attachment_image_url(message) or self._first_source_embed_media_url(message)
+        if img_u:
+            try:
+                embed.set_image(url=img_u)
+            except Exception:
+                pass
+
+        try:
+            await ch.send(embeds=[embed], allowed_mentions=discord.AllowedMentions.none())
+        except Exception:
+            return
+
+        t_commit = time.time()
+        for k in keys:
+            self._price_error_url_sent_ts[k] = t_commit
+
+        self._log_message_forward_summary(
+            src_channel_id=int(message.channel.id),
+            dest_channel_id=int(dest_channel_id),
+            path="price_error_embed_forward",
+            extra=f"keys={len(keys)}",
+            message_id=str(message.id),
+        )
 
     async def _maybe_affiliated_leads_forward(self, message: discord.Message, dest_channel_id: int, mapping: Dict[str, Any]) -> None:
         """
