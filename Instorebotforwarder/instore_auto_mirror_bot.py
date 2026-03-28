@@ -17,7 +17,6 @@ import asyncio
 import html as _html
 import hashlib
 import hmac
-import importlib.util
 import json
 import logging
 import os
@@ -27,7 +26,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlparse, urljoin
 
 import discord
@@ -43,21 +42,67 @@ from mirror_world_config import load_config_with_secrets, is_placeholder_secret,
 from RSForwarder import affiliate_rewriter
 
 
-def _load_explainable_log_class() -> Any:
-    """Load explainable_log.py from this directory (Oracle: mirror-world/Instorebotforwarder, not a package)."""
-    path = Path(__file__).resolve().parent / "explainable_log.py"
-    spec = importlib.util.spec_from_file_location("instore_explainable_log", path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Instorebotforwarder ExplainableLog: file not found or unloadable: {path}")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    cls = getattr(mod, "ExplainableLog", None)
-    if cls is None:
-        raise ImportError(f"Instorebotforwarder ExplainableLog: class missing in {path}")
-    return cls
+class ExplainableLog:
+    """Explainable logging (ELI5 + optional technical trace). Inlined so deploy sync only needs this file."""
 
+    def __init__(
+        self,
+        logger: logging.Logger,
+        *,
+        enabled: bool,
+        technical: bool,
+        banner: str = "INSTOREBOTFORWARDER",
+    ) -> None:
+        self._logger = logger
+        self._enabled = bool(enabled)
+        self._technical = bool(technical)
+        self._banner = banner
+        self._lines: List[str] = []
 
-ExplainableLog = _load_explainable_log_class()
+    def start(self, flow_name: str, **meta: Any) -> ExplainableLog:
+        if not self._enabled:
+            return self
+        self._lines.clear()
+        self._lines.append("=" * 78)
+        head = f"{self._banner} / {flow_name}"
+        bits: List[str] = []
+        for k, v in meta.items():
+            if v is None:
+                continue
+            s = str(v).strip()
+            if s:
+                bits.append(f"{k}={s}")
+        if bits:
+            head = f"{head}  |  {' | '.join(bits)}"
+        self._lines.append(head)
+        self._lines.append("=" * 78)
+        return self
+
+    def section(self, num: int, title: str, lines: Sequence[str]) -> ExplainableLog:
+        if not self._enabled:
+            return self
+        self._lines.append("")
+        self._lines.append(f"{num}) {title}")
+        for ln in lines:
+            self._lines.append(f"   {ln}")
+        return self
+
+    def trace(self, data: Mapping[str, Any]) -> ExplainableLog:
+        if not self._enabled or not self._technical or not data:
+            return self
+        self._lines.append("")
+        self._lines.append("6) RAW FLAGS / TRACE")
+        for k, v in data.items():
+            self._lines.append(f"   {k}={v}")
+        return self
+
+    def emit(self) -> None:
+        if not self._enabled or not self._lines:
+            self._lines.clear()
+            return
+        self._logger.info("%s", "\n".join(self._lines))
+        self._lines.clear()
+
 
 log = logging.getLogger("instorebotforwarder")
 
