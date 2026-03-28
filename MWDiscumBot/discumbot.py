@@ -328,6 +328,12 @@ if _settings:
     _set_raw("SOURCE_GUILD_ID", _settings.get("source_guild_id"))
     _set_raw("MIRRORWORLD_SERVER", _settings.get("mirrorworld_server_id"))
     _set_raw("DUPLICATE_TTL_SECONDS", _settings.get("duplicate_ttl_seconds"))
+    _dup_cross = _settings.get("duplicate_dedupe_across_source_guilds")
+    if _dup_cross is not None:
+        _set_raw(
+            "DUPLICATE_DEDUPE_ACROSS_SOURCE_GUILDS",
+            "true" if _to_bool(_dup_cross, True) else "false",
+        )
     _set_raw("SHORT_EMBED_CHAR_THRESHOLD", _settings.get("short_embed_char_threshold"))
     _set_raw("SHORT_EMBED_RETRY_DELAY_SECONDS", _settings.get("short_embed_retry_delay_seconds"))
     _set_raw("SHORT_EMBED_MAX_WAIT_SECONDS", _settings.get("short_embed_max_wait_seconds"))
@@ -522,6 +528,7 @@ def explain_d2d_duplicate_skip(
     ttl_seconds: int,
     seconds_since_last: float,
     content_preview: str,
+    cross_source_dedupe: bool = False,
 ) -> None:
     """Sectioned DUPLICATE SKIP (mandatory explainable logging for dedupe)."""
     hshort = (content_hash or "")[:12]
@@ -534,26 +541,51 @@ def explain_d2d_duplicate_skip(
             f"source_channel_id={source_channel_id} (name={source_channel_name!r})",
             f"source_guild_id={source_guild_id}",
             f"author=@{author_name}",
+            f"cross_source_dedupe={'ON' if cross_source_dedupe else 'OFF'}",
         ]
     )
     _d2d_explain_section("2", "MESSAGE SNAPSHOT")
     _d2d_explain_bullets([f"content_preview={prev!r}" if prev else "content_preview=(empty or non-text)"])
     _d2d_explain_section("3", "ELI5 SUMMARY")
-    print(
-        "   Bottom line: The same normalized deal (body + embed/attachment fingerprints) from this source guild was "
-        f"already forwarded to this destination within the last {ttl_seconds}s — this message is not posted again.",
-        flush=True,
-    )
+    if cross_source_dedupe:
+        print(
+            "   Bottom line: The same normalized deal (body + embed fields + attachment URLs; embed footer ignored) was "
+            f"already forwarded to this destination within the last {ttl_seconds}s from another monitored server or channel — "
+            "this duplicate monitor post is not sent again.",
+            flush=True,
+        )
+    else:
+        print(
+            "   Bottom line: The same normalized deal (body + embed/attachment fingerprints) from this source guild was "
+            f"already forwarded to this destination within the last {ttl_seconds}s — this message is not posted again.",
+            flush=True,
+        )
     _d2d_explain_section("4", "HUMAN DECISION SUMMARY")
+    if cross_source_dedupe:
+        _d2d_explain_bullets(
+            [
+                "Yes (skip): hash matched a recent forward for the same destination scope (any monitored source guild).",
+                "No (would send): first sighting of this content hash for that destination inside the TTL window.",
+                "Cross-server: two stock-monitor apps posting the same SKU/deal to the same mirrored channel collapse to one post.",
+            ]
+        )
+    else:
+        _d2d_explain_bullets(
+            [
+                "Yes (skip): hash matched a recent forward for the same destination scope and same source guild.",
+                "No (would send): first sighting of this content hash for that guild+destination inside the TTL window.",
+                "Cross-channel: multiple source channels in one server posting the same text collapse to a single mirror post.",
+            ]
+        )
+    _d2d_explain_section("5", "RULES THAT FIRED")
     _d2d_explain_bullets(
         [
-            "Yes (skip): hash matched a recent forward for the same destination scope and same source guild.",
-            "No (would send): first sighting of this content hash for that guild+destination inside the TTL window.",
-            "Cross-channel: multiple source channels in one server posting the same text collapse to a single mirror post.",
+            _d2d_explain_rule_source(
+                "_should_skip_due_to_duplicate — destination-scoped dedupe"
+                + (" (cross-source guilds)" if cross_source_dedupe else " (per source guild)")
+            ),
         ]
     )
-    _d2d_explain_section("5", "RULES THAT FIRED")
-    _d2d_explain_bullets([_d2d_explain_rule_source("_should_skip_due_to_duplicate — guild-scoped destination dedupe")])
     if VERBOSE:
         _d2d_explain_section("6", "RAW FLAGS / TRACE")
         _d2d_explain_bullets(
@@ -563,6 +595,7 @@ def explain_d2d_duplicate_skip(
                 f"content_hash_md5_prefix={hshort}",
                 f"seconds_since_last_forward={seconds_since_last}",
                 f"ttl_seconds={ttl_seconds}",
+                f"duplicate_dedupe_across_source_guilds={'true' if cross_source_dedupe else 'false'}",
             ]
         )
     _d2d_explain_section("7", "DESTINATION DECISION")
@@ -577,6 +610,7 @@ def explain_d2d_duplicate_skip(
         [
             "If distinct deals are wrongly skipped, increase duplicate_ttl_seconds in config/settings.json or verify sources are not identical.",
             "If hashes differ for the same deal, check REST enrichment (HTTP 403 on read history yields truncated gateway bodies).",
+            "If you need duplicates when two servers post similar text, set duplicate_dedupe_across_source_guilds to false in config/settings.json.",
         ]
     )
     _d2d_explain_banner_close()
@@ -897,7 +931,11 @@ try:
     _DUPLICATE_TTL_SECONDS = max(0, int(float(cfg_get("DUPLICATE_TTL_SECONDS", "180") or "180")))
 except Exception:
     _DUPLICATE_TTL_SECONDS = 180
-_RECENT_MESSAGE_HASHES: Dict[str, float] = {}  # Key: scope:guild:hash, Value: timestamp
+try:
+    _DUPLICATE_DEDUPE_ACROSS_SOURCE_GUILDS = cfg_get_bool("DUPLICATE_DEDUPE_ACROSS_SOURCE_GUILDS", True)
+except Exception:
+    _DUPLICATE_DEDUPE_ACROSS_SOURCE_GUILDS = True
+_RECENT_MESSAGE_HASHES: Dict[str, float] = {}  # Key: dest_scope[:guild]:hash, Value: timestamp
 _RECENT_MESSAGE_HASHES_LOCK = threading.Lock()
 try:
     _SHORT_EMBED_CHAR_THRESHOLD = max(0, int(float(cfg_get("SHORT_EMBED_CHAR_THRESHOLD", "50") or "50")))
@@ -2018,27 +2056,54 @@ def _normalize_body_for_dedupe_hash(content: str) -> str:
     return s[:12000]
 
 
+def _embed_fingerprint_for_dedupe(embed: Any) -> str:
+    """
+    Stable fingerprint for one embed: title, description, url, and field name/value pairs.
+    Omits footer, author, color, and media URLs so two monitors can hash the same deal.
+    """
+    if not isinstance(embed, dict):
+        return ""
+    lines: List[str] = []
+    title = embed.get("title")
+    if title:
+        lines.append("t:" + _normalize_body_for_dedupe_hash(str(title)[:6000]))
+    desc = embed.get("description")
+    if desc:
+        lines.append("d:" + _normalize_body_for_dedupe_hash(str(desc)[:12000]))
+    url = embed.get("url")
+    if url:
+        su = str(url).split("?", 1)[0].strip().lower()
+        if su:
+            lines.append("u:" + su)
+    fields = embed.get("fields")
+    field_lines: List[str] = []
+    if isinstance(fields, list):
+        for f in fields:
+            if not isinstance(f, dict):
+                continue
+            fn = str(f.get("name") or "").strip().lower()
+            fv = _normalize_body_for_dedupe_hash(str(f.get("value") or "")[:4000])
+            field_lines.append(f"f:{fn}={fv}")
+    field_lines.sort()
+    lines.extend(field_lines)
+    lines.sort()
+    return "|".join(lines)
+
+
 def _hash_message_content_for_duplicate_check(message_dict: Dict[str, Any]) -> str:
-    """Create a hash of message content + embed/attachment URLs for duplicate detection."""
+    """Create a hash of message content + canonical embed bodies + attachment URLs for duplicate detection."""
     raw = str(message_dict.get("content") or "")
     content = _normalize_body_for_dedupe_hash(raw[:20000])
 
-    embed_urls: List[str] = []
+    embed_fingerprints: List[str] = []
     embeds = message_dict.get("embeds") or []
     if isinstance(embeds, list):
         for e in embeds:
-            if not isinstance(e, dict):
-                continue
-            embed_url = e.get("url") or ""
-            if embed_url:
-                try:
-                    embed_url = str(embed_url).split("?", 1)[0]
-                except Exception:
-                    embed_url = str(embed_url)
-                embed_urls.append(embed_url.lower())
-            embed_title = e.get("title") or ""
-            if embed_title:
-                embed_urls.append(str(embed_title)[:160].lower())
+            fp = _embed_fingerprint_for_dedupe(e)
+            if fp:
+                embed_fingerprints.append(fp)
+    embed_fingerprints.sort()
+    embed_blob = "||".join(embed_fingerprints)
 
     attachment_urls: List[str] = []
     attachments = message_dict.get("attachments") or []
@@ -2054,7 +2119,8 @@ def _hash_message_content_for_duplicate_check(message_dict: Dict[str, Any]) -> s
                     attach_url = str(attach_url)
                 attachment_urls.append(attach_url.lower())
 
-    all_text = content + "|" + "|".join(sorted(embed_urls)) + "|" + "|".join(sorted(attachment_urls))
+    sep = "\x1e"
+    all_text = sep.join([content, embed_blob, "|".join(sorted(attachment_urls))])
     return hashlib.md5(all_text.encode("utf-8")).hexdigest()
 
 def _fetch_full_message(channel_id: int, message_id: str) -> Optional[Dict[str, Any]]:
@@ -2168,9 +2234,12 @@ def _should_skip_due_to_duplicate(
     source_guild_id: Any = None,
 ) -> bool:
     """
-    Return True if equivalent content was forwarded recently for the same destination mapping
-    and the same source guild. Multiple monitored channels in one server posting the same deal
-    map to one forward within DUPLICATE_TTL_SECONDS.
+    Return True if equivalent content was forwarded recently for the same destination scope.
+
+    When duplicate_dedupe_across_source_guilds is true (default), the key is destination-scoped only,
+    so the same deal from two source servers (e.g. two monitor bots) collapses to one forward.
+
+    When false, dedupe is per (destination scope, source guild) as before.
     """
     global _RECENT_MESSAGE_HASHES
     try:
@@ -2184,7 +2253,10 @@ def _should_skip_due_to_duplicate(
                 gid_key = str(int(source_guild_id))
         except Exception:
             gid_key = str(source_guild_id).strip() or "0"
-        key = f"{scope}:guild:{gid_key}:{content_hash}"
+        if _DUPLICATE_DEDUPE_ACROSS_SOURCE_GUILDS:
+            key = f"{scope}:{content_hash}"
+        else:
+            key = f"{scope}:guild:{gid_key}:{content_hash}"
 
         now = time.time()
         with _RECENT_MESSAGE_HASHES_LOCK:
@@ -2234,6 +2306,7 @@ def _should_skip_due_to_duplicate(
                         ttl_seconds=int(_DUPLICATE_TTL_SECONDS),
                         seconds_since_last=float(time_since),
                         content_preview=str(content_preview),
+                        cross_source_dedupe=bool(_DUPLICATE_DEDUPE_ACROSS_SOURCE_GUILDS),
                     )
                 except Exception:
                     log_forwarder(f"DUPLICATE SKIP (posted {time_since}s ago)")
