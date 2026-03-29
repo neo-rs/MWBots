@@ -386,7 +386,8 @@ def log_filter(msg: str, *, event: Optional[str] = None, **fields: Any) -> None:
 
 EXPLAIN_BAR = "=" * 78
 
-# RSAdmin journal / webhook routing (match MWDiscumBot-style `journal` + `stream=` lines).
+# Bot id for JSON file logs / Botlogs only. Stdout is tagged by systemd unit; RSAdmin journal-live adds
+# `journal: datamanagerbot` when posting to Discord — do not duplicate that on printed explainable lines.
 JOURNAL_BOT_KEY = "datamanagerbot"
 
 
@@ -510,8 +511,7 @@ def _print_explainable_lines(lines: List[str], *, accent: str = "") -> None:
                 if line == EXPLAIN_BAR:
                     _builtins.print(f"{color}{line}{_S.RESET_ALL}", flush=True)
                 elif isinstance(line, str) and (
-                    line.startswith("journal=")
-                    or line.startswith("stream=")
+                    line.startswith("stream=")
                     or line.startswith("source_group=")
                     or line.startswith("route_families=")
                     or line.startswith("route_tags=")
@@ -643,7 +643,6 @@ def log_smartfilter(tag: str, decision: str, details: Optional[Dict[str, Any]] =
     lines: List[str] = [
         EXPLAIN_BAR,
         f"MWDataManagerBot / SMARTFILTER  |  {tag}  |  {decision}",
-        f"journal={JOURNAL_BOT_KEY}",
         f"stream={stream_slug}",
         f"log_prefix={_stream_search_prefix(stream_slug)}",
     ]
@@ -732,7 +731,6 @@ def log_explainable_forward_summary(
     lines: List[str] = [
         EXPLAIN_BAR,
         f"MWDataManagerBot / {flow_label}",
-        f"journal={JOURNAL_BOT_KEY}",
         f"stream={stream_slug}",
         f"log_prefix={_stream_search_prefix(stream_slug)}",
         f"source_group={str(source_group or 'unknown').strip().lower()}",
@@ -883,7 +881,6 @@ def log_explainable_major_clearance_send(
     lines = [
         EXPLAIN_BAR,
         "MWDataManagerBot / MAJOR_CLEARANCE",
-        f"journal={JOURNAL_BOT_KEY}",
         "stream=clearance",
         "log_prefix=[CLEAR]",
         "source_group=clearance",
