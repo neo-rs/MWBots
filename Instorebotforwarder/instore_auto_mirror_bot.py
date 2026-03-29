@@ -64,6 +64,7 @@ class ExplainableLog:
             return self
         self._lines.clear()
         self._lines.append("=" * 78)
+        journal_stream = str(meta.pop("journal_stream", "") or "").strip().lower().replace("-", "_")
         head = f"{self._banner} / {flow_name}"
         bits: List[str] = []
         for k, v in meta.items():
@@ -75,6 +76,8 @@ class ExplainableLog:
         if bits:
             head = f"{head}  |  {' | '.join(bits)}"
         self._lines.append(head)
+        if journal_stream:
+            self._lines.append(f"stream={journal_stream}")
         self._lines.append("=" * 78)
         return self
 
@@ -250,6 +253,25 @@ def _log_flow(stage: str, **kv: Any) -> None:
                     return
             elif stage not in _CALM_FLOW_STAGES:
                 return
+    stream_prefix = ""
+    if ctx is not None:
+        try:
+            tag_on = bool((getattr(ctx, "config", None) or {}).get("journal_stream_tag_enabled", True))
+        except Exception:
+            tag_on = True
+        if tag_on:
+            sid = _safe_int(kv.get("source_channel_id"))
+            if sid is None:
+                try:
+                    raw = getattr(ctx, "_journal_flow_source_id", None)
+                    sid = int(raw) if raw is not None else None
+                except Exception:
+                    sid = None
+            if sid is not None:
+                try:
+                    stream_prefix = str(getattr(ctx, "_journal_stream_kv")(int(sid)) or "")
+                except Exception:
+                    stream_prefix = ""
     parts: List[str] = []
     for k, v in kv.items():
         if v is None:
@@ -260,7 +282,10 @@ def _log_flow(stage: str, **kv: Any) -> None:
         if k in _FLOW_CH_KEYS and s.isdigit():
             s = f"<#{s}>"
         parts.append(f"{k}={s}")
-    log.info("[FLOW:%s] %s", stage, " ".join(parts))
+    tail = " ".join(parts)
+    if stream_prefix:
+        tail = f"{stream_prefix}{tail}"
+    log.info("[FLOW:%s] %s", stage, tail)
 
 
 class _SafeFormatDict(dict):
@@ -465,6 +490,9 @@ class InstorebotForwarder:
         self._simple_forward_lock = asyncio.Lock()
         self._simple_forward_buffers: Dict[int, _SimpleForwardBuffer] = {}
         self._simple_forward_flush_tasks: Dict[int, asyncio.Task[None]] = {}
+
+        # RSAdmin journal-live / Discord: same contract as MWDataManagerBot (`stream=` on stdout).
+        self._journal_flow_source_id: Optional[int] = None
 
         # Guard against multiple processes posting duplicates.
         self._instance_lock_fh = None
@@ -1892,6 +1920,7 @@ class InstorebotForwarder:
             destination=f"<#{dest_channel_id}>",
             decision_tag="BLOCKED / NO ROUTE",
             filter_reason=reason,
+            journal_stream=self._journal_stream_slug(src_id),
         )
         ex.section(
             3,
@@ -1960,6 +1989,7 @@ class InstorebotForwarder:
             destination=(f"<#{dest_channel_id}>" if dest_channel_id else ""),
             source=(f"<#{source_channel_id}>" if source_channel_id else ""),
             source_label=source_label or "",
+            journal_stream=self._journal_stream_slug(int(source_channel_id) if source_channel_id else None),
         )
 
         kw = str(trace_acc.get("ebay_keyword") or title_sample or "")[:100]
@@ -2068,6 +2098,7 @@ class InstorebotForwarder:
         )
         if message_id:
             meta["message_id"] = message_id
+        meta["journal_stream"] = self._journal_stream_slug(int(src_channel_id))
         ex.start("FORWARD (posted)", **meta)
         lines = [
             "Bottom line: SINGLE ROUTE — the bot posted one structured message to the destination channel.",
@@ -2105,6 +2136,7 @@ class InstorebotForwarder:
             message_id=str(message_id),
             source=f"<#{channel_id}>",
             decision_tag="DUPLICATE SKIP",
+            journal_stream=self._journal_stream_slug(int(channel_id)),
         )
         ex.section(
             3,
@@ -2139,6 +2171,26 @@ class InstorebotForwarder:
         )
         return s or "source"
 
+    def _journal_stream_tag_enabled(self) -> bool:
+        """When True, emit `stream=<slug>` on stdout for RSAdminBot journal channel splitting."""
+        return bool((self.config or {}).get("journal_stream_tag_enabled", True))
+
+    def _journal_stream_slug(self, source_channel_id: Optional[int]) -> str:
+        """Stable slug per watched source; must match RSAdminBot `journal_live.instorebotforwarder_journal_source_ids`."""
+        if source_channel_id is None:
+            return "default"
+        raw = (self.config or {}).get("journal_stream_by_source_channel_id") or {}
+        if not isinstance(raw, dict):
+            return "default"
+        key = str(int(source_channel_id))
+        s = str(raw.get(key) or "").strip().lower().replace("-", "_")
+        return s or "default"
+
+    def _journal_stream_kv(self, source_channel_id: Optional[int]) -> str:
+        if not self._journal_stream_tag_enabled():
+            return ""
+        return f"stream={self._journal_stream_slug(source_channel_id)} "
+
     def _log_message_forward_summary(
         self,
         *,
@@ -2153,7 +2205,8 @@ class InstorebotForwarder:
         label = self._source_channel_log_label(int(src_channel_id))
         tail = f" {extra}" if (extra or "").strip() else ""
         log.info(
-            "[FORWARD] posted <#%s> (%s) -> <#%s> [%s]%s",
+            "%s[FORWARD] posted <#%s> (%s) -> <#%s> [%s]%s",
+            self._journal_stream_kv(int(src_channel_id)),
             int(src_channel_id),
             label,
             int(dest_channel_id),
@@ -2210,8 +2263,8 @@ class InstorebotForwarder:
         else:
             for sid in ids:
                 lbl = self._source_channel_log_label(sid)
-                log.info("[BOOT]   <#%s>  %s", sid, lbl)
-                log.info("[BOOT]       %s", self._journal_source_mapping_line(sid))
+                log.info("%s[BOOT]   <#%s>  %s", self._journal_stream_kv(int(sid)), sid, lbl)
+                log.info("%s[BOOT]       %s", self._journal_stream_kv(int(sid)), self._journal_source_mapping_line(sid))
         log.info("[BOOT] ========== ready for messages ==========")
 
     def _gemini_max_chars(self) -> int:
@@ -5556,6 +5609,10 @@ class InstorebotForwarder:
     # Analyze + send
     # -----------------------
     async def _analyze_message(self, message: discord.Message) -> Tuple[Optional[discord.Embed], Dict[str, Any]]:
+        try:
+            self._journal_flow_source_id = int(message.channel.id)
+        except Exception:
+            pass
         content_len, embeds_n, comp_rows = self._message_shape(message)
         _log_flow("SCAN", content_len=content_len, embeds=embeds_n, components=comp_rows)
 
@@ -6176,79 +6233,84 @@ class InstorebotForwarder:
         if int(message.channel.id) in set(self._output_channel_ids()):
             return
 
-        if self._source_message_opens_with_new_deal_found(message):
-            sid = int(message.channel.id)
-            if self._verbose_flow_logs():
-                _log_flow("SKIP", reason="new_deal_found_card_top", channel_id=str(sid), message_id=str(message.id))
-            else:
-                log.info(
-                    "[FORWARD] skip <#%s> (%s) | rebroadcast card (New Deal Found pattern)",
-                    sid,
-                    self._source_channel_log_label(sid),
-                )
-            return
-
+        self._journal_flow_source_id = int(message.channel.id)
         try:
-            if self._verbose_flow_logs():
-                _log_flow("MAPPING", line=self._journal_source_mapping_line(int(message.channel.id)))
-        except Exception:
-            pass
-
-        # NEW: config-gated simple forwarding (does not affect existing Amazon mappings unless enabled per-channel)
-        try:
-            if await self._maybe_simple_forward(message):
+            if self._source_message_opens_with_new_deal_found(message):
+                sid = int(message.channel.id)
+                if self._verbose_flow_logs():
+                    _log_flow("SKIP", reason="new_deal_found_card_top", channel_id=str(sid), message_id=str(message.id))
+                else:
+                    log.info(
+                        "%s[FORWARD] skip <#%s> (%s) | rebroadcast card (New Deal Found pattern)",
+                        self._journal_stream_kv(sid),
+                        sid,
+                        self._source_channel_log_label(sid),
+                    )
                 return
-        except Exception:
-            # Never let the optional simple-forward path break existing behavior.
-            pass
 
-        embed, meta = await self._analyze_message(message)
-        if not embed:
-            return
-
-        try:
-            asin = str(((meta.get("amazon") or {}) if isinstance(meta.get("amazon"), dict) else {}).get("asin") or "").strip().upper()
-        except Exception:
-            asin = ""
-        reserved = bool(meta.get("dedupe_reserved"))
-
-        dest_id = meta.get("dest_channel_id")
-        if not dest_id:
-            _log_flow("SEND_FAIL", reason="dest_channel_missing")
-            if reserved and asin:
-                self._dedupe_release(asin)
-            return
-
-        ch = self.bot.get_channel(int(dest_id))
-        if ch is None:
             try:
-                ch = await self.bot.fetch_channel(int(dest_id))
+                if self._verbose_flow_logs():
+                    _log_flow("MAPPING", line=self._journal_source_mapping_line(int(message.channel.id)))
             except Exception:
-                ch = None
-        if not isinstance(ch, (discord.TextChannel, discord.Thread, discord.DMChannel)):
-            _log_flow("SEND_FAIL", reason="dest_channel_not_text")
-            if reserved and asin:
-                self._dedupe_release(asin)
-            return
+                pass
 
-        try:
-            await ch.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-            if self._verbose_flow_logs():
-                _log_flow("SEND_OK", dest_id=dest_id, message_id=str(message.id))
-            ex = f"asin={asin}" if asin else ""
-            self._log_message_forward_summary(
-                src_channel_id=int(message.channel.id),
-                dest_channel_id=int(dest_id),
-                path="amazon_embed",
-                extra=ex,
-                message_id=str(message.id),
-            )
-            if reserved and asin:
-                self._dedupe_commit(asin)
-        except Exception as e:
-            _log_flow("SEND_FAIL", dest_id=dest_id, err=str(e)[:200])
-            if reserved and asin:
-                self._dedupe_release(asin)
+            # NEW: config-gated simple forwarding (does not affect existing Amazon mappings unless enabled per-channel)
+            try:
+                if await self._maybe_simple_forward(message):
+                    return
+            except Exception:
+                # Never let the optional simple-forward path break existing behavior.
+                pass
+
+            embed, meta = await self._analyze_message(message)
+            if not embed:
+                return
+
+            try:
+                asin = str(((meta.get("amazon") or {}) if isinstance(meta.get("amazon"), dict) else {}).get("asin") or "").strip().upper()
+            except Exception:
+                asin = ""
+            reserved = bool(meta.get("dedupe_reserved"))
+
+            dest_id = meta.get("dest_channel_id")
+            if not dest_id:
+                _log_flow("SEND_FAIL", reason="dest_channel_missing")
+                if reserved and asin:
+                    self._dedupe_release(asin)
+                return
+
+            ch = self.bot.get_channel(int(dest_id))
+            if ch is None:
+                try:
+                    ch = await self.bot.fetch_channel(int(dest_id))
+                except Exception:
+                    ch = None
+            if not isinstance(ch, (discord.TextChannel, discord.Thread, discord.DMChannel)):
+                _log_flow("SEND_FAIL", reason="dest_channel_not_text")
+                if reserved and asin:
+                    self._dedupe_release(asin)
+                return
+
+            try:
+                await ch.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+                if self._verbose_flow_logs():
+                    _log_flow("SEND_OK", dest_id=dest_id, message_id=str(message.id))
+                ex = f"asin={asin}" if asin else ""
+                self._log_message_forward_summary(
+                    src_channel_id=int(message.channel.id),
+                    dest_channel_id=int(dest_id),
+                    path="amazon_embed",
+                    extra=ex,
+                    message_id=str(message.id),
+                )
+                if reserved and asin:
+                    self._dedupe_commit(asin)
+            except Exception as e:
+                _log_flow("SEND_FAIL", dest_id=dest_id, err=str(e)[:200])
+                if reserved and asin:
+                    self._dedupe_release(asin)
+        finally:
+            self._journal_flow_source_id = None
 
     # -----------------------
     # Discord events/commands

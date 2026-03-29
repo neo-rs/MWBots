@@ -20,6 +20,15 @@
   "source_channel_routes": {
     "1438969997178306661": "deals"
   },
+  "journal_stream_tag_enabled": true,
+  "journal_stream_by_source_channel_id": {
+    "1438969997178306661": "deals",
+    "1435066421133443174": "amazon_leads",
+    "1435985494356918333": "price_error_glitched",
+    "1435268379521847369": "sneaker",
+    "1435308472639160522": "affiliated_leads",
+    "1438970053352751215": "conversational_deals"
+  },
   "output_channels": {
     "personal": "1464853876988706969",
     "grocery": "1457129579557949551",
