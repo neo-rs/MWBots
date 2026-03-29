@@ -327,6 +327,37 @@ def is_amz_price_errors_monitor_blob(text: str) -> bool:
     return False
 
 
+_RINGINTHEDEALS_HOST_PATTERN = re.compile(r"ringinthedeals\.com", re.IGNORECASE)
+# FLIPFLUENCE-style: "Take 67% Off Product Name!"
+_TAKE_PCT_OFF_HEADLINE_PATTERN = re.compile(r"take\s+\d{1,3}\s*%\s*off\b", re.IGNORECASE)
+_REG_PAREN_PRICE_PATTERN = re.compile(r"\(\s*Reg\s*\$", re.IGNORECASE)
+
+
+def is_ringinthedeals_flipfluence_deal_blob(text: str) -> bool:
+    """
+    Templated deals from ringinthedeals.com / FLIPFLUENCE (Take N% Off, Reg $..., /deal/ links).
+    High-volume affiliate feed — use regular AMAZON bucket, not AMAZON_PROFITABLE_LEADS.
+    """
+    if not text or not str(text).strip():
+        return False
+    raw = str(text)
+    sl = raw.lower()
+    if not _RINGINTHEDEALS_HOST_PATTERN.search(sl):
+        return False
+    if _TAKE_PCT_OFF_HEADLINE_PATTERN.search(raw):
+        return True
+    if "flipfluence" in sl:
+        return True
+    if "/deal/" in sl and (_REG_PAREN_PRICE_PATTERN.search(raw) or re.search(r"\$\d", raw)):
+        return True
+    return False
+
+
+def should_skip_amazon_profitable_leads_monitor_blob(text: str) -> bool:
+    """True when message should not use the profitable-leads bucket (spam/monitor templates)."""
+    return bool(is_amz_price_errors_monitor_blob(text) or is_ringinthedeals_flipfluence_deal_blob(text))
+
+
 # Noisy deal-monitor banners / price-teaser layouts — do not use "simple" profitable-leads exception.
 _AMZ_COMPLICATED_CHECK_PRICE_PATTERN = re.compile(r"check\s+your\s+price", re.IGNORECASE)
 _AMZ_COMPLICATED_NEW_DEAL_FOUND_PATTERN = re.compile(r"\bnew\s+deal\s+found\b", re.IGNORECASE)
@@ -379,6 +410,8 @@ def is_simple_amazon_profitable_lead_blob(text: str) -> bool:
     if is_amazon_deal_complicated_monitor_blob(raw):
         return False
     if is_amz_price_errors_monitor_blob(raw):
+        return False
+    if is_ringinthedeals_flipfluence_deal_blob(raw):
         return False
     simple_signals = [
         r"on\s+sale\s+from\s+\$[\d,]+(?:\.\d{2})?\s+down\s+to\s+\$",

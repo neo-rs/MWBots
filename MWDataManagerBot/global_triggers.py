@@ -11,6 +11,8 @@ from patterns import (
     PROFITABLE_FLIP_PATTERN,
     is_amazon_deal_complicated_monitor_blob,
     is_amz_price_errors_monitor_blob,
+    is_ringinthedeals_flipfluence_deal_blob,
+    should_skip_amazon_profitable_leads_monitor_blob,
     is_simple_amazon_profitable_lead_blob,
 )
 from utils import collect_embed_strings, has_product_and_marketplace_links, normalize_message
@@ -295,7 +297,9 @@ def detect_global_triggers(
         # Instead, optionally route to a dedicated Amazon leads channel if configured.
         if amazon_hit:
             amz_pe_blob = ((text_to_check or "") + "\n" + (embed_text or "")).strip()
-            amz_monitor_template = bool(is_amz_price_errors_monitor_blob(amz_pe_blob))
+            amz_price_errors_tpl = bool(is_amz_price_errors_monitor_blob(amz_pe_blob))
+            ring_deal_feed_tpl = bool(is_ringinthedeals_flipfluence_deal_blob(amz_pe_blob))
+            skip_profitable_leads_template = bool(should_skip_amazon_profitable_leads_monitor_blob(amz_pe_blob))
             complicated_monitor = bool(is_amazon_deal_complicated_monitor_blob(amz_pe_blob))
             simple_profitable_lead = bool(is_simple_amazon_profitable_lead_blob(amz_pe_blob))
             profitable_leads_gate = (
@@ -307,18 +311,22 @@ def detect_global_triggers(
                     or simple_profitable_lead
                 )
             )
-            if profitable_leads_gate and not amz_monitor_template:
+            if profitable_leads_gate and not skip_profitable_leads_template:
                 results.append((int(cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID), "AMAZON_PROFITABLE_LEAD"))
                 log_smartfilter(
                     "AMAZON_PROFITABLE_LEAD",
                     "TRIGGER",
                     {**sf_ctx, "reason": "amazon_content_blocked_from_flips"},
                 )
-            elif profitable_leads_gate and amz_monitor_template:
+            elif profitable_leads_gate and skip_profitable_leads_template:
+                if ring_deal_feed_tpl and not amz_price_errors_tpl:
+                    skip_reason = "ringinthedeals_deal_feed_template"
+                else:
+                    skip_reason = "amz_price_errors_monitor_template"
                 log_smartfilter(
                     "AMAZON_PROFITABLE_LEAD",
                     "SKIP",
-                    {**sf_ctx, "reason": "amz_price_errors_monitor_template"},
+                    {**sf_ctx, "reason": skip_reason},
                 )
             else:
                 # Log once: Amazon content is excluded from both flip channels.

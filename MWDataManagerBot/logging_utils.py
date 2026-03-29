@@ -539,6 +539,30 @@ def _truncate_val(v: Any, max_len: int = 140) -> str:
     return s
 
 
+def _fmt_discord_channel_mention(val: Any) -> str:
+    """Discord clients resolve <#snowflake> to a clickable channel name."""
+    try:
+        n = int(val)
+        if n > 0 and len(str(n)) >= 17:
+            return f"<#{n}>"
+    except (TypeError, ValueError):
+        pass
+    try:
+        s = str(val).strip()
+        if s.isdigit() and len(s) >= 17:
+            return f"<#{int(s)}>"
+    except Exception:
+        pass
+    return str(val) if val is not None else ""
+
+
+def _human_detail_value_display(key: str, val: Any, *, max_len: int = 160) -> str:
+    k = str(key or "")
+    if k in ("source_channel_id", "dest_channel_id") or k.endswith("_channel_id"):
+        return _fmt_discord_channel_mention(val)
+    return _truncate_val(val, max_len)
+
+
 def _human_bullets_from_details(details: Dict[str, Any], *, max_items: int = 14) -> List[str]:
     """Flat, operator-readable lines from smartfilter/global context dicts."""
     skip_keys = {
@@ -562,7 +586,7 @@ def _human_bullets_from_details(details: Dict[str, Any], *, max_items: int = 14)
             continue
         if isinstance(v, (dict, list)) and k not in ("reason", "stage"):
             continue
-        bullets.append(f"- {k}: {_truncate_val(v, 160)}")
+        bullets.append(f"- {k}: {_human_detail_value_display(k, v, max_len=160)}")
         if len(bullets) >= max_items:
             break
     if not bullets:
@@ -584,6 +608,11 @@ def _eli5_smartfilter(tag: str, decision: str, details: Dict[str, Any]) -> str:
             return (
                 "This post matches the high-volume AMZ Price Errors / Divine monitor template; "
                 "the global profitable-leads shortcut is skipped so routing follows the main classifier (typically regular Amazon)."
+            )
+        if "ringinthedeals_deal_feed_template" in reason:
+            return (
+                "This post matches the ringinthedeals.com / FLIPFLUENCE templated deal layout; "
+                "profitable-leads is skipped so it routes to the regular Amazon bucket instead."
             )
         return f"Global profitable-leads trigger did not apply ({reason or 'gating'})."
     if tag_u == "FLIP_CHANNELS" and dec_u == "SKIP":
@@ -744,7 +773,7 @@ def log_explainable_forward_summary(
         [
             "1) MESSAGE INFO",
             f"- message_id: {message_id}",
-            f"- source_channel_id: {source_channel_id}",
+            f"- source_channel_id: {_fmt_discord_channel_mention(source_channel_id)}",
             f"- source_group: {source_group}",
         ]
     )
@@ -796,21 +825,22 @@ def log_explainable_forward_summary(
         mapped = db > 0 and da > 0 and db != da
         why = _classifier_why_for_tag(tag, trace)
         extra = f" | {why}" if why else ""
+        dest_disp = _fmt_discord_channel_mention(da) if da else str(da)
         if action == "sent":
             sim_note = " (simulated)" if simulation else ""
             lines.append(
-                f"- Leg {i}: SENT  tag={tag}  dest_id={da}  route_map_applied={'yes' if mapped else 'no'}{extra}{sim_note}"
+                f"- Leg {i}: SENT  tag={tag}  dest={dest_disp}  route_map_applied={'yes' if mapped else 'no'}{extra}{sim_note}"
             )
         elif action == "skip":
             age = dec.get("age_seconds")
             age_s = f"  age_s={age}" if age is not None else ""
             lines.append(
-                f"- Leg {i}: SKIPPED  tag={tag}  dest_id={da}  reason={dec.get('reason', 'unknown')}{age_s}"
+                f"- Leg {i}: SKIPPED  tag={tag}  dest={dest_disp}  reason={dec.get('reason', 'unknown')}{age_s}"
             )
         elif action == "error":
-            lines.append(f"- Leg {i}: ERROR  tag={tag}  dest_id={da}  error={_truncate_val(dec.get('error'), 120)}")
+            lines.append(f"- Leg {i}: ERROR  tag={tag}  dest={dest_disp}  error={_truncate_val(dec.get('error'), 120)}")
         else:
-            lines.append(f"- Leg {i}: {action or 'unknown'}  tag={tag}  dest_id={da}{extra}")
+            lines.append(f"- Leg {i}: {action or 'unknown'}  tag={tag}  dest={dest_disp}{extra}")
 
     lines.append("")
     lines.append("5) FAILURE HINTS")
@@ -888,13 +918,13 @@ def log_explainable_major_clearance_send(
         EXPLAIN_BAR,
         "1) MESSAGE INFO",
         f"- message_id: {message_id}",
-        f"- source_channel_id: {source_channel_id}",
+        f"- source_channel_id: {_fmt_discord_channel_mention(source_channel_id)}",
         "",
         "2) ELI5 SUMMARY",
         f"- Home Depot–style clearance embed ({variant}); forwarded to major-clearance destination.",
         "",
         "3) DESTINATION DECISION",
-        f"- SENT to dest_id={dest_channel_id}  route_map_applied={'yes' if route_map_applied else 'no'}",
+        f"- SENT to dest={_fmt_discord_channel_mention(dest_channel_id)}  route_map_applied={'yes' if route_map_applied else 'no'}",
         "",
         EXPLAIN_BAR,
     ]

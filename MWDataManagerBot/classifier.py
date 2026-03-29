@@ -15,6 +15,8 @@ from patterns import (
     AMAZON_PROFITABLE_INDICATOR_PATTERN,
     is_amazon_deal_complicated_monitor_blob,
     is_amz_price_errors_monitor_blob,
+    is_ringinthedeals_flipfluence_deal_blob,
+    should_skip_amazon_profitable_leads_monitor_blob,
     is_simple_amazon_profitable_lead_blob,
     CARDS_PATTERN,
     DISCOUNTED_STORE_PATTERN,
@@ -584,7 +586,7 @@ def select_target_channel_id(
             is_profitable = bool(
                 PROFITABLE_FLIP_PATTERN.search(text_blob) or AMAZON_PROFITABLE_INDICATOR_PATTERN.search(text_blob)
             )
-            skip_profitable_leads = bool(is_amz_price_errors_monitor_blob(text_blob))
+            skip_profitable_leads = bool(should_skip_amazon_profitable_leads_monitor_blob(text_blob))
             complicated_monitor = bool(is_amazon_deal_complicated_monitor_blob(text_blob))
             simple_profitable = bool(not is_profitable and is_simple_amazon_profitable_lead_blob(text_blob))
             profitable_for_leads_bucket = bool(
@@ -594,7 +596,12 @@ def select_target_channel_id(
                 try:
                     m = trace.setdefault("classifier", {}).setdefault("matches", {})
                     if skip_profitable_leads:
-                        m["amz_price_errors_monitor_template"] = True
+                        m["amz_price_errors_monitor_template"] = bool(
+                            is_amz_price_errors_monitor_blob(text_blob)
+                        )
+                        m["ringinthedeals_deal_feed_template"] = bool(
+                            is_ringinthedeals_flipfluence_deal_blob(text_blob)
+                        )
                     if complicated_monitor:
                         m["amazon_complicated_monitor_template"] = True
                     if simple_profitable:
@@ -853,7 +860,7 @@ def detect_all_link_types(
             is_profitable = bool(
                 PROFITABLE_FLIP_PATTERN.search(text_blob) or AMAZON_PROFITABLE_INDICATOR_PATTERN.search(text_blob)
             )
-            skip_profitable_leads = bool(is_amz_price_errors_monitor_blob(text_blob))
+            skip_profitable_leads = bool(should_skip_amazon_profitable_leads_monitor_blob(text_blob))
             complicated_monitor = bool(is_amazon_deal_complicated_monitor_blob(text_blob))
             simple_profitable = bool(not is_profitable and is_simple_amazon_profitable_lead_blob(text_blob))
             profitable_for_leads_bucket = bool(
@@ -863,7 +870,12 @@ def detect_all_link_types(
                 try:
                     m = trace.setdefault("classifier", {}).setdefault("matches", {})
                     if skip_profitable_leads:
-                        m["amz_price_errors_monitor_template"] = True
+                        m["amz_price_errors_monitor_template"] = bool(
+                            is_amz_price_errors_monitor_blob(text_blob)
+                        )
+                        m["ringinthedeals_deal_feed_template"] = bool(
+                            is_ringinthedeals_flipfluence_deal_blob(text_blob)
+                        )
                     if complicated_monitor:
                         m["amazon_complicated_monitor_template"] = True
                     if simple_profitable:
