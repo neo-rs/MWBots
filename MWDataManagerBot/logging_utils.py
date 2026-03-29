@@ -11,7 +11,7 @@ import time
 import builtins as _builtins
 import importlib
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 _BOT_DIR = Path(__file__).resolve().parent
 _CONFIG_DIR = _BOT_DIR / "config"
@@ -386,6 +386,112 @@ def log_filter(msg: str, *, event: Optional[str] = None, **fields: Any) -> None:
 
 EXPLAIN_BAR = "=" * 78
 
+# RSAdmin journal / webhook routing (match MWDiscumBot-style `journal` + `stream=` lines).
+JOURNAL_BOT_KEY = "datamanagerbot"
+
+
+def _route_tag_to_stream_family(tag: str) -> str:
+    """
+    Coarse stream bucket for operators (Instore / Online source is separate via source_group).
+    Used for Discord journal filtering, e.g. stream=amazon vs stream=affiliate.
+    """
+    t = str(tag or "").strip().upper()
+    if not t:
+        return "unknown"
+    if t == "PRICE_ERROR":
+        return "price_error"
+    if t.startswith("INSTORE") or t in ("MAJOR_STORES", "DISCOUNTED_STORES"):
+        return "instore"
+    if t in ("AMAZON", "AMAZON_PROFITABLE_LEAD", "AMAZON_FALLBACK", "AMZ_DEALS"):
+        return "amazon"
+    if t == "AFFILIATED_LINKS":
+        return "affiliate"
+    if t == "UPCOMING":
+        return "upcoming"
+    if t == "MONITORED_KEYWORD":
+        return "keyword"
+    if t == "MAJOR_CLEARANCE":
+        return "clearance"
+    if t in ("DEFAULT", "UNCLASSIFIED"):
+        return "default"
+    if t in ("PROFITABLE_FLIP", "LUNCHMONEY_FLIP"):
+        return "flip"
+    return "other"
+
+
+def _forward_stream_from_traces(dest_traces: List[Dict[str, Any]]) -> Tuple[str, List[str], List[str]]:
+    """
+    Returns (stream_slug, ordered_unique_families, tags_considered).
+    Prefer SENT legs; if none sent, use all legs so skips still show intent bucket.
+    """
+    sent_tags: List[str] = []
+    all_tags: List[str] = []
+    for leg in dest_traces or []:
+        tg = str(leg.get("tag") or "").strip()
+        if not tg:
+            continue
+        all_tags.append(tg)
+        dec = leg.get("decision") or {}
+        if dec.get("action") == "sent":
+            sent_tags.append(tg)
+    use_tags = sent_tags if sent_tags else all_tags
+    families: List[str] = []
+    for tg in use_tags:
+        fam = _route_tag_to_stream_family(tg)
+        if fam not in families:
+            families.append(fam)
+    if len(families) > 1:
+        return "multi", families, use_tags
+    if len(families) == 1:
+        return families[0], families, use_tags
+    return "unknown", [], use_tags
+
+
+def _resolve_smartfilter_stream(tag: str, details: Dict[str, Any]) -> str:
+    t = str(tag or "").strip().upper()
+    if t == "AMAZON_PROFITABLE_LEAD":
+        return "amazon"
+    if t == "FLIP_CHANNELS":
+        if bool(details.get("amazon_hit")):
+            return "amazon"
+        return "flip"
+    if t in ("PROFITABLE_FLIP", "LUNCHMONEY_FLIP"):
+        return "flip"
+    if t == "UPCOMING":
+        return "upcoming"
+    if t == "PRICE_ERROR":
+        return "price_error"
+    if t and t.replace("_", "").isalnum():
+        return _route_tag_to_stream_family(t)
+    return "smartfilter"
+
+
+def _source_group_from_smartfilter_details(details: Dict[str, Any]) -> str:
+    if bool(details.get("source_is_instore")):
+        return "instore"
+    if bool(details.get("source_is_online")):
+        return "online"
+    return ""
+
+
+def _stream_search_prefix(stream_slug: str) -> str:
+    m = {
+        "amazon": "[AMAZON]",
+        "affiliate": "[AFFIL]",
+        "instore": "[INSTORE]",
+        "flip": "[FLIP]",
+        "upcoming": "[UPCOM]",
+        "clearance": "[CLEAR]",
+        "keyword": "[KW]",
+        "default": "[DEFAULT]",
+        "price_error": "[GLITCH]",
+        "multi": "[MULTI]",
+        "unknown": "[UNKNOWN]",
+        "other": "[OTHER]",
+        "smartfilter": "[SMART]",
+    }
+    return m.get(str(stream_slug or "").lower(), "[STREAM]")
+
 
 def _cfg_verbose() -> bool:
     try:
@@ -403,6 +509,16 @@ def _print_explainable_lines(lines: List[str], *, accent: str = "") -> None:
             for line in lines:
                 if line == EXPLAIN_BAR:
                     _builtins.print(f"{color}{line}{_S.RESET_ALL}", flush=True)
+                elif isinstance(line, str) and (
+                    line.startswith("journal=")
+                    or line.startswith("stream=")
+                    or line.startswith("source_group=")
+                    or line.startswith("route_families=")
+                    or line.startswith("route_tags=")
+                    or line.startswith("variant=")
+                    or line.startswith("log_prefix=")
+                ):
+                    _builtins.print(f"{_F.GREEN}{line}{_S.RESET_ALL}", flush=True)
                 else:
                     _builtins.print(f"{_F.WHITE}{line}{_S.RESET_ALL}", flush=True)
     except Exception:
@@ -505,13 +621,19 @@ def log_smartfilter(tag: str, decision: str, details: Optional[Dict[str, Any]] =
     File / JSONL traces keep full structured payloads.
     """
     details = dict(details or {})
+    stream_slug = _resolve_smartfilter_stream(str(tag or ""), details)
+    sg_hint = _source_group_from_smartfilter_details(details)
     entry: Dict[str, Any] = {
         "level": "INFO",
         "tag": "SMARTFILTER",
         "smartfilter_tag": str(tag or ""),
         "decision": str(decision or ""),
         "details": details,
+        "journal": JOURNAL_BOT_KEY,
+        "stream": stream_slug,
     }
+    if sg_hint:
+        entry["source_group"] = sg_hint
     write_bot_log(entry)
     try:
         write_trace_log({**entry, "event": "smartfilter"})
@@ -521,12 +643,21 @@ def log_smartfilter(tag: str, decision: str, details: Optional[Dict[str, Any]] =
     lines: List[str] = [
         EXPLAIN_BAR,
         f"MWDataManagerBot / SMARTFILTER  |  {tag}  |  {decision}",
-        EXPLAIN_BAR,
-        "1) ELI5 SUMMARY",
-        _eli5_smartfilter(tag, decision, details),
-        "",
-        "2) HUMAN DECISION SUMMARY",
+        f"journal={JOURNAL_BOT_KEY}",
+        f"stream={stream_slug}",
+        f"log_prefix={_stream_search_prefix(stream_slug)}",
     ]
+    if sg_hint:
+        lines.append(f"source_group={sg_hint}")
+    lines.extend(
+        [
+            EXPLAIN_BAR,
+            "1) ELI5 SUMMARY",
+            _eli5_smartfilter(tag, decision, details),
+            "",
+            "2) HUMAN DECISION SUMMARY",
+        ]
+    )
     lines.extend(_human_bullets_from_details(details))
     lines.append("")
     lines.append("3) RULES THAT FIRED")
@@ -591,15 +722,34 @@ def log_explainable_forward_summary(
     """
     One consolidated routing block per handled message (actual Discord send, not dry-run unless flagged).
     """
+    stream_slug, stream_families, route_tags_use = _forward_stream_from_traces(dest_traces)
+    tags_unique = []
+    for t in route_tags_use:
+        if t and t not in tags_unique:
+            tags_unique.append(t)
+    tags_joined = ",".join(tags_unique[:12])
+
     lines: List[str] = [
         EXPLAIN_BAR,
         f"MWDataManagerBot / {flow_label}",
-        EXPLAIN_BAR,
-        "1) MESSAGE INFO",
-        f"- message_id: {message_id}",
-        f"- source_channel_id: {source_channel_id}",
-        f"- source_group: {source_group}",
+        f"journal={JOURNAL_BOT_KEY}",
+        f"stream={stream_slug}",
+        f"log_prefix={_stream_search_prefix(stream_slug)}",
+        f"source_group={str(source_group or 'unknown').strip().lower()}",
     ]
+    if tags_joined:
+        lines.append(f"route_tags={tags_joined}")
+    if stream_slug == "multi" and stream_families:
+        lines.append(f"route_families={','.join(stream_families)}")
+    lines.append(EXPLAIN_BAR)
+    lines.extend(
+        [
+            "1) MESSAGE INFO",
+            f"- message_id: {message_id}",
+            f"- source_channel_id: {source_channel_id}",
+            f"- source_group: {source_group}",
+        ]
+    )
     if content_preview:
         lines.append(f"- content_preview: {_truncate_val(content_preview, 200)}")
     lines.append("")
@@ -712,6 +862,10 @@ def log_explainable_forward_summary(
                 "stop_after_first": bool(stop_after_first),
                 "dest_traces": dest_traces,
                 "simulation": bool(simulation),
+                "journal": JOURNAL_BOT_KEY,
+                "stream": stream_slug,
+                "route_families": stream_families,
+                "route_tags": tags_unique,
             }
         )
     except Exception:
@@ -729,6 +883,11 @@ def log_explainable_major_clearance_send(
     lines = [
         EXPLAIN_BAR,
         "MWDataManagerBot / MAJOR_CLEARANCE",
+        f"journal={JOURNAL_BOT_KEY}",
+        "stream=clearance",
+        "log_prefix=[CLEAR]",
+        "source_group=clearance",
+        f"variant={variant}",
         EXPLAIN_BAR,
         "1) MESSAGE INFO",
         f"- message_id: {message_id}",
@@ -753,6 +912,9 @@ def log_explainable_major_clearance_send(
                 "message_id": int(message_id),
                 "source_channel_id": int(source_channel_id),
                 "dest_channel_id": int(dest_channel_id),
+                "journal": JOURNAL_BOT_KEY,
+                "stream": "clearance",
+                "source_group": "clearance",
             }
         )
     except Exception:
