@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import discord
 from discord import app_commands
@@ -4724,6 +4724,99 @@ class InstorebotForwarder:
         low = u.lower()
         return low.startswith("http://") or low.startswith("https://")
 
+    def _walmart_deal_support_or_help_url(self, url: str) -> bool:
+        """Walmart help / FAQ hosts are not valid product embed targets for deal posts."""
+        try:
+            p = urlparse((url or "").strip())
+            h = (p.netloc or "").lower()
+            path = (p.path or "").lower()
+        except Exception:
+            return False
+        if "help.walmart.com" in h or h.startswith("help."):
+            return True
+        if "walmart.com" in h and "/app/answers" in path:
+            return True
+        return False
+
+    def _walmart_deal_is_sp_track_url(self, url: str) -> bool:
+        return "/sp/track" in (url or "").lower()
+
+    def _canonical_walmart_ip_product_url(self, url: str) -> str:
+        """Strip tracking query from walmart.com/ip/... for a readable embed link."""
+        u = (url or "").strip()
+        try:
+            p = urlparse(u)
+            path = p.path or ""
+            if "/ip/" not in path.lower():
+                return u
+            scheme = (p.scheme or "https").lower()
+            netloc = p.netloc or ""
+            if not netloc:
+                return u
+            return urlunparse((scheme, netloc, path, "", "", ""))
+        except Exception:
+            return u
+
+    def _first_literal_walmart_ip_among_urls(self, urls: Sequence[str]) -> str:
+        for u in urls:
+            s = (u or "").strip()
+            low = s.lower()
+            if "walmart.com" in low and "/ip/" in low:
+                return self._canonical_walmart_ip_product_url(s)
+        return ""
+
+    async def _resolve_preferred_walmart_deal_embed_url(
+        self,
+        session: Any,
+        urls: List[str],
+        *,
+        timeout_s: float,
+        max_redirects: int,
+        current: str,
+    ) -> str:
+        """
+        Prefer a real Walmart product (/ip/) URL over help-center links and, when possible,
+        over enormous sp/track redirects (by finding /ip/ via expanding other links in the message).
+        """
+        ip_lit = self._first_literal_walmart_ip_among_urls(urls)
+        if ip_lit:
+            return ip_lit
+
+        cur = (current or "").strip()
+        if cur and (not self._walmart_deal_support_or_help_url(cur)) and "/ip/" in cur.lower():
+            return self._canonical_walmart_ip_product_url(cur)
+
+        best_non_junk = ""
+        max_tries = 12
+        n = 0
+        for u in urls:
+            if n >= max_tries:
+                break
+            cand = str(u or "").strip()
+            if not cand or not self._is_public_http_url_for_amz_deals(cand):
+                continue
+            n += 1
+            try:
+                expanded = await self._expand_url_best_effort(session, cand, timeout_s=timeout_s, max_redirects=max_redirects)
+                expanded = affiliate_rewriter.unwrap_known_query_redirects(expanded) or expanded
+            except Exception:
+                expanded = ""
+            ex = (expanded or "").strip()
+            if not ex or "walmart.com" not in ex.lower():
+                continue
+            if self._walmart_deal_support_or_help_url(ex):
+                continue
+            low = ex.lower()
+            if "/ip/" in low:
+                return self._canonical_walmart_ip_product_url(ex)
+            if not best_non_junk:
+                best_non_junk = ex
+            elif self._walmart_deal_is_sp_track_url(best_non_junk) and (not self._walmart_deal_is_sp_track_url(ex)):
+                best_non_junk = ex
+        if best_non_junk:
+            return best_non_junk
+        return cur
+
     def _amz_deal_line_is_prime_junk(self, line: str) -> bool:
         s = line.strip()
         if re.match(r"(?i)^\s*30[\s-]*day\s+prime(?:\s+free)?\s+trial\s*$", s):
@@ -4925,6 +5018,10 @@ class InstorebotForwarder:
         if re.match(r"(?i)^shop\s*->.*$", s):
             return None
         if re.match(r"(?i)^mirror\s+world\b.*$", s):
+            return None
+        if re.match(r"(?i)^paid\s*ad\s*$", s):
+            return None
+        if re.match(r"(?i)^paidad\s*$", s):
             return None
 
         # Keep promo/coupon/code lines — parser will preserve them verbatim in kept_lines.
@@ -5676,6 +5773,33 @@ class InstorebotForwarder:
                     raw_url = str(aff)
             asin_ex = asin_can
 
+        # Walmart (non-Amazon hub): never use help-center URLs as the embed link when a product URL exists.
+        if raw_url and url_kind != "amazon":
+            try:
+                host_l = (urlparse((raw_url or "").strip()).netloc or "").lower()
+            except Exception:
+                host_l = ""
+            if "walmart.com" in host_l:
+                try:
+                    import aiohttp
+
+                    w_timeout = float(
+                        (mapping.get("expand_timeout_s") or _cfg_float(self.config, "amazon_expand_timeout_s", "AMAZON_EXPAND_TIMEOUT_S") or 8.0)
+                    )
+                    w_redirects = int(
+                        mapping.get("expand_max_redirects") or _cfg_int(self.config, "amazon_expand_max_redirects", "AMAZON_EXPAND_MAX_REDIRECTS") or 8
+                    )
+                    async with aiohttp.ClientSession() as w_session:
+                        raw_url = await self._resolve_preferred_walmart_deal_embed_url(
+                            w_session,
+                            urls,
+                            timeout_s=w_timeout,
+                            max_redirects=w_redirects,
+                            current=raw_url,
+                        )
+                except Exception:
+                    pass
+
         # Route-specific cleaning
         cleaned_block = self._clean_amz_deals_block_for_gemini_route(block)
         if not cleaned_block:
@@ -5724,12 +5848,14 @@ class InstorebotForwarder:
 
         # Final cleanup after Gemini just in case
         h1 = re.sub(r"(?i)\bnew\s+deal\s+found!?\b", "", str(h1 or "")).strip(" :-|")
+        h1 = re.sub(r"(?i)\bsharp\s+price\b", "price", str(h1 or "")).strip()
         b1 = re.sub(r"(?im)^product\s+info\s*$", "", str(b1 or ""))
         b1 = re.sub(r"(?im)^clip\s+coupon.*$", "", b1)
         b1 = re.sub(r"(?im)^only\s*\$\s*\d.*$", "", b1)
         b1 = re.sub(r"(?im)^now\s*\$\s*\d.*$", "", b1)
         b1 = re.sub(r"(?im)^was\s*\$\s*\d.*$", "", b1)
         b1 = re.sub(r"(?im)^30[- ]day\s+prime\s+free\s+trial.*$", "", b1)
+        b1 = re.sub(r"(?i)\bsharp\s+price\b", "price", b1)
         b1 = re.sub(r"\n{3,}", "\n\n", b1).strip()
 
         # Guard against duplicate headline being echoed as the first body line.
