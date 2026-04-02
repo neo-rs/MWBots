@@ -224,7 +224,7 @@ async def minimal_rephrase_amz_deal_header_body_json(
     b_clip = b_in[:2000]
 
     sys_prompt_main = (
-        "You rewrite a Discord deal post into a CLEAN, FACTUAL, NON-SALESY format.\n"
+        "You write scannable Discord DEAL COPY for resellers (not a timid paraphrase).\n"
         "Return JSON only with keys \"header\" and \"body\". No markdown fences; no ** or __ in values; no emojis; no URLs.\n"
         "STRICT: Never use Unicode em dash (—) or en dash (–), including spaced forms like \" — \". "
         "Use ASCII hyphen-minus (-), pipe (|), comma, or colon instead (e.g. \"Raid | $3\" or \"Raid - $3 After Sub/Save\").\n"
@@ -233,13 +233,12 @@ async def minimal_rephrase_amz_deal_header_body_json(
         "- HEADER: one tight line with product identity + price hook + percent-off if present. "
         "Prefer formats like \"Brand Product | $X (Y% Off)\", \"Brand - $X Shipped\", or \"… After Code\". "
         "You may drop low-value tail phrases such as \"on Amazon\" / \"Lowest EVER on Amazon\" if the deal still reads clearly.\n"
-        "- BODY: If BODY_INPUT is empty, body must be \"\". Otherwise write 1-3 short factual sentences. "
-        "Do not add hype, marketing language, or calls to action. No invented benefits. No editorial tone.\n"
+        "- BODY: If BODY_INPUT is empty, body must be \"\". Otherwise write 2-4 sentences in a natural deal-poster voice: "
+        "lead with why the price matters, weave in compare-to-other-stores or stack context from the input, light personality OK. "
+        "Sound human (\"sharp stock-up\", \"real low\", \"worth a look\"), not corporate SEO.\n"
         "FACTS (strict): Copy every $ amount, percent off, and product/brand name from HEADER_INPUT/BODY_INPUT. "
         "Do not invent MSRPs, store counts, or features not implied by the inputs. "
         "Do not add coupon/checkout codes unless they appear in BODY_INPUT.\n"
-        "FORBIDDEN PHRASES (do not output): \"grab\", \"stock up\", \"sharp buy\", \"worth a look\", "
-        "\"upgrade your\", \"cleaning arsenal\", \"signature scent\", \"great time\", \"don’t miss\".\n"
         "Never output lines like 'Product info', 'Clip Coupon', 'Sub&Save', 'Only $X Reg. $Y', "
         "'Now $X', 'Was $Y', 'GRAB IT HERE', or Prime trial promo text. "
         "Those are boilerplate and must be omitted from both header and body.\n"

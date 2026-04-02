@@ -4778,15 +4778,7 @@ class InstorebotForwarder:
         s = line.strip()
         if not self._amz_deal_line_is_price_or_compare(s):
             return False
-        if len(s) > 72:
-            return True
-        if re.search(
-            r"(?i)\b(originally|similar\b.*\bsell|listed\s+as|compare\s+to|other\s+stores|selling\s+for)\b",
-            s,
-        ):
-            return True
-        if "&" in s and re.search(r"(?i)\$\s*\d", s) and len(s) > 42:
-            return True
+        # For conversational-deals, preserve compare/context lines verbatim (keep them out of Gemini body).
         return False
 
     def _amz_deal_line_is_preserved_promo(self, line: str) -> bool:
@@ -4826,6 +4818,66 @@ class InstorebotForwarder:
         if re.search(r"(?i)\d+\s*%", s) and re.search(r"(?i)\b(off|save|deal|lowest|amazon)\b", s):
             return True
         return False
+
+    def _amz_deals_route_dedupe_ttl_s(self, mapping: Optional[Dict[str, Any]] = None) -> float:
+        """Per-route TTL for conversational deal forwards. Mapping value wins; otherwise keep 6h default."""
+        try:
+            if isinstance(mapping, dict) and mapping.get("dedupe_ttl_s") is not None:
+                v = float(mapping.get("dedupe_ttl_s"))
+            else:
+                v = float((self.config or {}).get("amz_deals_dedupe_ttl_s") or getattr(self, "_amz_deals_sig_ttl_s", 21600.0) or 21600.0)
+        except Exception:
+            v = 21600.0
+        return max(300.0, min(v, 7 * 24 * 3600.0))
+
+    def _amz_deals_message_looks_already_forwarded(self, message: discord.Message, block: str) -> bool:
+        """
+        Prevent loops / double-formatting when the source message already looks like a finished deal card.
+        """
+        first = ""
+        try:
+            first = (block or "").replace("\r\n", "\n").strip().split("\n", 1)[0].strip()
+        except Exception:
+            first = ""
+        first_clean = first.replace("**", "").replace("__", "").strip().lower()
+        if _RE_SKIP_SOURCE_NEW_DEAL_FOUND_TOP.search(first_clean):
+            return True
+        if first_clean.startswith("product info"):
+            return True
+        try:
+            for e in (message.embeds or []):
+                t = _embed_card_first_line(getattr(e, "title", None))
+                d = _embed_card_first_line(getattr(e, "description", None))
+                for cand in (t, d):
+                    c = (cand or "").replace("**", "").replace("__", "").strip().lower()
+                    if not c:
+                        continue
+                    if _RE_SKIP_SOURCE_NEW_DEAL_FOUND_TOP.search(c):
+                        return True
+                    if c.startswith("product info"):
+                        return True
+        except Exception:
+            pass
+        return False
+
+    def _amz_deals_has_enough_signal(self, cleaned_block: str) -> bool:
+        """
+        Require at least one non-trivial text line after cleaning so naked URL/coupon spam does not forward.
+        """
+        raw = (cleaned_block or "").replace("\r\n", "\n")
+        useful = 0
+        for ln in raw.split("\n"):
+            s = (ln or "").strip()
+            if not s:
+                continue
+            if self._amz_deal_line_is_skip_cta(s):
+                continue
+            if self._is_public_http_url_for_amz_deals(s):
+                continue
+            if len(re.sub(r"[^A-Za-z0-9$% ]+", "", s).strip()) < 8:
+                continue
+            useful += 1
+        return useful > 0
 
     def _amz_deals_route_clean_line(self, line: str) -> Optional[str]:
         s = (line or "").strip()
@@ -4988,7 +5040,7 @@ class InstorebotForwarder:
         Split conversational deal copy into:
         - header: one best headline for Gemini
         - body: context / compare prose for Gemini
-        - kept_lines: exact promo rows (preserved verbatim)
+        - kept_lines: exact promo rows (currently not rendered by this route)
         """
         raw = (text or "").replace("\r\n", "\n")
         lines: List[str] = []
@@ -5023,8 +5075,10 @@ class InstorebotForwarder:
                 kept_lines.append(line)
                 continue
             if self._amz_deal_line_is_price_or_compare(line):
-                # Preserve compare/context lines verbatim too (keep out of Gemini body).
-                kept_lines.append(line)
+                if self._amz_deal_line_is_compare_body_fodder(line):
+                    body_lines.append(line)
+                else:
+                    kept_lines.append(line)
                 continue
             body_lines.append(line)
 
@@ -5053,7 +5107,7 @@ class InstorebotForwarder:
         if b:
             parts.append(b)
 
-        # Preserve exact coupon/code/promo and compare lines (factual, verbatim).
+        # Preserve exact coupon/code/promo lines (factual, verbatim).
         kept_clean = [str(x or "").strip() for x in (kept_lines or []) if str(x or "").strip()]
         if kept_clean:
             parts.append(" ".join(kept_clean))
@@ -5489,12 +5543,14 @@ class InstorebotForwarder:
 
     async def _maybe_gemini_rephrase_amz_deals_forward(self, message: discord.Message, dest_channel_id: int, mapping: Dict[str, Any]) -> None:
         """
-        Amazon deals mode:
-        - resolve canonical Amazon URL
-        - clean noisy source copy for this route only
-        - parse into headline + body
-        - Gemini rephrases headline + body only
-        - rebuild as concise embed with one final Amazon URL
+        Mirror World conversational deals route:
+        - prefer resolved canonical Amazon URL when possible
+        - otherwise allow forwarding deal-hub URLs (pricedoffers/dmflip/etc) when Amazon resolution fails
+        - reject already-formatted / looped deal cards
+        - aggressively clean source text
+        - parse into header + body
+        - Gemini rewrites only the structured fields
+        - send one concise embed with one final URL
         """
         if not message.guild:
             return
@@ -5518,8 +5574,19 @@ class InstorebotForwarder:
             _log_flow("FILTER_SKIP", reason="amz_deals_duplicate_source_message", channel_id=str(message.channel.id), message_id=str(message.id))
             return
 
+        if self._amz_deals_message_looks_already_forwarded(message, block):
+            _log_flow(
+                "FILTER_SKIP",
+                reason="amz_deals_already_formatted_source",
+                channel_id=str(message.channel.id),
+                message_id=str(message.id),
+                guild_id=str(getattr(message.guild, "id", "")),
+            )
+            return
+
         urls = self._collect_message_urls(message)
         if not urls:
+            _log_flow("FILTER_SKIP", reason="amz_deals_no_urls", channel_id=str(message.channel.id), message_id=str(message.id))
             return
 
         det = None
@@ -5527,17 +5594,76 @@ class InstorebotForwarder:
             det = await self._detect_amazon(urls)
         except Exception:
             det = None
-        if not det or not getattr(det, "final_url", ""):
-            return
+        asin_ex = ""
+        raw_url = ""
+        url_kind = ""
+        if det and getattr(det, "final_url", ""):
+            raw_url = str(getattr(det, "final_url", "") or "").strip()
+            asin_ex = str(getattr(det, "asin", "") or "").strip().upper()
+            if raw_url and affiliate_rewriter.is_amazon_like_url(raw_url):
+                url_kind = "amazon"
+        if not raw_url:
+            # Allow non-Amazon deal hubs: pick a best-effort expanded HTTP url from the message.
+            try:
+                import aiohttp
 
-        raw_url = str(getattr(det, "final_url", "") or "").strip()
-        if not raw_url or not affiliate_rewriter.is_amazon_like_url(raw_url):
+                timeout_s = float((mapping.get("expand_timeout_s") or _cfg_float(self.config, "amazon_expand_timeout_s", "AMAZON_EXPAND_TIMEOUT_S") or 8.0))
+                max_redirects = int(mapping.get("expand_max_redirects") or _cfg_int(self.config, "amazon_expand_max_redirects", "AMAZON_EXPAND_MAX_REDIRECTS") or 8)
+                hub_url = ""
+                async with aiohttp.ClientSession() as session:
+                    for u in urls:
+                        cand = str(u or "").strip()
+                        if not cand or not self._is_public_http_url_for_amz_deals(cand):
+                            continue
+                        expanded = await self._expand_url_best_effort(session, cand, timeout_s=timeout_s, max_redirects=max_redirects)
+                        expanded = affiliate_rewriter.unwrap_known_query_redirects(expanded) or expanded
+                        if not expanded:
+                            continue
+                        # If the expanded url is Amazon, use it.
+                        if affiliate_rewriter.is_amazon_like_url(expanded):
+                            raw_url = expanded
+                            url_kind = "amazon"
+                            asin_ex = affiliate_rewriter.extract_asin(raw_url) or ""
+                            asin_ex = str(asin_ex or "").strip().upper()
+                            break
+                        # Try known deal hub scrapers to extract an embedded Amazon url or ASIN.
+                        try:
+                            hub, hub_err = await self._scrape_deal_hub_for_amazon_assets(expanded)
+                        except Exception:
+                            hub, hub_err = None, None
+                        if hub and not hub_err:
+                            hub_amz = str(hub.get("amazon_url") or "").strip()
+                            if hub_amz and affiliate_rewriter.is_amazon_like_url(hub_amz):
+                                raw_url = hub_amz
+                                url_kind = "amazon"
+                                asin_ex = affiliate_rewriter.extract_asin(raw_url) or ""
+                                asin_ex = str(asin_ex or "").strip().upper()
+                                break
+                            hub_asin = str(hub.get("asin") or "").strip().upper()
+                            if hub_asin:
+                                mp = _cfg_str(self.config, "amazon_api_marketplace", "AMAZON_API_MARKETPLACE").rstrip("/")
+                                raw_url = f"{mp}/dp/{hub_asin}" if mp else f"https://www.amazon.com/dp/{hub_asin}"
+                                url_kind = "amazon"
+                                asin_ex = hub_asin
+                                break
+                        # Otherwise, keep the deal hub itself as the outbound URL.
+                        hub_url = expanded
+                        break
+                if (not raw_url) and hub_url:
+                    raw_url = hub_url
+                    url_kind = "hub"
+            except Exception:
+                raw_url = ""
+                url_kind = ""
+
+        if not raw_url:
+            _log_flow("FILTER_SKIP", reason="amz_deals_no_resolvable_url", channel_id=str(message.channel.id), message_id=str(message.id))
             return
 
         # Canonicalize Amazon URLs to /dp/ASIN (strip tracking/query).
-        # If affiliate mode is enabled, re-apply only the canonical tag format.
-        asin_can = (affiliate_rewriter.extract_asin(raw_url) or "").strip().upper()
-        if asin_can:
+        # If affiliate mode is enabled, re-apply *only* the canonical tag format (no campaign/ref/linkId noise).
+        asin_can = (asin_ex or affiliate_rewriter.extract_asin(raw_url) or "").strip().upper()
+        if asin_can and affiliate_rewriter.is_amazon_like_url(raw_url):
             mp = _cfg_str(self.config, "amazon_api_marketplace", "AMAZON_API_MARKETPLACE").rstrip("/")
             clean = f"{mp}/dp/{asin_can}" if mp else f"https://www.amazon.com/dp/{asin_can}"
             raw_url = clean
@@ -5548,13 +5674,19 @@ class InstorebotForwarder:
                     aff = None
                 if aff:
                     raw_url = str(aff)
+            asin_ex = asin_can
 
         # Route-specific cleaning
         cleaned_block = self._clean_amz_deals_block_for_gemini_route(block)
         if not cleaned_block:
+            _log_flow("FILTER_SKIP", reason="amz_deals_clean_empty", channel_id=str(message.channel.id), message_id=str(message.id))
+            return
+        if not self._amz_deals_has_enough_signal(cleaned_block):
+            _log_flow("FILTER_SKIP", reason="amz_deals_low_signal", channel_id=str(message.channel.id), message_id=str(message.id))
             return
 
         # Route-specific duplicate guard
+        self._amz_deals_sig_ttl_s = self._amz_deals_route_dedupe_ttl_s(mapping)
         sig = self._amz_deals_signature(cleaned_block, raw_url)
         if self._amz_deals_sig_seen(sig):
             _log_flow("FILTER_SKIP", reason="amz_deals_duplicate_sig", channel_id=str(message.channel.id), message_id=str(message.id))
@@ -5567,9 +5699,8 @@ class InstorebotForwarder:
             desc_in = desc_in[: max_chars - 3] + "..."
 
         parsed = self._parse_amz_deals_block_for_structured_gemini(desc_in)
-        h0 = str(parsed.get("header") or "")
-        b0 = str(parsed.get("body") or "")
-
+        h0 = str(parsed.get("header") or "").strip()
+        b0 = str(parsed.get("body") or "").strip()
         kept: List[str] = list(parsed.get("kept_lines") or [])
 
         # Safety: if parser gives no header, use first non-empty cleaned line as fallback
@@ -5579,14 +5710,17 @@ class InstorebotForwarder:
                 h0 = first_line
 
         temp_override = self._gemini_temperature_from_simple_forward_mapping(mapping)
+        gem_used = False
+        gem_fail: Optional[str] = None
         try:
-            h1, b1, _gem_fail = await self._gemini_rephrase_amz_deals_structured(
+            h1, b1, gem_fail = await self._gemini_rephrase_amz_deals_structured(
                 h0,
                 b0,
                 temperature_override=temp_override,
             )
+            gem_used = not bool(gem_fail)
         except Exception:
-            h1, b1 = h0, b0
+            h1, b1, gem_fail = h0, b0, "gemini_exception"
 
         # Final cleanup after Gemini just in case
         h1 = re.sub(r"(?i)\bnew\s+deal\s+found!?\b", "", str(h1 or "")).strip(" :-|")
@@ -5598,15 +5732,31 @@ class InstorebotForwarder:
         b1 = re.sub(r"(?im)^30[- ]day\s+prime\s+free\s+trial.*$", "", b1)
         b1 = re.sub(r"\n{3,}", "\n\n", b1).strip()
 
+        # Guard against duplicate headline being echoed as the first body line.
+        try:
+            h_norm = re.sub(r"\s+", " ", (h1 or "")).strip().lower()
+            if h_norm and b1:
+                b_lines = [ln.rstrip() for ln in str(b1).split("\n")]
+                while b_lines and not b_lines[0].strip():
+                    b_lines.pop(0)
+                if b_lines:
+                    first_norm = re.sub(r"\s+", " ", b_lines[0]).strip().lower()
+                    if first_norm == h_norm:
+                        b_lines.pop(0)
+                        b1 = "\n".join(b_lines).strip()
+        except Exception:
+            pass
+
         desc_out = self._rebuild_amz_deals_embed_description(h1, b1, kept, raw_url)
         if not desc_out:
+            _log_flow("FILTER_SKIP", reason="amz_deals_empty_final_description", channel_id=str(message.channel.id), message_id=str(message.id))
             return
 
         if len(desc_out) > 3900:
             desc_out = desc_out[:3897] + "..."
 
         embed = discord.Embed(description=desc_out, url=raw_url)
-        media_u = self._first_source_embed_media_url(message)
+        media_u = self._first_source_embed_media_url(message) or self._first_attachment_image_url(message)
         if media_u:
             try:
                 embed.set_image(url=media_u)
@@ -5618,17 +5768,15 @@ class InstorebotForwarder:
             self._amz_deals_sig_commit(sig)
             self._amz_deals_src_msg_commit(int(message.id))
 
-            asin_ex = ""
-            try:
-                asin_ex = str(getattr(det, "asin", "") or "").strip().upper()
-            except Exception:
-                asin_ex = ""
-
             self._log_message_forward_summary(
                 src_channel_id=int(message.channel.id),
                 dest_channel_id=int(dest_channel_id),
                 path="gemini_rephrase_amz_deals",
-                extra=f"asin={asin_ex}" if asin_ex else "",
+                extra=(
+                    f"asin={asin_ex} gemini={'1' if gem_used else '0'} url_kind={url_kind}"
+                    if asin_ex
+                    else f"gemini={'1' if gem_used else '0'} url_kind={url_kind}"
+                ),
                 message_id=str(message.id),
             )
         except Exception:
