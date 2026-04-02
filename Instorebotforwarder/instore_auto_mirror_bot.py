@@ -477,6 +477,8 @@ class InstorebotForwarder:
         # Route-specific dedupe for gemini_rephrase_amz_deals
         self._amz_deals_sig_sent_ts: Dict[str, float] = {}
         self._amz_deals_sig_ttl_s: float = 6 * 60 * 60  # 6 hours
+        # Prevent duplicate posts for the exact same source message id.
+        self._amz_deals_src_msg_sent_ts: Dict[int, float] = {}
 
         # price_error_embed_forward: strict per-URL (or body-hash) dedupe per destination channel
         self._price_error_url_sent_ts: Dict[str, float] = {}
@@ -4830,10 +4832,18 @@ class InstorebotForwarder:
         if not s:
             return None
 
+        # Normalize markdown-ish wrappers first.
+        s = re.sub(r"^[-•\*#>\s]+", "", s).strip()
+
         # Remove trailing #ad
         s = re.sub(r"(?i)\s+#ad\s*$", "", s).strip()
+        s = re.sub(r"\s*\|\s*(?:#ad|ad)\s*$", "", s, flags=re.I).strip()
         if not s:
             return None
+
+        # Strip obvious field-label prefixes but keep the payload when useful.
+        s = re.sub(r"(?i)^title\s*:\s*", "", s).strip()
+        s = re.sub(r"(?i)^description\s*:\s*", "", s).strip()
 
         # Hard-skip junk lines for Mirror World conversational deals only
         if re.match(r"(?i)^product\s+info\s*$", s):
@@ -4844,20 +4854,28 @@ class InstorebotForwarder:
             return None
         if re.match(r"(?i)^30[- ]day\s+prime\s+free\s+trial\s*$", s):
             return None
+        if re.match(r"(?i)^prime\s+trial\s*$", s):
+            return None
         if re.match(r"(?i)^from:\s*", s):
             return None
         if re.match(r"(?i)^by:\s*", s):
             return None
         if re.match(r"(?i)^from:.*\|\s*by:.*$", s):
             return None
+        if re.match(r"(?i)^posted\s+by\s*:", s):
+            return None
+        if re.match(r"(?i)^shared\s+by\s*:", s):
+            return None
+        if re.match(r"(?i)^use\s+our\s+link\b.*$", s):
+            return None
+        if re.match(r"(?i)^tap\s+to\s+shop\b.*$", s):
+            return None
+        if re.match(r"(?i)^shop\s*->.*$", s):
+            return None
+        if re.match(r"(?i)^mirror\s+world\b.*$", s):
+            return None
 
-        # Remove short promo / coupon-only lines
-        if re.match(r"(?i)^\s*clip\s+coupon(?:\s*\+\s*sub\s*&?\s*save)?\s*$", s):
-            return None
-        if re.match(r"(?i)^\s*sub\s*&?\s*save\s*$", s):
-            return None
-        if re.match(r"(?i)^\s*coupon\s*(?:only)?\s*$", s):
-            return None
+        # Keep promo/coupon/code lines — parser will preserve them verbatim in kept_lines.
         if re.match(r"(?i)^only\s*\$\s*\d", s):
             return None
         if re.match(r"(?i)^now\s*\$\s*\d", s):
@@ -4869,6 +4887,10 @@ class InstorebotForwarder:
 
         # Drop pure CTA/link-only lines
         if self._amz_deal_line_is_skip_cta(s):
+            return None
+
+        plain = re.sub(r"[^A-Za-z0-9$% ]+", "", s).strip()
+        if len(plain) < 3:
             return None
 
         return s
@@ -4888,6 +4910,13 @@ class InstorebotForwarder:
             seen.add(key)
             out.append(cleaned)
 
+        while out and (
+            self._amz_deal_line_is_preserved_promo(out[0])
+            or self._is_public_http_url_for_amz_deals(out[0])
+            or self._amz_deal_line_is_skip_cta(out[0])
+        ):
+            out.pop(0)
+
         return "\n".join(out).strip()
 
     def _amz_deals_signature(self, text: str, amazon_url: str) -> str:
@@ -4902,6 +4931,9 @@ class InstorebotForwarder:
         for sig, ts in list(self._amz_deals_sig_sent_ts.items()):
             if (now - float(ts)) > ttl:
                 self._amz_deals_sig_sent_ts.pop(sig, None)
+        for mid, ts in list(self._amz_deals_src_msg_sent_ts.items()):
+            if (now - float(ts)) > ttl:
+                self._amz_deals_src_msg_sent_ts.pop(mid, None)
 
     def _amz_deals_sig_seen(self, sig: str) -> bool:
         if not sig:
@@ -4914,6 +4946,26 @@ class InstorebotForwarder:
             return
         self._amz_deals_sig_prune()
         self._amz_deals_sig_sent_ts[sig] = time.time()
+
+    def _amz_deals_src_msg_seen(self, message_id: int) -> bool:
+        try:
+            mid = int(message_id)
+        except Exception:
+            return False
+        if mid <= 0:
+            return False
+        self._amz_deals_sig_prune()
+        return mid in self._amz_deals_src_msg_sent_ts
+
+    def _amz_deals_src_msg_commit(self, message_id: int) -> None:
+        try:
+            mid = int(message_id)
+        except Exception:
+            return
+        if mid <= 0:
+            return
+        self._amz_deals_sig_prune()
+        self._amz_deals_src_msg_sent_ts[mid] = time.time()
 
     def _strip_url_only_paragraphs_from_body(self, body: str) -> str:
         """Remove paragraphs that are only outbound links (after parse)."""
@@ -4933,15 +4985,13 @@ class InstorebotForwarder:
 
     def _parse_amz_deals_block_for_structured_gemini(self, text: str) -> Dict[str, Any]:
         """
-        Split simple_forward deal copy into: headline (AI), body prose (AI), kept lines (prices/promos, exact).
-        Drops CTA markdown lines and Prime junk; canonical Amazon URL appended as plain text (no markdown).
+        Split conversational deal copy into:
+        - header: one best headline for Gemini
+        - body: context / compare prose for Gemini
+        - kept_lines: exact promo rows (preserved verbatim)
         """
         raw = (text or "").replace("\r\n", "\n")
-        header = ""
-        header_consumed = False
-        body_lines: List[str] = []
-        kept_lines: List[str] = []
-
+        lines: List[str] = []
         for ln in raw.split("\n"):
             line = re.sub(r"(?i)\s+#ad\s*$", "", ln).strip()
             if not line:
@@ -4950,25 +5000,33 @@ class InstorebotForwarder:
                 continue
             if self._amz_deal_line_is_skip_cta(line):
                 continue
+            lines.append(line)
+
+        header = ""
+        body_lines: List[str] = []
+        kept_lines: List[str] = []
+
+        header_candidates: List[str] = []
+        for line in lines[:6]:
+            if self._amz_deal_line_is_branded_header(line) or self._amz_deal_line_is_shouty_deal_headline(line):
+                header_candidates.append(line)
+            elif self._amz_deal_line_looks_like_embed_headline(line):
+                header_candidates.append(line)
+
+        if header_candidates:
+            header = max(header_candidates, key=lambda s: (1 if re.search(r"\$\s*\d", s) else 0, len(s)))
+
+        for line in lines:
+            if line == header:
+                continue
             if self._amz_deal_line_is_preserved_promo(line):
                 kept_lines.append(line)
                 continue
-            if not header_consumed and (
-                self._amz_deal_line_is_branded_header(line) or self._amz_deal_line_is_shouty_deal_headline(line)
-            ):
-                header = line
-                header_consumed = True
-                continue
             if self._amz_deal_line_is_price_or_compare(line):
-                if self._amz_deal_line_is_compare_body_fodder(line):
-                    body_lines.append(line)
-                else:
-                    kept_lines.append(line)
+                # Preserve compare/context lines verbatim too (keep out of Gemini body).
+                kept_lines.append(line)
                 continue
             body_lines.append(line)
-
-        if not header and body_lines and self._amz_deal_line_looks_like_embed_headline(body_lines[0]):
-            header = body_lines.pop(0)
 
         body_joined = "\n\n".join(body_lines).strip()
         body_joined = self._strip_url_only_paragraphs_from_body(body_joined)
@@ -4995,8 +5053,10 @@ class InstorebotForwarder:
         if b:
             parts.append(b)
 
-        # For Mirror World conversational deals, do NOT render a Product info block.
-        # kept_lines are intentionally ignored in final output for this route.
+        # Preserve exact coupon/code/promo and compare lines (factual, verbatim).
+        kept_clean = [str(x or "").strip() for x in (kept_lines or []) if str(x or "").strip()]
+        if kept_clean:
+            parts.append(" ".join(kept_clean))
 
         if amz:
             parts.append(amz)
@@ -5453,6 +5513,11 @@ class InstorebotForwarder:
         if not block:
             return
 
+        # Hard guard: never post twice for the same source message id.
+        if self._amz_deals_src_msg_seen(int(message.id)):
+            _log_flow("FILTER_SKIP", reason="amz_deals_duplicate_source_message", channel_id=str(message.channel.id), message_id=str(message.id))
+            return
+
         urls = self._collect_message_urls(message)
         if not urls:
             return
@@ -5468,6 +5533,21 @@ class InstorebotForwarder:
         raw_url = str(getattr(det, "final_url", "") or "").strip()
         if not raw_url or not affiliate_rewriter.is_amazon_like_url(raw_url):
             return
+
+        # Canonicalize Amazon URLs to /dp/ASIN (strip tracking/query).
+        # If affiliate mode is enabled, re-apply only the canonical tag format.
+        asin_can = (affiliate_rewriter.extract_asin(raw_url) or "").strip().upper()
+        if asin_can:
+            mp = _cfg_str(self.config, "amazon_api_marketplace", "AMAZON_API_MARKETPLACE").rstrip("/")
+            clean = f"{mp}/dp/{asin_can}" if mp else f"https://www.amazon.com/dp/{asin_can}"
+            raw_url = clean
+            if self._amazon_affiliate_enabled():
+                try:
+                    aff = affiliate_rewriter.build_amazon_affiliate_url(self.config or {}, clean)
+                except Exception:
+                    aff = None
+                if aff:
+                    raw_url = str(aff)
 
         # Route-specific cleaning
         cleaned_block = self._clean_amz_deals_block_for_gemini_route(block)
@@ -5490,8 +5570,7 @@ class InstorebotForwarder:
         h0 = str(parsed.get("header") or "")
         b0 = str(parsed.get("body") or "")
 
-        # Ignore kept_lines for this route
-        kept: List[str] = []
+        kept: List[str] = list(parsed.get("kept_lines") or [])
 
         # Safety: if parser gives no header, use first non-empty cleaned line as fallback
         if not h0:
@@ -5537,6 +5616,7 @@ class InstorebotForwarder:
         try:
             await ch.send(embeds=[embed], allowed_mentions=discord.AllowedMentions.none())
             self._amz_deals_sig_commit(sig)
+            self._amz_deals_src_msg_commit(int(message.id))
 
             asin_ex = ""
             try:
