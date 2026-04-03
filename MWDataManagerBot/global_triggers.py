@@ -216,6 +216,14 @@ def detect_global_triggers(
     source_is_instore = bool(
         source_channel_id and int(source_channel_id) in cfg.SMART_SOURCE_CHANNELS_INSTORE
     )
+    source_is_clearance = bool(
+        source_channel_id and int(source_channel_id) in getattr(cfg, "SMART_SOURCE_CHANNELS_CLEARANCE", set())
+    )
+
+    # Global triggers are for ONLINE traffic; CLEARANCE traffic should be handled exclusively by
+    # classifier's MAJOR_CLEARANCE path (so it doesn't "leak" into PRICE_ERROR / flips / etc).
+    if source_is_clearance:
+        return results
 
     sf_ctx: Dict[str, Any] = {
         "source_channel_id": int(source_channel_id or 0),
@@ -223,9 +231,16 @@ def detect_global_triggers(
         "source_is_instore": bool(source_is_instore),
     }
     # PRICE_ERROR (online-only intent; exclude instore channels)
-    if cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID and not source_is_instore:
-        if PRICE_ERROR_PATTERN.search(normalized_text):
-            results.append((cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID, "PRICE_ERROR"))
+    # Exclude rigid AMZ Price Errors monitor templates (Amazon Sold / eBay Avg / flip lines).
+    price_error_blob = ((text_to_check or "") + "\n" + (embed_text or "")).strip()
+    if (
+        cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID
+        and source_is_online
+        and not source_is_instore
+        and PRICE_ERROR_PATTERN.search(normalized_text)
+        and not is_amz_price_errors_monitor_blob(price_error_blob)
+    ):
+        results.append((cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID, "PRICE_ERROR"))
 
     # PROFITABLE_FLIP / LUNCHMONEY_FLIP (online only; exclude instore channels)
     # Only process if source is online AND not from instore channels

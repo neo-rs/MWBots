@@ -31,7 +31,7 @@ from patterns import (
     WOOT_DEALS_PATTERN,
     TIMESTAMP_PATTERN,
 )
-from utils import matches_instore_theatre
+from utils import collect_embed_strings, matches_instore_theatre
 
 
 # Strong toy / figure signals — suppress INSTORE_CARDS when TCG heuristics misfire (eBay URLs, embeds).
@@ -518,6 +518,21 @@ def select_target_channel_id(
     store_category = store_category_from_location(where_location)
     text_blob = text_to_check or ""
 
+    # CLEARANCE routing policy:
+    # Clearance source channels should not participate in general routing (PRICE_ERROR/flips/etc).
+    # They are handled exclusively via the definitive "Home Depot store clearance deals" embed
+    # (MAJOR_CLEARANCE destination).
+    if source_group == "clearance":
+        mc_id = int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0)
+        if mc_id > 0 and is_definitive_major_clearance_embed(text_blob):
+            if trace is not None:
+                try:
+                    trace.setdefault("classifier", {}).setdefault("matches", {})["definitive_major_clearance"] = True
+                except Exception:
+                    pass
+            return mc_id, "MAJOR_CLEARANCE"
+        return None
+
     skip_amazon = bool(source_group == "clearance")
     if trace is not None:
         try:
@@ -541,24 +556,20 @@ def select_target_channel_id(
         except Exception:
             pass
 
-    # 0) PRICE_ERROR / glitched (high priority, any store)
-    if cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID and PRICE_ERROR_PATTERN.search(text_blob):
+    # 0) PRICE_ERROR / glitched (online-only; same gate as global_triggers).
+    # Exclude rigid AMZ Price Errors monitor templates (Amazon Sold / eBay Avg / flip lines) — not true "glitch" leads.
+    if (
+        cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID
+        and source_group != "instore"
+        and not is_amz_price_errors_monitor_blob(text_blob)
+        and PRICE_ERROR_PATTERN.search(text_blob)
+    ):
         if trace is not None:
             try:
                 trace.setdefault("classifier", {}).setdefault("matches", {})["price_error"] = True
             except Exception:
                 pass
         return cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID, "PRICE_ERROR"
-
-    # Definitive Home Depot clearance monitor embed → MAJOR_CLEARANCE (global_trigger_destinations).
-    mc_id = int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0)
-    if mc_id > 0 and source_group == "clearance" and is_definitive_major_clearance_embed(text_blob):
-        if trace is not None:
-            try:
-                trace.setdefault("classifier", {}).setdefault("matches", {})["definitive_major_clearance"] = True
-            except Exception:
-                pass
-        return mc_id, "MAJOR_CLEARANCE"
 
     # WOOT: Woot deals can include affiliate Amazon tracking (amzn.to links),
     # causing them to be detected as Amazon. Route to INSTORE_LEADS instead.
@@ -789,6 +800,12 @@ def detect_all_link_types(
     where_location = where_match.group(1).strip() if where_match else ""
     store_category = store_category_from_location(where_location)
     text_blob = text_to_check or ""
+    pe_check_blob = text_blob
+    if embeds:
+        try:
+            pe_check_blob = (text_blob + "\n" + " ".join(collect_embed_strings(embeds))).strip()
+        except Exception:
+            pe_check_blob = text_blob
 
     skip_amazon = bool(source_group == "clearance")
     if trace is not None:
@@ -796,6 +813,20 @@ def detect_all_link_types(
             trace.setdefault("classifier", {}).setdefault("matches", {})["skip_amazon_for_clearance"] = bool(skip_amazon)
         except Exception:
             pass
+
+    # CLEARANCE routing policy:
+    # Clearance source channels should not participate in general routing.
+    # Only the definitive "Home Depot store clearance deals" embed can route to MAJOR_CLEARANCE.
+    if source_group == "clearance":
+        mc_id = int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0)
+        if mc_id > 0 and is_definitive_major_clearance_embed(text_blob):
+            if trace is not None:
+                try:
+                    trace.setdefault("classifier", {}).setdefault("matches", {})["definitive_major_clearance"] = True
+                except Exception:
+                    pass
+            return [(mc_id, "MAJOR_CLEARANCE")]
+        return []
 
     if trace is not None:
         try:
@@ -813,29 +844,19 @@ def detect_all_link_types(
         except Exception:
             pass
 
-    # PRICE_ERROR / glitched (add early for order_link_types priority)
-    if cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID and PRICE_ERROR_PATTERN.search(text_blob):
+    # PRICE_ERROR / glitched (add early for order_link_types priority; online-only + exclude AMZ monitor templates)
+    if (
+        cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID
+        and source_group != "instore"
+        and not is_amz_price_errors_monitor_blob(pe_check_blob)
+        and PRICE_ERROR_PATTERN.search(pe_check_blob)
+    ):
         results.append((cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID, "PRICE_ERROR"))
         if trace is not None:
             try:
                 trace.setdefault("classifier", {}).setdefault("matches", {})["price_error"] = True
             except Exception:
                 pass
-
-    # Definitive Home Depot clearance monitor embed → MAJOR_CLEARANCE (same rule as select_target_channel_id / live_forwarder).
-    mc_id = int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0)
-    if (
-        mc_id > 0
-        and source_group == "clearance"
-        and is_definitive_major_clearance_embed(text_blob)
-        and not any(tag == "PRICE_ERROR" for _, tag in results)
-    ):
-        if trace is not None:
-            try:
-                trace.setdefault("classifier", {}).setdefault("matches", {})["definitive_major_clearance"] = True
-            except Exception:
-                pass
-        return [(mc_id, "MAJOR_CLEARANCE")]
 
     # WOOT: Woot deals can include affiliate Amazon tracking (amzn.to links),
     # causing them to be detected as "Amazon". Route them to INSTORE_LEADS

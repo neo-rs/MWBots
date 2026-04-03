@@ -305,6 +305,8 @@ def is_amz_price_errors_monitor_blob(text: str) -> bool:
     True for templated Discord alerts from Divine / AMZ Price Errors (footer, flip lines, warehouse alerts).
     These hit AMAZON_PROFITABLE_INDICATOR_PATTERN (e.g. amazon sold, average 30, % drop) but are high-volume
     monitor spam relative to curated profitable leads.
+    When True, PRICE_ERROR / glitch routing is skipped (classifier + global_triggers) so these posts are not
+    treated as generic “price error” leads.
     """
     if not text or not str(text).strip():
         return False

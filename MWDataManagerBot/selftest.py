@@ -38,6 +38,7 @@ def main() -> int:
     print()
 
     instore_ch = next(iter(cfg.SMART_SOURCE_CHANNELS_INSTORE), 0)
+    clearance_ch = next(iter(getattr(cfg, "SMART_SOURCE_CHANNELS_CLEARANCE", set()) or set()), 0)
 
     for i, text in enumerate(samples, 1):
         attachments = []
@@ -58,6 +59,45 @@ def main() -> int:
         r = detect_all_link_types(t, [], keywords_list=[], source_channel_id=int(instore_ch))
         print(f"[instore source ch={instore_ch}] {t[:50]}...")
         print(f"    local={r}")
+        print()
+
+    if clearance_ch:
+        definitive_clearance = (
+            "Home Depot Store Clearance Deals - New Item Total Inventory Internet Number "
+            "Price Original Price Percentage Off"
+        )
+        local = detect_all_link_types(
+            definitive_clearance, [], keywords_list=[], embeds=[], source_channel_id=int(clearance_ch)
+        )
+        fallback = select_target_channel_id(
+            definitive_clearance, [], keywords_list=[], source_channel_id=int(clearance_ch)
+        )
+        global_tr = detect_global_triggers(
+            definitive_clearance, source_channel_id=int(clearance_ch), link_tracking_cache={}, embeds=[]
+        )
+        print(f"[clearance source ch={clearance_ch}] definitive major-clearance embed...")
+        print(f"    local={local}")
+        print(f"    fallback={fallback}")
+        print(f"    global={global_tr}")
+        print()
+
+        non_definitive_clearance = "clearance markdown 80% off where: ross retail: $5 resell: $40"
+        local2 = detect_all_link_types(
+            non_definitive_clearance, [], keywords_list=[], embeds=[], source_channel_id=int(clearance_ch)
+        )
+        fallback2 = select_target_channel_id(
+            non_definitive_clearance, [], keywords_list=[], source_channel_id=int(clearance_ch)
+        )
+        global_tr2 = detect_global_triggers(
+            non_definitive_clearance,
+            source_channel_id=int(clearance_ch),
+            link_tracking_cache={},
+            embeds=[],
+        )
+        print(f"[clearance source ch={clearance_ch}] non-definitive clearance text...")
+        print(f"    local={local2}")
+        print(f"    fallback={fallback2}")
+        print(f"    global={global_tr2}")
         print()
 
     return 0
