@@ -105,8 +105,12 @@ class MessageForwarder:
 
         self.global_content_cache: Dict[str, float] = {}
         self.global_content_ttl_seconds: int = int(cfg.GLOBAL_DUPLICATE_TTL_SECONDS or 300)
-        self.pending_major_clearance_followups: Dict[Tuple[int, str], Dict[str, Any]] = {}
-        self.pending_major_clearance: Dict[Tuple[int, str], Dict[str, Any]] = {}
+        # Major-clearance pairing cache:
+        # - key is (source_channel_id, embed_message_id) so interleaving messages from the same sender do not overwrite.
+        # - follow-ups without a message-link will pair to the most recent pending embed for the same sender in that channel.
+        self.pending_major_clearance_followups: Dict[Tuple[int, int], Dict[str, Any]] = {}
+        self.pending_major_clearance: Dict[Tuple[int, int], Dict[str, Any]] = {}
+        self._pending_major_clearance_latest_by_sender: Dict[Tuple[int, str], int] = {}
 
     async def _debug_react(self, message, *, allowed: Optional[bool], reason: str) -> None:
         """
@@ -320,6 +324,24 @@ class MessageForwarder:
         except Exception:
             pass
         return "unknown"
+
+    def _extract_discord_message_id_from_text(self, text: str) -> int:
+        """
+        If a follow-up message includes a Discord message link, use its message_id to pair.
+        Accepts discord.com, discordapp.com, ptb/canary.
+        """
+        raw = str(text or "")
+        m = re.search(
+            r"https?://(?:www\.|(?:(?:ptb|canary)\.)?)discord(?:app)?\.com/channels/\d+/\d+/(\d+)\b",
+            raw,
+            re.IGNORECASE,
+        )
+        if not m:
+            return 0
+        try:
+            return int(m.group(1))
+        except Exception:
+            return 0
 
     def _looks_like_major_clearance_embed(self, text: str) -> bool:
         tl = (text or "").lower()
@@ -1401,7 +1423,9 @@ class MessageForwarder:
         if major_clearance_dest > 0 and is_major_clearance_source:
             now_ts = asyncio.get_event_loop().time()
             sender_key = self._sender_key(message, payload)
-            pair_key = (int(channel_id or 0), str(sender_key))
+            source_ch_id = int(channel_id or 0)
+            embed_msg_id = int(getattr(message, "id", 0) or 0)
+            pair_key = (source_ch_id, embed_msg_id)
             try:
                 ttl_s = float(getattr(cfg, "MAJOR_CLEARANCE_PAIR_TTL_SECONDS", 180) or 180)
             except Exception:
@@ -1415,8 +1439,8 @@ class MessageForwarder:
             )
 
             # Flush expired pending candidates (optional single-send fallback).
-            expired_first_items: List[Tuple[Tuple[int, str], Dict[str, Any]]] = []
-            expired_followup_items: List[Tuple[Tuple[int, str], Dict[str, Any]]] = []
+            expired_first_items: List[Tuple[Tuple[int, int], Dict[str, Any]]] = []
+            expired_followup_items: List[Tuple[Tuple[int, int], Dict[str, Any]]] = []
             try:
                 for k, v in (self.pending_major_clearance or {}).items():
                     if (now_ts - float(v.get("timestamp", 0.0))) > ttl_s:
@@ -1440,6 +1464,19 @@ class MessageForwarder:
                     self.pending_major_clearance_followups.pop(k, None)
                 except Exception:
                     pass
+            # Also prune sender-latest index if it points at an expired embed.
+            if expired_first_items:
+                try:
+                    expired_ids = {int(k[1]) for k, _ in expired_first_items if isinstance(k, tuple)}
+                except Exception:
+                    expired_ids = set()
+                if expired_ids:
+                    try:
+                        for sk, mid in list(self._pending_major_clearance_latest_by_sender.items()):
+                            if int(mid or 0) in expired_ids:
+                                self._pending_major_clearance_latest_by_sender.pop(sk, None)
+                    except Exception:
+                        pass
 
             if send_single_on_timeout and expired_first_items:
                 try:
@@ -1520,6 +1557,7 @@ class MessageForwarder:
                             log_warn(f"major-clearance single-send failed (msg={message.id}): {type(e).__name__}: {e}")
                         # Fall through to paired-flow cache behavior when immediate single-send fails.
 
+                # If a follow-up arrived earlier and included a message-link, it may already be cached under our msg id.
                 followup_cached = (self.pending_major_clearance_followups or {}).get(pair_key)
                 # If follow-up arrived earlier, send the pair immediately (even if the first came from edit).
                 if followup_cached:
@@ -1564,6 +1602,7 @@ class MessageForwarder:
 
                         self.pending_major_clearance.pop(pair_key, None)
                         self.pending_major_clearance_followups.pop(pair_key, None)
+                        self._pending_major_clearance_latest_by_sender.pop((source_ch_id, str(sender_key)), None)
                         trace["decision"] = {"action": "sent_major_clearance_pair_rev_order", "dest": int(dest_after or 0)}
                         try:
                             write_trace_log(trace)
@@ -1590,10 +1629,15 @@ class MessageForwarder:
                     "webhook_username": wh_username,
                     "webhook_avatar_url": wh_avatar_url,
                     "source_jump_url": str(getattr(message, "jump_url", "") or ""),
-                    "source_channel_id": int(channel_id or 0),
-                    "source_message_id": int(getattr(message, "id", 0) or 0),
+                    "source_channel_id": source_ch_id,
+                    "source_message_id": embed_msg_id,
                     "from_edit": bool(is_edit),
                 }
+                # Track "latest pending embed" by sender so follow-ups without an explicit link can still pair.
+                try:
+                    self._pending_major_clearance_latest_by_sender[(source_ch_id, str(sender_key))] = embed_msg_id
+                except Exception:
+                    pass
                 trace["decision"] = {"action": "pending_major_clearance", "reason": "waiting_followup_same_sender"}
                 try:
                     write_trace_log(trace)
@@ -1603,7 +1647,20 @@ class MessageForwarder:
                     log_filter(f"cached major-clearance candidate msg={message.id} ch=<#{channel_id}>")
                 return
 
-            pending = (self.pending_major_clearance or {}).get(pair_key)
+            # Follow-up: try to pair by explicit message link first; otherwise fall back to most recent pending for sender.
+            followup_ref_mid = self._extract_discord_message_id_from_text(text_to_check)
+            pending_key: Optional[Tuple[int, int]] = None
+            if followup_ref_mid > 0:
+                pending_key = (source_ch_id, int(followup_ref_mid))
+            else:
+                try:
+                    last_mid = int(self._pending_major_clearance_latest_by_sender.get((source_ch_id, str(sender_key)), 0) or 0)
+                except Exception:
+                    last_mid = 0
+                if last_mid > 0:
+                    pending_key = (source_ch_id, last_mid)
+
+            pending = (self.pending_major_clearance or {}).get(pending_key) if pending_key else None
             if self._looks_like_major_clearance_followup(text_to_check, raw_content=content):
                 try:
                     import discord
@@ -1636,8 +1693,13 @@ class MessageForwarder:
                             allowed_mentions=allowed_mentions,
                             reference=first_msg,
                         )
-                        self.pending_major_clearance.pop(pair_key, None)
-                        self.pending_major_clearance_followups.pop(pair_key, None)
+                        try:
+                            if pending_key:
+                                self.pending_major_clearance.pop(pending_key, None)
+                                self.pending_major_clearance_followups.pop(pending_key, None)
+                        except Exception:
+                            pass
+                        self._pending_major_clearance_latest_by_sender.pop((source_ch_id, str(sender_key)), None)
                         trace["decision"] = {"action": "sent_major_clearance_pair", "dest": int(dest_after or 0)}
                         try:
                             write_trace_log(trace)
@@ -1654,16 +1716,18 @@ class MessageForwarder:
                         return
 
                     # Otherwise cache the follow-up so an edited/late candidate can still pair.
-                    self.pending_major_clearance_followups[pair_key] = {
+                    cache_key = pending_key if pending_key else pair_key
+                    self.pending_major_clearance_followups[cache_key] = {
                         "timestamp": now_ts,
                         "formatted_content": formatted_content,
                         "embeds_out": embeds_out,
                         "attachments": mc_filtered if use_files else None,
                         "webhook_username": wh_username,
                         "webhook_avatar_url": wh_avatar_url,
-                        "source_channel_id": int(channel_id or 0),
+                        "source_channel_id": source_ch_id,
                         "source_message_id": int(getattr(message, "id", 0) or 0),
                         "from_edit": bool(is_edit),
+                        "ref_message_id": int(followup_ref_mid or 0),
                     }
                     trace["decision"] = {"action": "pending_major_clearance_followup", "reason": "waiting_first_same_sender"}
                     try:
