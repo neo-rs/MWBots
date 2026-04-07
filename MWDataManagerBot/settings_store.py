@@ -80,6 +80,10 @@ EDIT_COOLDOWN_SECONDS: int = 30
 MAJOR_CLEARANCE_PAIR_TTL_SECONDS: int = 180
 MAJOR_CLEARANCE_SEND_SINGLE_ON_TIMEOUT: bool = False
 
+# Optional: explicit allowlist of source channels that should use the major-clearance paired-flow.
+# If empty, the bot falls back to `source_channel_ids_clearance`.
+MAJOR_CLEARANCE_SOURCE_CHANNEL_IDS: Set[int] = set()
+
 # Debug reactions (opt-in)
 DEBUG_REACTIONS_ENABLED: bool = False
 DEBUG_REACTIONS_ALLOW_CHANNEL_IDS: Set[int] = set()
@@ -167,6 +171,7 @@ def init(settings: Dict[str, Any]) -> None:
     global FALLBACK_CHANNEL_ID
     global EDIT_COOLDOWN_SECONDS
     global MAJOR_CLEARANCE_PAIR_TTL_SECONDS, MAJOR_CLEARANCE_SEND_SINGLE_ON_TIMEOUT
+    global MAJOR_CLEARANCE_SOURCE_CHANNEL_IDS
     global DEBUG_REACTIONS_ENABLED, DEBUG_REACTIONS_ALLOW_CHANNEL_IDS
     global DEBUG_REACTIONS_EMOJI_ALLOWED, DEBUG_REACTIONS_EMOJI_BLOCKED
 
@@ -295,6 +300,7 @@ def init(settings: Dict[str, Any]) -> None:
     if MAJOR_CLEARANCE_PAIR_TTL_SECONDS < 10:
         MAJOR_CLEARANCE_PAIR_TTL_SECONDS = 10
     MAJOR_CLEARANCE_SEND_SINGLE_ON_TIMEOUT = bool(settings.get("major_clearance_send_single_on_timeout", False))
+    MAJOR_CLEARANCE_SOURCE_CHANNEL_IDS = _parse_int_set(settings.get("major_clearance_source_channel_ids"))
 
     # Debug reactions (disabled by default).
     dbg = settings.get("debug_reactions") if isinstance(settings.get("debug_reactions"), dict) else {}

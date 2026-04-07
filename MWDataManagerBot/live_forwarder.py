@@ -328,9 +328,11 @@ class MessageForwarder:
         # TempoMonitors stock-monitor embed shape (not Retail:/Resell:/Where: template).
         has_msrp = "msrp" in tl
         has_as_low = ("as low as" in tl) or ("as-low-as" in tl)
+        # Some TempoMonitors feeds include SKU instead of UPC.
         has_upc = "upc" in tl and bool(re.search(r"\b\d{11,14}\b", tl))
+        has_sku = "sku" in tl and bool(re.search(r"\bsku\b[^\n]{0,50}\b\d{6,}\b", tl))
         has_tempo = "tempomonitors.com" in tl or "powered by tempomonitors" in tl
-        if has_msrp and has_as_low and has_upc and has_tempo:
+        if has_msrp and has_as_low and (has_upc or has_sku) and has_tempo:
             return True
         # New stricter Home Depot monitor shape (edited embeds often hydrate into this form).
         return is_definitive_major_clearance_embed(tl)
@@ -1383,9 +1385,19 @@ class MessageForwarder:
             major_clearance_dest = int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0)
         except Exception:
             major_clearance_dest = 0
-        is_major_clearance_source = bool(
-            int(channel_id or 0) in getattr(cfg, "SMART_SOURCE_CHANNELS_CLEARANCE", set())
-        )
+        # Major-clearance pairing sources:
+        # - If `major_clearance_source_channel_ids` is configured, use it (explicit allowlist).
+        # - Otherwise fall back to `source_channel_ids_clearance`.
+        try:
+            mc_sources = set(getattr(cfg, "MAJOR_CLEARANCE_SOURCE_CHANNEL_IDS", set()) or set())
+        except Exception:
+            mc_sources = set()
+        if not mc_sources:
+            try:
+                mc_sources = set(getattr(cfg, "SMART_SOURCE_CHANNELS_CLEARANCE", set()) or set())
+            except Exception:
+                mc_sources = set()
+        is_major_clearance_source = bool(int(channel_id or 0) in mc_sources)
         if major_clearance_dest > 0 and is_major_clearance_source:
             now_ts = asyncio.get_event_loop().time()
             sender_key = self._sender_key(message, payload)
