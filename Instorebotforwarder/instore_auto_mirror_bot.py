@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 import discord
 from discord import app_commands
@@ -476,6 +476,8 @@ class InstorebotForwarder:
 
         # Route-specific dedupe for gemini_rephrase_amz_deals
         self._amz_deals_sig_sent_ts: Dict[str, float] = {}
+        # Same final outbound URL (per dest channel) within TTL — catches different bots / wording, same link.
+        self._amz_deals_outbound_url_sent_ts: Dict[str, float] = {}
         self._amz_deals_sig_ttl_s: float = 6 * 60 * 60  # 6 hours
         # Prevent duplicate posts for the exact same source message id.
         self._amz_deals_src_msg_sent_ts: Dict[int, float] = {}
@@ -2161,6 +2163,36 @@ class InstorebotForwarder:
                 "Losing: repeat of the same normalized content + same Amazon destination within ~6 hours.",
             ],
         )
+        ex.emit()
+
+    def _explain_duplicate_amz_deals_outbound_url(
+        self, *, channel_id: int, message_id: int, dest_channel_id: int, url_key: str
+    ) -> None:
+        if not self._explainable_enabled():
+            return
+        ex = self._explainable()
+        ex.start(
+            "DUPLICATE SKIP (gemini amz deals — same outbound URL)",
+            message_id=str(message_id),
+            source=f"<#{channel_id}>",
+            decision_tag="DUPLICATE SKIP",
+            journal_stream=self._journal_stream_slug(int(channel_id)),
+        )
+        ex.section(
+            3,
+            "ELI5 SUMMARY",
+            [
+                "Bottom line: DUPLICATE SKIP — this destination was already sent the same canonical deal link recently (outbound URL dedupe).",
+                "",
+                "What the bot saw:",
+                f"- Source message {message_id} on <#{channel_id}>",
+                f"- Would post to <#{dest_channel_id}> with the same normalized URL key as a recent forward.",
+                "",
+                "Final decision:",
+                "- Skip so different bots or rephrased copy for the same product URL do not spam the channel.",
+            ],
+        )
+        ex.trace({"url_dedupe_key": (url_key or "")[:200]})
         ex.emit()
 
     def _source_channel_log_label(self, channel_id: int) -> str:
@@ -4923,6 +4955,80 @@ class InstorebotForwarder:
             v = 21600.0
         return max(300.0, min(v, 7 * 24 * 3600.0))
 
+    def _amz_deals_dedupe_by_outbound_url(self, mapping: Dict[str, Any]) -> bool:
+        """When True, skip if the same canonical outbound URL was already sent to this dest within TTL."""
+        if isinstance(mapping, dict) and mapping.get("dedupe_by_outbound_url") is not None:
+            return bool(mapping.get("dedupe_by_outbound_url"))
+        try:
+            g = (self.config or {}).get("amz_deals_dedupe_by_outbound_url")
+            if g is None:
+                return True
+            return bool(g)
+        except Exception:
+            return True
+
+    def _amz_deals_outbound_dedupe_key(self, raw_url: str) -> str:
+        """
+        Stable key for the embed link: Amazon → ASIN; otherwise scheme+host+path with tracking query pairs removed.
+        """
+        u = (raw_url or "").strip()
+        if not u:
+            return ""
+        try:
+            if affiliate_rewriter.is_amazon_like_url(u):
+                asin = str(affiliate_rewriter.extract_asin(u) or "").strip().upper()
+                if asin and len(asin) == 10 and asin.isalnum():
+                    return f"amazon:{asin}"
+        except Exception:
+            pass
+        try:
+            p = urlparse(u)
+        except Exception:
+            return ""
+        scheme = (p.scheme or "https").lower()
+        netloc = (p.netloc or "").lower()
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
+        path = (p.path or "").rstrip("/") or "/"
+        skip_q = frozenset(
+            {
+                "utm_source",
+                "utm_medium",
+                "utm_campaign",
+                "utm_content",
+                "utm_term",
+                "gclid",
+                "fbclid",
+                "mc_cid",
+                "mc_eid",
+                "ref",
+            }
+        )
+        q_clean = ""
+        if p.query:
+            pairs = [(k, v) for k, v in parse_qsl(p.query, keep_blank_values=True) if k.lower() not in skip_q]
+            pairs.sort(key=lambda kv: (kv[0].lower(), kv[1]))
+            q_clean = urlencode(pairs)
+        base = f"{scheme}://{netloc}{path}"
+        return f"url:{base}?{q_clean}" if q_clean else f"url:{base}"
+
+    def _amz_deals_outbound_store_key(self, dest_channel_id: int, url_key: str) -> str:
+        return f"{int(dest_channel_id)}:{url_key}"
+
+    def _amz_deals_outbound_url_seen(self, dest_channel_id: int, url_key: str) -> bool:
+        if not url_key:
+            return False
+        self._amz_deals_sig_prune()
+        sk = self._amz_deals_outbound_store_key(dest_channel_id, url_key)
+        return sk in self._amz_deals_outbound_url_sent_ts
+
+    def _amz_deals_outbound_url_commit(self, dest_channel_id: int, url_key: str) -> None:
+        if not url_key:
+            return
+        self._amz_deals_sig_prune()
+        sk = self._amz_deals_outbound_store_key(dest_channel_id, url_key)
+        self._amz_deals_outbound_url_sent_ts[sk] = time.time()
+
     def _amz_deals_message_looks_already_forwarded(self, message: discord.Message, block: str) -> bool:
         """
         Prevent loops / double-formatting when the source message already looks like a finished deal card.
@@ -5080,6 +5186,9 @@ class InstorebotForwarder:
         for sig, ts in list(self._amz_deals_sig_sent_ts.items()):
             if (now - float(ts)) > ttl:
                 self._amz_deals_sig_sent_ts.pop(sig, None)
+        for sk, ts in list(self._amz_deals_outbound_url_sent_ts.items()):
+            if (now - float(ts)) > ttl:
+                self._amz_deals_outbound_url_sent_ts.pop(sk, None)
         for mid, ts in list(self._amz_deals_src_msg_sent_ts.items()):
             if (now - float(ts)) > ttl:
                 self._amz_deals_src_msg_sent_ts.pop(mid, None)
@@ -5800,6 +5909,26 @@ class InstorebotForwarder:
                 except Exception:
                     pass
 
+        # Apply route TTL before outbound-URL dedupe (prune uses _amz_deals_sig_ttl_s).
+        self._amz_deals_sig_ttl_s = self._amz_deals_route_dedupe_ttl_s(mapping)
+        outbound_url_key = ""
+        if self._amz_deals_dedupe_by_outbound_url(mapping):
+            outbound_url_key = self._amz_deals_outbound_dedupe_key(raw_url)
+            if outbound_url_key and self._amz_deals_outbound_url_seen(int(dest_channel_id), outbound_url_key):
+                _log_flow(
+                    "FILTER_SKIP",
+                    reason="amz_deals_duplicate_outbound_url",
+                    channel_id=str(message.channel.id),
+                    message_id=str(message.id),
+                )
+                self._explain_duplicate_amz_deals_outbound_url(
+                    channel_id=int(message.channel.id),
+                    message_id=int(message.id),
+                    dest_channel_id=int(dest_channel_id),
+                    url_key=outbound_url_key,
+                )
+                return
+
         # Route-specific cleaning
         cleaned_block = self._clean_amz_deals_block_for_gemini_route(block)
         if not cleaned_block:
@@ -5809,8 +5938,7 @@ class InstorebotForwarder:
             _log_flow("FILTER_SKIP", reason="amz_deals_low_signal", channel_id=str(message.channel.id), message_id=str(message.id))
             return
 
-        # Route-specific duplicate guard
-        self._amz_deals_sig_ttl_s = self._amz_deals_route_dedupe_ttl_s(mapping)
+        # Route-specific duplicate guard (text + URL signature; outbound URL dedupe already ran above)
         sig = self._amz_deals_signature(cleaned_block, raw_url)
         if self._amz_deals_sig_seen(sig):
             _log_flow("FILTER_SKIP", reason="amz_deals_duplicate_sig", channel_id=str(message.channel.id), message_id=str(message.id))
@@ -5892,6 +6020,8 @@ class InstorebotForwarder:
         try:
             await ch.send(embeds=[embed], allowed_mentions=discord.AllowedMentions.none())
             self._amz_deals_sig_commit(sig)
+            if outbound_url_key and self._amz_deals_dedupe_by_outbound_url(mapping):
+                self._amz_deals_outbound_url_commit(int(dest_channel_id), outbound_url_key)
             self._amz_deals_src_msg_commit(int(message.id))
 
             self._log_message_forward_summary(
