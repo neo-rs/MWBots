@@ -78,10 +78,17 @@ def collect_embed_strings(embeds: Optional[List[Dict[str, Any]]]) -> List[str]:
             for field in fields:
                 if not isinstance(field, dict):
                     continue
+                fn = field.get("name")
+                fv = field.get("value")
                 for field_key in ("name", "value"):
                     field_value = field.get(field_key)
                     if field_value:
                         collected.append(str(field_value))
+                # Discord shows fields as "Name: Value" in the client, but flattening name + value
+                # with only spaces yields "… Location Ross …" (no colon). Classifier gates expect
+                # Retail:/Resell:/Where: or Location: style lines — add the canonical combined form.
+                if fn and fv and str(fn).strip() and str(fv).strip():
+                    collected.append(f"{str(fn).strip()}: {str(fv).strip()}")
     return collected
 
 

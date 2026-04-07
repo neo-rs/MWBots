@@ -257,15 +257,9 @@ class MessageForwarder:
                             return False
                 if raw.get("image") or raw.get("thumbnail") or raw.get("video"):
                     return False
-                author = raw.get("author") or {}
-                if isinstance(author, dict) and (author.get("name") or author.get("url") or author.get("icon_url")):
-                    return False
-                footer = raw.get("footer") or {}
-                if isinstance(footer, dict) and str(footer.get("text", "") or "").strip():
-                    return False
-                provider = raw.get("provider") or {}
-                if isinstance(provider, dict) and provider.get("name"):
-                    return False
+                # Monitors often attach footer/author on the first gateway payload while the title
+                # is still truncated and fields/description/image arrive on MESSAGE_UPDATE.
+                # Do not treat footer/author/provider as proof the embed is complete.
             return True
         except Exception:
             return False
@@ -1152,9 +1146,13 @@ class MessageForwarder:
         if getattr(message, "author", None) == self.bot.user:
             return
 
-        if message.id in self.processed_ids:
+        # Same message id must not be processed twice on CREATE, but MESSAGE_UPDATE edits
+        # (Discum hydration) need a full re-run so classification sees fields/description/image.
+        mid = int(getattr(message, "id", 0) or 0)
+        if mid in self.processed_ids and not is_edit:
             return
-        self.processed_ids.add(int(message.id))
+        if mid > 0 and mid not in self.processed_ids:
+            self.processed_ids.add(mid)
 
         payload = self._to_filter_payload(message)
         message, payload = await self._hydrate_short_embed_message(message, payload)
