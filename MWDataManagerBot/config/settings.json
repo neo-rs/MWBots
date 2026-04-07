@@ -35,7 +35,7 @@
   "monitor_all_destination_channels": false,
   "monitor_webhook_messages_only": true,
   "use_webhooks_for_forwarding": true,
-  "fetchall_startup_clear_enabled": true,
+  "fetchall_startup_clear_enabled": false,
   "fetchall_startup_clear_category_ids": [
     1437856372300451851
   ],
@@ -93,8 +93,8 @@
   "major_clearance_send_single_on_timeout": false,
   "fallback_channel_id": 1435066509860012073,
   "debug_reactions": {
-    "enabled": false,
-    "allow_channel_ids": [],
+    "enabled": true,
+    "allow_channel_ids": [1434967990406873169,1435277398886060073,1434974855215714354,1435268708632363200],
     "emoji_allowed": "✅",
     "emoji_blocked": "❌"
   }
