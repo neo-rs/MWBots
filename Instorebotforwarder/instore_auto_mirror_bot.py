@@ -397,6 +397,31 @@ class _SimpleForwardBuffer:
 class InstorebotForwarder:
     _TEMPLATE_ROUTES = ("personal", "grocery", "deals", "default", "enrich_failed")
 
+    def _strip_mavely_bridge_urls_when_shortlink_present(self, text: str) -> str:
+        """
+        If a message contains a Mavely Branch shortlink (mavely.app.link), drop the expanded
+        intermediate "bridge" URL (mavelyinfluencer.com/...) to avoid duplicate-looking forwards.
+        """
+        raw = (text or "").replace("\r\n", "\n")
+        if not raw:
+            return ""
+        if not re.search(r"(?i)\bhttps?://mavely\.app\.link/\S+", raw):
+            return raw.strip()
+
+        out_lines: List[str] = []
+        removed_any = False
+        for ln in raw.split("\n"):
+            s = (ln or "").strip()
+            # Remove the bridge URL line entirely when the shortlink is present.
+            if re.search(r"(?i)\bhttps?://(?:www\.)?mavelyinfluencer\.com/\S+", s):
+                removed_any = True
+                continue
+            out_lines.append(ln)
+
+        out = "\n".join(out_lines)
+        out = re.sub(r"\n{3,}", "\n\n", out).strip()
+        return out if (out or not removed_any) else raw.strip()
+
     def _single_instance_lock_enabled(self) -> bool:
         v = (self.config or {}).get("single_instance_lock_enabled", None)
         if isinstance(v, bool):
@@ -5349,6 +5374,12 @@ class InstorebotForwarder:
             except Exception:
                 pass
 
+        # If upstream mirrored both Mavely shortlink + expanded bridge link, keep only the shortlink.
+        try:
+            out = self._strip_mavely_bridge_urls_when_shortlink_present(out)
+        except Exception:
+            pass
+
         # Discord message limit: keep under 2000 chars.
         if len(out) > 1950:
             out = out[:1940] + "…"
@@ -5774,6 +5805,12 @@ class InstorebotForwarder:
         block = self._simple_message_block(message).strip()
         if not block:
             return
+
+        # If upstream mirrored both Mavely shortlink + expanded bridge link, keep only the shortlink.
+        try:
+            block = self._strip_mavely_bridge_urls_when_shortlink_present(block)
+        except Exception:
+            pass
 
         # Hard guard: never post twice for the same source message id.
         if self._amz_deals_src_msg_seen(int(message.id)):
