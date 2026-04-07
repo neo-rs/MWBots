@@ -80,6 +80,12 @@ EDIT_COOLDOWN_SECONDS: int = 30
 MAJOR_CLEARANCE_PAIR_TTL_SECONDS: int = 180
 MAJOR_CLEARANCE_SEND_SINGLE_ON_TIMEOUT: bool = False
 
+# Debug reactions (opt-in)
+DEBUG_REACTIONS_ENABLED: bool = False
+DEBUG_REACTIONS_ALLOW_CHANNEL_IDS: Set[int] = set()
+DEBUG_REACTIONS_EMOJI_ALLOWED: str = "✅"
+DEBUG_REACTIONS_EMOJI_BLOCKED: str = "❌"
+
 
 def _parse_int_set(values: Any) -> Set[int]:
     out: Set[int] = set()
@@ -161,6 +167,8 @@ def init(settings: Dict[str, Any]) -> None:
     global FALLBACK_CHANNEL_ID
     global EDIT_COOLDOWN_SECONDS
     global MAJOR_CLEARANCE_PAIR_TTL_SECONDS, MAJOR_CLEARANCE_SEND_SINGLE_ON_TIMEOUT
+    global DEBUG_REACTIONS_ENABLED, DEBUG_REACTIONS_ALLOW_CHANNEL_IDS
+    global DEBUG_REACTIONS_EMOJI_ALLOWED, DEBUG_REACTIONS_EMOJI_BLOCKED
 
     VERBOSE = bool(settings.get("verbose", True))
 
@@ -287,6 +295,13 @@ def init(settings: Dict[str, Any]) -> None:
     if MAJOR_CLEARANCE_PAIR_TTL_SECONDS < 10:
         MAJOR_CLEARANCE_PAIR_TTL_SECONDS = 10
     MAJOR_CLEARANCE_SEND_SINGLE_ON_TIMEOUT = bool(settings.get("major_clearance_send_single_on_timeout", False))
+
+    # Debug reactions (disabled by default).
+    dbg = settings.get("debug_reactions") if isinstance(settings.get("debug_reactions"), dict) else {}
+    DEBUG_REACTIONS_ENABLED = bool(dbg.get("enabled", False))
+    DEBUG_REACTIONS_ALLOW_CHANNEL_IDS = _parse_int_set(dbg.get("allow_channel_ids"))
+    DEBUG_REACTIONS_EMOJI_ALLOWED = str(dbg.get("emoji_allowed", "✅") or "✅")
+    DEBUG_REACTIONS_EMOJI_BLOCKED = str(dbg.get("emoji_blocked", "❌") or "❌")
 
 
 def is_destination_guild(guild_id: Optional[int]) -> bool:

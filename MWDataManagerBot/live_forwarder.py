@@ -108,6 +108,46 @@ class MessageForwarder:
         self.pending_major_clearance_followups: Dict[Tuple[int, str], Dict[str, Any]] = {}
         self.pending_major_clearance: Dict[Tuple[int, str], Dict[str, Any]] = {}
 
+    async def _debug_react(self, message, *, allowed: Optional[bool], reason: str) -> None:
+        """
+        Optional debug reactions so operators can see whether a message was processed/forwarded.
+        Disabled by default; scoped by allowlist in settings (`debug_reactions.allow_channel_ids`).
+        """
+        if not bool(getattr(cfg, "DEBUG_REACTIONS_ENABLED", False)):
+            return
+        try:
+            ch_id = int(getattr(getattr(message, "channel", None), "id", 0) or 0)
+        except Exception:
+            ch_id = 0
+        if ch_id <= 0:
+            return
+        try:
+            allow = set(getattr(cfg, "DEBUG_REACTIONS_ALLOW_CHANNEL_IDS", set()) or set())
+        except Exception:
+            allow = set()
+        if allow and ch_id not in allow:
+            return
+        # If allowlist is empty, treat as "off" (safety: no accidental global spam).
+        if not allow:
+            return
+
+        emoji = ""
+        if allowed is True:
+            emoji = str(getattr(cfg, "DEBUG_REACTIONS_EMOJI_ALLOWED", "✅") or "✅")
+        elif allowed is False:
+            emoji = str(getattr(cfg, "DEBUG_REACTIONS_EMOJI_BLOCKED", "❌") or "❌")
+        else:
+            return
+        try:
+            await message.add_reaction(emoji)
+        except Exception:
+            # Never let debug UX affect forwarding.
+            if cfg.VERBOSE:
+                try:
+                    log_debug(f"[debug_reactions] failed add_reaction ({reason}) msg={getattr(message,'id',0)} ch={ch_id}")
+                except Exception:
+                    pass
+
     def _is_global_duplicate(self, signature: str) -> bool:
         now = asyncio.get_event_loop().time()
         last = self.global_content_cache.get(signature, 0.0)
@@ -1119,6 +1159,7 @@ class MessageForwarder:
                 pass
             if cfg.VERBOSE:
                 log_filter(f"skipped message {message.id} in channel <#{channel_id}>")
+            await self._debug_react(message, allowed=False, reason="filter")
             return
 
         content_sig = generate_content_signature(content, embeds, attachments)
@@ -1138,6 +1179,7 @@ class MessageForwarder:
                 pass
             if cfg.VERBOSE:
                 log_info(f"Duplicate message detected (posted {round(now-last,1)}s ago) in channel <#{channel_id}>")
+            await self._debug_react(message, allowed=False, reason="per_channel_duplicate")
             return
         self.recent_hashes[key] = now
         if len(self.recent_hashes) > 2000:
@@ -1205,6 +1247,7 @@ class MessageForwarder:
                 pass
             if cfg.VERBOSE:
                 log_global(f"skip duplicate content signature in channel <#{channel_id}>", event="global_duplicate")
+            await self._debug_react(message, allowed=False, reason="global_duplicate")
             return
 
         all_link_types = detect_all_link_types(
@@ -1639,6 +1682,7 @@ class MessageForwarder:
                     pass
                 if cfg.VERBOSE:
                     log_filter(f"skipped clearance monitor fragment msg={message.id} ch=<#{channel_id}>")
+                await self._debug_react(message, allowed=False, reason="clearance_monitor_no_route")
                 return
             trace["decision"] = {"action": "unclassified", "reason": "no_destination"}
             try:
@@ -1661,9 +1705,11 @@ class MessageForwarder:
                 if cfg.VERBOSE:
                     log_warn(f"UNCLASSIFIED fallback failed (msg={message.id}): {type(e).__name__}: {e}")
             if sent:
+                await self._debug_react(message, allowed=True, reason="unclassified_sent")
                 return
             if cfg.VERBOSE:
                 log_warn(f"No destination after classification (msg={message.id}) for source channel <#{channel_id}>")
+            await self._debug_react(message, allowed=False, reason="no_destination")
             return
 
         forwarded = 0
@@ -1764,6 +1810,7 @@ class MessageForwarder:
             )
         elif forwarded == 0 and cfg.VERBOSE:
             log_warn(f"All destinations blocked or failed (msg={message.id})")
+        await self._debug_react(message, allowed=(forwarded > 0), reason="forwarded" if forwarded > 0 else "no_forwarded")
         try:
             trace["forwarded_count"] = int(forwarded)
             trace["destinations"] = dest_traces
