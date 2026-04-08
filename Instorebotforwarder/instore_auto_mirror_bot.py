@@ -422,6 +422,53 @@ class InstorebotForwarder:
         out = re.sub(r"\n{3,}", "\n\n", out).strip()
         return out if (out or not removed_any) else raw.strip()
 
+    def _host_is_mavely_influencer_bridge(self, url: str) -> bool:
+        try:
+            h = (urlparse((url or "").strip()).netloc or "").lower()
+        except Exception:
+            return False
+        if h.startswith("www."):
+            h = h[4:]
+        return h == "mavelyinfluencer.com" or h.endswith(".mavelyinfluencer.com")
+
+    def _first_mavely_app_short_link_in_urls(self, urls: Sequence[str]) -> str:
+        for u in urls or []:
+            cand = str(u or "").strip()
+            if cand and affiliate_rewriter.is_mavely_app_short_link(cand):
+                return cand
+        return ""
+
+    def _gemini_route_outbound_url(self, urls: Sequence[str], raw_url: str, block: str) -> str:
+        """
+        Click target for gemini_rephrase_amz_deals: keep Branch short links verbatim.
+        Never use mavelyinfluencer.com (HTTP expand of app.link) as embed.url or trailing link line.
+        """
+        short = self._first_mavely_app_short_link_in_urls(urls)
+        if short:
+            return short.strip()
+        raw = (raw_url or "").strip()
+        if raw and self._host_is_mavely_influencer_bridge(raw):
+            m = re.search(r"(?i)\bhttps?://(?:www\.)?mavely\.app\.link/[^\s)>\]]+", block or "")
+            if m:
+                return m.group(0).strip()
+            return ""
+        return raw
+
+    def _strip_mavely_influencer_urls_from_text(self, text: str) -> str:
+        """Remove mavelyinfluencer.com URLs from prose (Gemini or upstream may paste the bridge)."""
+        raw = (text or "").replace("\r\n", "\n")
+        if not raw.strip():
+            return ""
+        influencer_re = re.compile(r"(?i)\s*\bhttps?://(?:www\.)?mavelyinfluencer\.com/\S+")
+        out_lines: List[str] = []
+        for ln in raw.split("\n"):
+            cleaned = influencer_re.sub("", ln).strip()
+            if cleaned:
+                out_lines.append(cleaned)
+        out = "\n".join(out_lines)
+        out = influencer_re.sub("", out)
+        return re.sub(r"\n{3,}", "\n\n", out).strip()
+
     def _single_instance_lock_enabled(self) -> bool:
         v = (self.config or {}).get("single_instance_lock_enabled", None)
         if isinstance(v, bool):
@@ -5858,6 +5905,11 @@ class InstorebotForwarder:
                         cand = str(u or "").strip()
                         if not cand or not self._is_public_http_url_for_amz_deals(cand):
                             continue
+                        # Never HTTP-expand mavely.app.link — expansion lands on mavelyinfluencer.com (bridge).
+                        if affiliate_rewriter.is_mavely_app_short_link(cand):
+                            raw_url = cand
+                            url_kind = "mavely_short"
+                            break
                         expanded = await self._expand_url_best_effort(session, cand, timeout_s=timeout_s, max_redirects=max_redirects)
                         expanded = affiliate_rewriter.unwrap_known_query_redirects(expanded) or expanded
                         if not expanded:
@@ -5946,11 +5998,18 @@ class InstorebotForwarder:
                 except Exception:
                     pass
 
+        # Click target + trailing link line: keep mavely.app.link as in source; never mavelyinfluencer.com.
+        outbound_url = self._gemini_route_outbound_url(urls, raw_url, block).strip()
+        embed_href = outbound_url
+        if not embed_href and not self._host_is_mavely_influencer_bridge(raw_url):
+            embed_href = (raw_url or "").strip()
+        dedupe_link = embed_href or ("" if self._host_is_mavely_influencer_bridge(raw_url) else (raw_url or "").strip())
+
         # Apply route TTL before outbound-URL dedupe (prune uses _amz_deals_sig_ttl_s).
         self._amz_deals_sig_ttl_s = self._amz_deals_route_dedupe_ttl_s(mapping)
         outbound_url_key = ""
-        if self._amz_deals_dedupe_by_outbound_url(mapping):
-            outbound_url_key = self._amz_deals_outbound_dedupe_key(raw_url)
+        if self._amz_deals_dedupe_by_outbound_url(mapping) and dedupe_link:
+            outbound_url_key = self._amz_deals_outbound_dedupe_key(dedupe_link)
             if outbound_url_key and self._amz_deals_outbound_url_seen(int(dest_channel_id), outbound_url_key):
                 _log_flow(
                     "FILTER_SKIP",
@@ -5968,6 +6027,7 @@ class InstorebotForwarder:
 
         # Route-specific cleaning
         cleaned_block = self._clean_amz_deals_block_for_gemini_route(block)
+        cleaned_block = self._strip_mavely_influencer_urls_from_text(cleaned_block)
         if not cleaned_block:
             _log_flow("FILTER_SKIP", reason="amz_deals_clean_empty", channel_id=str(message.channel.id), message_id=str(message.id))
             return
@@ -5976,7 +6036,7 @@ class InstorebotForwarder:
             return
 
         # Route-specific duplicate guard (text + URL signature; outbound URL dedupe already ran above)
-        sig = self._amz_deals_signature(cleaned_block, raw_url)
+        sig = self._amz_deals_signature(cleaned_block, (dedupe_link or raw_url).strip())
         if self._amz_deals_sig_seen(sig):
             _log_flow("FILTER_SKIP", reason="amz_deals_duplicate_sig", channel_id=str(message.channel.id), message_id=str(message.id))
             self._explain_duplicate_amz_deals_sig(channel_id=int(message.channel.id), message_id=int(message.id))
@@ -5990,7 +6050,8 @@ class InstorebotForwarder:
         parsed = self._parse_amz_deals_block_for_structured_gemini(desc_in)
         h0 = str(parsed.get("header") or "").strip()
         b0 = str(parsed.get("body") or "").strip()
-        kept: List[str] = list(parsed.get("kept_lines") or [])
+        kept = [self._strip_mavely_influencer_urls_from_text(str(x or "")).strip() for x in (parsed.get("kept_lines") or [])]
+        kept = [k for k in kept if k]
 
         # Safety: if parser gives no header, use first non-empty cleaned line as fallback
         if not h0:
@@ -6022,6 +6083,8 @@ class InstorebotForwarder:
         b1 = re.sub(r"(?im)^30[- ]day\s+prime\s+free\s+trial.*$", "", b1)
         b1 = re.sub(r"(?i)\bsharp\s+price\b", "price", b1)
         b1 = re.sub(r"\n{3,}", "\n\n", b1).strip()
+        h1 = self._strip_mavely_influencer_urls_from_text(h1 or "")
+        b1 = self._strip_mavely_influencer_urls_from_text(b1 or "")
 
         # Guard against duplicate headline being echoed as the first body line.
         try:
@@ -6038,7 +6101,8 @@ class InstorebotForwarder:
         except Exception:
             pass
 
-        desc_out = self._rebuild_amz_deals_embed_description(h1, b1, kept, raw_url)
+        desc_out = self._rebuild_amz_deals_embed_description(h1, b1, kept, embed_href)
+        desc_out = self._strip_mavely_influencer_urls_from_text(desc_out)
         if not desc_out:
             _log_flow("FILTER_SKIP", reason="amz_deals_empty_final_description", channel_id=str(message.channel.id), message_id=str(message.id))
             return
@@ -6046,7 +6110,7 @@ class InstorebotForwarder:
         if len(desc_out) > 3900:
             desc_out = desc_out[:3897] + "..."
 
-        embed = discord.Embed(description=desc_out, url=raw_url)
+        embed = discord.Embed(description=desc_out, url=(embed_href or None))
         media_u = self._first_source_embed_media_url(message) or self._first_attachment_image_url(message)
         if media_u:
             try:
@@ -6057,8 +6121,10 @@ class InstorebotForwarder:
         try:
             await ch.send(embeds=[embed], allowed_mentions=discord.AllowedMentions.none())
             self._amz_deals_sig_commit(sig)
-            if outbound_url_key and self._amz_deals_dedupe_by_outbound_url(mapping):
-                self._amz_deals_outbound_url_commit(int(dest_channel_id), outbound_url_key)
+            if self._amz_deals_dedupe_by_outbound_url(mapping) and dedupe_link:
+                _dk = self._amz_deals_outbound_dedupe_key(dedupe_link)
+                if _dk:
+                    self._amz_deals_outbound_url_commit(int(dest_channel_id), _dk)
             self._amz_deals_src_msg_commit(int(message.id))
 
             self._log_message_forward_summary(
