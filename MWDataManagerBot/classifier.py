@@ -15,6 +15,7 @@ from patterns import (
     AMAZON_PROFITABLE_INDICATOR_PATTERN,
     is_amazon_deal_complicated_monitor_blob,
     is_amz_price_errors_monitor_blob,
+    is_flipflip_restock_monitor_blob,
     is_ringinthedeals_flipfluence_deal_blob,
     should_skip_amazon_profitable_leads_monitor_blob,
     is_simple_amazon_profitable_lead_blob,
@@ -632,6 +633,20 @@ def select_target_channel_id(
                 # Last-resort for strict Amazon when AMAZON bucket isn't configured.
                 return cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID, "AMAZON_FALLBACK"
 
+    # FlipFlip Walmart stock monitors: excluded from profitable-leads; Walmart is usually "primary" so the
+    # strict Amazon branch above is skipped — still send to the generic AMAZON channel (ops bucket).
+    if (
+        (not skip_amazon)
+        and cfg.SMARTFILTER_AMAZON_CHANNEL_ID
+        and is_flipflip_restock_monitor_blob(text_blob)
+    ):
+        if trace is not None:
+            try:
+                trace.setdefault("classifier", {}).setdefault("matches", {})["flipflip_monitor_amazon_channel"] = True
+            except Exception:
+                pass
+        return cfg.SMARTFILTER_AMAZON_CHANNEL_ID, "AMAZON"
+
     # Conversational Amazon deal bucket (deal templates without explicit amazon.com/amzn.to).
     if (
         not skip_amazon
@@ -920,6 +935,14 @@ def detect_all_link_types(
                     trace.setdefault("classifier", {}).setdefault("matches", {})["amazon"] = matched[:200]
                 except Exception:
                     pass
+
+    if (
+        (not skip_amazon)
+        and cfg.SMARTFILTER_AMAZON_CHANNEL_ID
+        and is_flipflip_restock_monitor_blob(text_blob)
+        and not amazon_detected
+    ):
+        results.append((cfg.SMARTFILTER_AMAZON_CHANNEL_ID, "AMAZON"))
 
     # Conversational Amazon deal bucket (deal templates without explicit amazon.com/amzn.to).
     if (

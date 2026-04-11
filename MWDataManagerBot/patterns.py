@@ -355,9 +355,63 @@ def is_ringinthedeals_flipfluence_deal_blob(text: str) -> bool:
     return False
 
 
+def is_divine_helper_price_monitor_blob(text: str) -> bool:
+    """
+    Templated Discord alerts from Divine Helper v2 (rule N prefix, New/Old Price, tool links row).
+    High-volume price-monitor traffic — route to generic AMAZON, not AMAZON_PROFITABLE_LEADS.
+    """
+    if not text or not str(text).strip():
+        return False
+    raw = str(text)
+    sl = raw.lower()
+    if "divine helper v2" in sl:
+        return True
+    # Structured embed shape: New Price + Old Price + Discount + FBA + KEEPA/SAS row (distinct from hand-typed leads).
+    has_price_grid = (
+        "new price" in sl
+        and "old price" in sl
+        and "discount" in sl
+        and "seller" in sl
+        and re.search(r"\bfba\b", sl)
+        and "keepa" in sl
+        and "sas" in sl
+        and "ebay" in sl
+        and "google" in sl
+    )
+    if not has_price_grid:
+        return False
+    if re.search(r"(?m)^\s*\(\s*rule\s+\d+\s*\)", raw):
+        return True
+    if "promotion" in sl and "false" in sl and "business required" in sl:
+        return True
+    return False
+
+
+def is_flipflip_restock_monitor_blob(text: str) -> bool:
+    """
+    FlipFlip stock/restock monitor embeds (Walmart Item Restocked, Offer ID, FlipFlip Monitors footer).
+    """
+    if not text or not str(text).strip():
+        return False
+    sl = str(text).lower()
+    if "flipflip monitors" in sl:
+        return True
+    if re.search(r"walmart\s*-\s*item\s+restocked", sl):
+        return True
+    if "offer id" in sl and "order limit" in sl and re.search(r"\bsku\b", sl):
+        if "flipflip" in sl or "lightningmobile" in sl or "selleramp" in sl:
+            return True
+    return False
+
+
 def should_skip_amazon_profitable_leads_monitor_blob(text: str) -> bool:
     """True when message should not use the profitable-leads bucket (spam/monitor templates)."""
-    return bool(is_amz_price_errors_monitor_blob(text) or is_ringinthedeals_flipfluence_deal_blob(text))
+    return bool(
+        is_amz_price_errors_monitor_blob(text)
+        or is_ringinthedeals_flipfluence_deal_blob(text)
+        or is_divine_helper_price_monitor_blob(text)
+        or is_flipflip_restock_monitor_blob(text)
+    )
 
 
 # Noisy deal-monitor banners / price-teaser layouts — do not use "simple" profitable-leads exception.
@@ -414,6 +468,10 @@ def is_simple_amazon_profitable_lead_blob(text: str) -> bool:
     if is_amz_price_errors_monitor_blob(raw):
         return False
     if is_ringinthedeals_flipfluence_deal_blob(raw):
+        return False
+    if is_divine_helper_price_monitor_blob(raw):
+        return False
+    if is_flipflip_restock_monitor_blob(raw):
         return False
     simple_signals = [
         r"on\s+sale\s+from\s+\$[\d,]+(?:\.\d{2})?\s+down\s+to\s+\$",
