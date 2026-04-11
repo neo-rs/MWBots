@@ -1290,6 +1290,21 @@ class MessageForwarder:
         if global_types:
             all_link_types.extend(global_types)
 
+        try:
+            mm_skip = bool((trace.get("classifier") or {}).get("matches", {}).get("mention_format_skip"))
+        except Exception:
+            mm_skip = False
+        if mm_skip and not all_link_types:
+            trace["decision"] = {"action": "skip", "reason": "mention_format_noise"}
+            try:
+                write_trace_log(trace)
+            except Exception:
+                pass
+            if cfg.VERBOSE:
+                log_filter(f"skipped mention-only / ping-shaped message msg={message.id} ch=<#{channel_id}>")
+            await self._debug_react(message, allowed=False, reason="mention_format_noise")
+            return
+
         dispatch_link_types: List[Tuple[int, str]] = []
         stop_after_first = False
         if all_link_types:

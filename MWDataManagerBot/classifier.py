@@ -18,6 +18,7 @@ from patterns import (
     is_divine_helper_price_monitor_blob,
     is_flipflip_restock_monitor_blob,
     is_ringinthedeals_flipfluence_deal_blob,
+    is_mention_format_noise_blob,
     should_skip_amazon_profitable_leads_monitor_blob,
     is_simple_amazon_profitable_lead_blob,
     CARDS_PATTERN,
@@ -592,6 +593,14 @@ def select_target_channel_id(
         except Exception:
             pass
 
+    if is_mention_format_noise_blob(text_blob, attachments):
+        if trace is not None:
+            try:
+                trace.setdefault("classifier", {}).setdefault("matches", {})["mention_format_skip"] = True
+            except Exception:
+                pass
+        return None
+
     # 0) PRICE_ERROR / glitched (online-only; same gate as global_triggers).
     # Exclude rigid AMZ Price Errors monitor templates (Amazon Sold / eBay Avg / flip lines) — not true "glitch" leads.
     if (
@@ -607,18 +616,14 @@ def select_target_channel_id(
                 pass
         return cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID, "PRICE_ERROR"
 
-    # WOOT: Woot deals can include affiliate Amazon tracking (amzn.to links),
-    # causing them to be detected as Amazon. Route to INSTORE_LEADS instead.
-    if (
-        _store_label_present_in_blob(text_blob, "woot")
-        or WOOT_DEALS_PATTERN.search(text_blob or "")
-    ) and cfg.SMARTFILTER_INSTORE_LEADS_CHANNEL_ID:
+    # Woot is an online affiliate merchant (computers.woot.com, etc.). It is not an in-store lead bucket.
+    # `_is_amazon_primary` already suppresses AMAZON when Woot is present (amzn.to comps).
+    if _store_label_present_in_blob(text_blob, "woot") or WOOT_DEALS_PATTERN.search(text_blob or ""):
         if trace is not None:
             try:
                 trace.setdefault("classifier", {}).setdefault("matches", {})["primary_store"] = "woot"
             except Exception:
                 pass
-        return cfg.SMARTFILTER_INSTORE_LEADS_CHANNEL_ID, "INSTORE_LEADS"
 
     # 1) AMAZON (strict) – profitable flips → AMAZON_PROFITABLE_LEAD
     amazon_match = AMAZON_LINK_PATTERN.search(text_blob) if not skip_amazon else None
@@ -895,6 +900,14 @@ def detect_all_link_types(
         except Exception:
             pass
 
+    if is_mention_format_noise_blob(pe_check_blob, attachments):
+        if trace is not None:
+            try:
+                trace.setdefault("classifier", {}).setdefault("matches", {})["mention_format_skip"] = True
+            except Exception:
+                pass
+        return []
+
     # PRICE_ERROR / glitched (add early for order_link_types priority; online-only + exclude AMZ monitor templates)
     if (
         cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID
@@ -909,19 +922,13 @@ def detect_all_link_types(
             except Exception:
                 pass
 
-    # WOOT: Woot deals can include affiliate Amazon tracking (amzn.to links),
-    # causing them to be detected as "Amazon". Route them to INSTORE_LEADS
-    # so they go through the in-store classification buttons.
-    if (
-        _store_label_present_in_blob(text_blob, "woot")
-        or WOOT_DEALS_PATTERN.search(text_blob or "")
-    ) and cfg.SMARTFILTER_INSTORE_LEADS_CHANNEL_ID:
+    # Woot is online / affiliate-shaped; do not short-circuit the multi-route classifier into INSTORE_LEADS.
+    if _store_label_present_in_blob(text_blob, "woot") or WOOT_DEALS_PATTERN.search(text_blob or ""):
         if trace is not None:
             try:
                 trace.setdefault("classifier", {}).setdefault("matches", {})["primary_store"] = "woot"
             except Exception:
                 pass
-        return [(cfg.SMARTFILTER_INSTORE_LEADS_CHANNEL_ID, "INSTORE_LEADS")]
 
     amazon_detected = False
     amazon_match = AMAZON_LINK_PATTERN.search(text_blob) if not skip_amazon else None

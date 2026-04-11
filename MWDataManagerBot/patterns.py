@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any, Dict, List, Optional
 
 # NOTE: These are vendored from `neonxt/core/global_filters.py` so MWDataManagerBot
 # can be standalone (no `neonxt.*` imports).
@@ -277,8 +278,8 @@ PROFITABLE_FLIP_PATTERN = re.compile(
     r"\b(200%|300%|400%|500%|\d{3,}%|3x|4x|5x|\d+x\s*retail|high\s*roi|exceptional\s*margin|great\s*flip|easy\s*money|quick\s*flip)\b",
     re.IGNORECASE,
 )
-# Woot leads are often wrapped with Amazon affiliate tracking (amzn.to links),
-# so we treat them as a separate primary store class.
+# Woot leads often include Amazon affiliate tracking (amzn.to links). `STORE_DOMAINS` maps woot.com -> "woot"
+# so `_is_amazon_primary` / affiliated routing can treat Woot as the primary merchant (not Amazon).
 WOOT_DEALS_PATTERN = re.compile(r"\bwoot\s*deals\b", re.IGNORECASE)
 
 # Amazon profitable flip indicators (Keepa-style: avg 30, % drop, etc.)
@@ -1002,4 +1003,60 @@ INSTORE_KEYWORDS = [
     "brick and mortar",
     "brick-and-mortar",
 ]
+
+# Discord structural mentions / emoji / timestamp tokens (API wire format).
+_DISCORD_STRUCTURAL_TOKEN_RE = re.compile(
+    r"<@!?[0-9]{15,22}>|<@&[0-9]{15,22}>|<#[0-9]{15,22}>"
+    r"|<a?:[A-Za-z0-9_]{1,32}:[0-9]{15,22}>"
+    r"|<t:[0-9]{6,22}:[RrDdFfTt]>",
+    re.IGNORECASE,
+)
+
+
+def is_mention_format_noise_blob(text_blob: str, attachments: Optional[List[Dict[str, Any]]] = None) -> bool:
+    """
+    True when the message is effectively only Discord pings / mention-shaped noise.
+
+    Used to avoid DEFAULT / UNCLASSIFIED spam for posts like role pings (`<@&...>`) or
+    pasted `@RoleName` lines with no deal payload (no URLs, no $ prices, no ASINs).
+    """
+    raw = str(text_blob or "").strip()
+    if not raw:
+        return False
+    low = raw.lower()
+    if "http://" in low or "https://" in low:
+        return False
+    if re.search(r"\$[\d,]", raw):
+        return False
+    if re.search(r"\bB0[A-Z0-9]{8}\b", raw, re.IGNORECASE):
+        return False
+
+    for a in attachments or []:
+        if not isinstance(a, dict):
+            continue
+        u = str(a.get("url") or a.get("proxy_url") or "").strip().lower()
+        if u.startswith("http://") or u.startswith("https://"):
+            return False
+
+    rem = _DISCORD_STRUCTURAL_TOKEN_RE.sub(" ", raw)
+    rem = re.sub(r"(?i)@everyone\b|@here\b", " ", rem)
+    rem = re.sub(r"\s+", " ", rem).strip()
+    if not rem:
+        return bool(re.search(r"<[@#]", raw) or re.search(r"(?i)@everyone|@here\b", raw))
+
+    def _literal_at_ping_lines_only(s: str) -> bool:
+        s2 = str(s or "").strip()
+        if not s2:
+            return False
+        for line in s2.splitlines():
+            t = line.strip()
+            if not t:
+                continue
+            if not t.startswith("@"):
+                return False
+        return True
+
+    if _literal_at_ping_lines_only(rem):
+        return True
+    return False
 
