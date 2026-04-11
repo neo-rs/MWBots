@@ -21,6 +21,9 @@ from patterns import (
     is_mention_format_noise_blob,
     is_amz_deals_affiliate_bridge_blob,
     allow_amz_deals_despite_complicated_monitor,
+    instore_sneakers_bucket_active,
+    instore_apparel_suppresses_sneakers_bucket,
+    instore_explicit_footwear_intent,
     should_skip_amazon_profitable_leads_monitor_blob,
     is_simple_amazon_profitable_lead_blob,
     CARDS_PATTERN,
@@ -183,14 +186,15 @@ def classify_instore_destination(
     """
     Canonical instore classification logic (single source of truth).
     Returns (channel_id, tag) for the first matching instore classification, or None.
-    Order: Seasonal -> Sneakers -> Cards -> Theatre -> Major Stores -> Discounted Stores -> INSTORE_LEADS
+    Order: Seasonal -> Cards -> Sneakers -> Theatre -> Major Stores -> Discounted Stores -> INSTORE_LEADS
     """
     if not (is_instore_source and instore_required and instore_context):
         return None
     
     # Check patterns once
     seasonal_hit = bool(SEASONAL_PATTERN.search(text_to_check or ""))
-    sneakers_hit = bool(SNEAKERS_PATTERN.search(text_to_check or ""))
+    sneakers_pattern_hit = bool(SNEAKERS_PATTERN.search(text_to_check or ""))
+    sneakers_hit = bool(instore_sneakers_bucket_active(text_to_check or ""))
     cards_match = CARDS_PATTERN.search(text_to_check or "")
     card_context_hit = bool(_INSTORE_CARDS_CONTEXT_PATTERN.search(text_to_check or ""))
     cards_hit = bool(cards_match) and card_context_hit
@@ -212,6 +216,14 @@ def classify_instore_destination(
             trace.setdefault("classifier", {}).setdefault("matches", {}).update(
                 {
                     "instore_seasonal": seasonal_hit,
+                    "instore_sneakers_pattern_hit": sneakers_pattern_hit,
+                    "instore_sneakers_apparel_suppress": bool(
+                        sneakers_pattern_hit
+                        and instore_apparel_suppresses_sneakers_bucket(text_to_check or "")
+                    ),
+                    "instore_sneakers_footwear_intent": bool(
+                        sneakers_pattern_hit and instore_explicit_footwear_intent(text_to_check or "")
+                    ),
                     "instore_sneakers": sneakers_hit,
                     "instore_cards": cards_hit,
                     "instore_cards_pattern_span": (
@@ -232,10 +244,10 @@ def classify_instore_destination(
     # Classification order (priority-based)
     if seasonal_hit and cfg.SMARTFILTER_INSTORE_SEASONAL_CHANNEL_ID:
         return cfg.SMARTFILTER_INSTORE_SEASONAL_CHANNEL_ID, "INSTORE_SEASONAL"
-    if sneakers_hit and cfg.SMARTFILTER_INSTORE_SNEAKERS_CHANNEL_ID:
-        return cfg.SMARTFILTER_INSTORE_SNEAKERS_CHANNEL_ID, "INSTORE_SNEAKERS"
     if cards_hit and cfg.SMARTFILTER_INSTORE_CARDS_CHANNEL_ID:
         return cfg.SMARTFILTER_INSTORE_CARDS_CHANNEL_ID, "INSTORE_CARDS"
+    if sneakers_hit and cfg.SMARTFILTER_INSTORE_SNEAKERS_CHANNEL_ID:
+        return cfg.SMARTFILTER_INSTORE_SNEAKERS_CHANNEL_ID, "INSTORE_SNEAKERS"
     if theatre_hit and cfg.SMARTFILTER_INSTORE_THEATRE_CHANNEL_ID:
         return cfg.SMARTFILTER_INSTORE_THEATRE_CHANNEL_ID, "INSTORE_THEATRE"
     if major_hit and cfg.SMARTFILTER_MAJOR_STORES_CHANNEL_ID:

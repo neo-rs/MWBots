@@ -287,8 +287,12 @@ def matches_instore_theatre(text: str, where_location: str = "") -> bool:
         return True
     if where_location and THEATRE_STORE_PATTERN.search(where_location):
         return True
-    if THEATRE_MERCH_PATTERN.search(text) and THEATRE_CONTEXT_PATTERN.search(text):
-        return True
+    if THEATRE_MERCH_PATTERN.search(text):
+        if THEATRE_CONTEXT_PATTERN.search(text):
+            return True
+        # Titles like "Super Mario Galaxy Movie … Popcorn Bucket" omit AMC/Cinemark wording.
+        if re.search(r"\bmovie\b", text or "", re.IGNORECASE):
+            return True
     return False
 
 

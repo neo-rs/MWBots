@@ -114,7 +114,8 @@ SNEAKERS_PATTERN = re.compile(
     r"running\s*shoes?|"
     r"basketball\s*shoes?|"
     r"tennis\s*shoes?|"
-    r"trainers?|"
+    # Avoid matching TCG "Elite Trainer Box" via bare \btrainer(s)?\b.
+    r"(?:running|basketball|tennis)\s+trainers?\b|"
     r"jordans?|"
     r"dunks?|dunk\s*low|dunk\s*high|"
     r"air\s*max|airmax|"
@@ -136,6 +137,65 @@ SNEAKERS_PATTERN = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+
+# In-store: Nike/Adidas/etc. appear on apparel; gate INSTORE_SNEAKERS behind explicit footwear signals
+# unless the post is clearly not footwear (tights/shorts/running suit/Dri-FIT apparel).
+_INSTORE_APPAREL_SUPPRESS_SNEAKERS_PATTERN = re.compile(
+    r"\b("
+    r"dri[-\s]?fit|"
+    r"(?:running|athletic|gym|yoga|bike|compression)\s+(?:tights?|shorts?|pants|leggings?|top|tank|singlet|suit|jacket|hoodie|bra|shirt|tee)|"
+    r"\b(?:tights?|leggings?)\b|"
+    r"\bjoggers?\b|"
+    r"\bsweatpants?\b|"
+    r"\b(?:running|athletic|gym)\s+shorts?\b|"
+    r"\bshorts\b|"
+    r"\bsports?\s+bras?\b|"
+    r"\bsleeveless\b|"
+    r"\brunning\s+suit\b|"
+    r"\b(?:polo|henley|crewneck|pullover|windbreaker)\b"
+    r")\b",
+    re.IGNORECASE,
+)
+_INSTORE_EXPLICIT_FOOTWEAR_INTENT_PATTERN = re.compile(
+    r"\b("
+    r"sneakers?|sneaks?|kicks?\b|"
+    r"\bshoes?\b|"
+    r"footwear|"
+    r"cleats?|"
+    r"\bslides?\b|"
+    r"\bdunks?\b|"
+    r"\baf1\b|"
+    r"\bjordans?\b|"
+    r"\byeezy\b|"
+    r"air\s*max|air\s*force|"
+    r"sb\s*dunks?\b|"
+    r"retro\s*jordans?\b|"
+    r"(?:running|basketball|tennis)\s+shoes?\b|"
+    r"(?:running|basketball|tennis)\s+trainers?\b"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def instore_apparel_suppresses_sneakers_bucket(text: str) -> bool:
+    return bool(_INSTORE_APPAREL_SUPPRESS_SNEAKERS_PATTERN.search(text or ""))
+
+
+def instore_explicit_footwear_intent(text: str) -> bool:
+    return bool(_INSTORE_EXPLICIT_FOOTWEAR_INTENT_PATTERN.search(text or ""))
+
+
+def instore_sneakers_bucket_active(text: str) -> bool:
+    raw = str(text or "").strip()
+    if not raw or not SNEAKERS_PATTERN.search(raw):
+        return False
+    if instore_explicit_footwear_intent(raw):
+        return True
+    if instore_apparel_suppresses_sneakers_bucket(raw):
+        return False
+    return True
+
+
 CARDS_PATTERN = re.compile(
     r"\b("
     # Pokemon - brand and set names
@@ -598,6 +658,7 @@ MAJOR_STORES = [
     "sam's club",
     "home depot",
     "lowe's",
+    "lowes",
     "gamestop",
     "nike",
     "adidas",
@@ -617,6 +678,8 @@ MAJOR_STORES = [
     "cabela's",
     "bass pro",
     "trader joe's",
+    "trader joes",
+    "jack in the box",
     "whole foods",
     "sprouts",
     "scheels",
