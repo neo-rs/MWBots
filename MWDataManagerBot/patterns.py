@@ -415,6 +415,57 @@ def should_skip_amazon_profitable_leads_monitor_blob(text: str) -> bool:
     )
 
 
+def allow_amz_deals_despite_complicated_monitor(text: str) -> bool:
+    """
+    Conversational / affiliate-bridge posts that use monitor-ish scaffolding (New Deal Found!, $x.xx teasers)
+    but should still be eligible for the AMZ_DEALS bucket (not generic AMAZON / profitable-leads).
+    """
+    sl = str(text or "").lower()
+    if "flipfluence" in sl:
+        return True
+    if "pricedoffers.com" in sl:
+        return True
+    if "deal soldier" in sl:
+        return True
+    if re.search(r"miablogs\.us/", sl) and "paid-ad" in sl:
+        return True
+    return False
+
+
+def is_amz_deals_affiliate_bridge_blob(text: str) -> bool:
+    """
+    Affiliate-bridge / feed-shaped Amazon promos that should bucket as AMZ_DEALS (conversational deals),
+    not AMAZON_PROFITABLE_LEADS and not AFFILIATED_LINKS.
+
+    Examples: FlipFluence + amazon.com/dp, pricedoffers.com + clip/checkout copy, miablogs paid-ad ASIN links.
+    """
+    if not text or not str(text).strip():
+        return False
+    raw = str(text)
+    sl = raw.lower()
+    has_amazonish = bool(
+        re.search(r"\bamazon\b", sl)
+        or re.search(r"amazon\.[a-z.]{2,16}/", sl)
+        or re.search(r"amzn\.to|a\.co/", sl)
+        or re.search(r"(?:/|\b)dp/\s*B0[A-Z0-9]{8}\b", raw, re.IGNORECASE)
+        or re.search(r"\bB0[A-Z0-9]{8}\b", raw, re.IGNORECASE)
+    )
+    if "flipfluence" in sl and (has_amazonish or _AMZ_COMPLICATED_NEW_DEAL_FOUND_PATTERN.search(sl)):
+        return True
+    if "pricedoffers.com" in sl and (
+        "$" in raw
+        or has_amazonish
+        or "deal soldier" in sl
+        or re.search(r"\bclip\b", sl)
+    ):
+        return True
+    if re.search(r"miablogs\.us/[^\s]*paid-ad", sl, re.IGNORECASE) and re.search(r"\bB0[A-Z0-9]{8}\b", raw, re.IGNORECASE):
+        return True
+    if is_ringinthedeals_flipfluence_deal_blob(text):
+        return True
+    return False
+
+
 # Noisy deal-monitor banners / price-teaser layouts — do not use "simple" profitable-leads exception.
 _AMZ_COMPLICATED_CHECK_PRICE_PATTERN = re.compile(r"check\s+your\s+price", re.IGNORECASE)
 _AMZ_COMPLICATED_NEW_DEAL_FOUND_PATTERN = re.compile(r"\bnew\s+deal\s+found\b", re.IGNORECASE)
@@ -510,6 +561,10 @@ AMAZON_CONVERSATIONAL_DEAL_PATTERN = re.compile(
     r"|must\s+subscribe\s*&\s*save"
     r"|clip\s+(?:the\s+)?\d+\s*%\s*off\s+coupon"
     r"|clip\s+(?:the\s+)?coupon"
+    r"|clip\s+\$\s*[\d,]+(?:\.\d{2})?\s+coupon"
+    r"|originally\s+listed\s+on\s+amazon"
+    r"|this\s+amazon\s+seller\s+is\s+glitching"
+    r"|lowest\s+ever\s+price"
     r"|promo\s+drops"
     r"|lowest\s+ever\s+on\s+amazon"
     r"|free\s+at\s+checkout"

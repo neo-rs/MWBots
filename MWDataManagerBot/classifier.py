@@ -19,6 +19,8 @@ from patterns import (
     is_flipflip_restock_monitor_blob,
     is_ringinthedeals_flipfluence_deal_blob,
     is_mention_format_noise_blob,
+    is_amz_deals_affiliate_bridge_blob,
+    allow_amz_deals_despite_complicated_monitor,
     should_skip_amazon_profitable_leads_monitor_blob,
     is_simple_amazon_profitable_lead_blob,
     CARDS_PATTERN,
@@ -442,7 +444,7 @@ def _looks_like_conversational_amazon_deal(
             return _skip("not_configured_online_channel")
     except Exception:
         return _skip("channel_id_error")
-    if _NEW_DEAL_FOUND_PATTERN.search(text_blob):
+    if _NEW_DEAL_FOUND_PATTERN.search(text_blob) and not allow_amz_deals_despite_complicated_monitor(text_blob):
         return _skip("new_deal_found_banner")
     # These templates almost always include at least one explicit price token.
     if "$" not in text_blob:
@@ -479,7 +481,7 @@ def _looks_like_conversational_amazon_deal(
         if short_pointer or price_errors_pointer:
             return _skip("discord_jump_link_pointer")
 
-    if is_amazon_deal_complicated_monitor_blob(text_blob):
+    if is_amazon_deal_complicated_monitor_blob(text_blob) and not allow_amz_deals_despite_complicated_monitor(text_blob):
         return _skip("teaser_or_xx_price_monitor")
     if is_amz_price_errors_monitor_blob(text_blob):
         return _skip("amz_price_errors_monitor_template")
@@ -945,6 +947,11 @@ def detect_all_link_types(
             profitable_for_leads_bucket = bool(
                 (is_profitable or simple_profitable) and not complicated_monitor
             )
+            force_amz_deals = bool(
+                source_group == "online"
+                and cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID
+                and is_amz_deals_affiliate_bridge_blob(text_blob)
+            )
             if trace is not None:
                 try:
                     m = trace.setdefault("classifier", {}).setdefault("matches", {})
@@ -959,15 +966,20 @@ def detect_all_link_types(
                         m["amazon_complicated_monitor_template"] = True
                     if simple_profitable:
                         m["simple_amazon_profitable_lead"] = True
+                    if force_amz_deals:
+                        m["amz_deals_affiliate_bridge"] = True
                 except Exception:
                     pass
             if (
                 profitable_for_leads_bucket
                 and cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID
                 and not skip_profitable_leads
+                and not force_amz_deals
             ):
                 # Canonical tag string (matches global_triggers.py and manual picker)
                 results.append((cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID, "AMAZON_PROFITABLE_LEAD"))
+            elif force_amz_deals:
+                results.append((cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID, "AMZ_DEALS"))
             elif cfg.SMARTFILTER_AMAZON_CHANNEL_ID:
                 results.append((cfg.SMARTFILTER_AMAZON_CHANNEL_ID, "AMAZON"))
             elif cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID:
