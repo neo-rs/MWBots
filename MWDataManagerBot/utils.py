@@ -48,8 +48,14 @@ def extract_urls_from_text(text: str) -> List[str]:
     return [normalize_url(u) for u in urls]
 
 
-def collect_embed_strings(embeds: Optional[List[Dict[str, Any]]]) -> List[str]:
-    """Flatten relevant embed fields into a list of strings for pattern checks."""
+def collect_embed_strings(
+    embeds: Optional[List[Dict[str, Any]]], *, omit_embed_identity: bool = False
+) -> List[str]:
+    """Flatten relevant embed fields into a list of strings for pattern checks.
+
+    When ``omit_embed_identity`` is True, embed author + footer text are omitted so duplicate
+    deal posts from different monitor bots hash the same for dedupe signatures.
+    """
     if not embeds:
         return []
     collected: List[str] = []
@@ -60,19 +66,20 @@ def collect_embed_strings(embeds: Optional[List[Dict[str, Any]]]) -> List[str]:
             value = embed.get(key)
             if value:
                 collected.append(str(value))
-        author = embed.get("author")
-        if isinstance(author, dict):
-            author_name = author.get("name")
-            if author_name:
-                collected.append(str(author_name))
-            author_url = author.get("url")
-            if author_url:
-                collected.append(str(author_url))
-        footer = embed.get("footer")
-        if isinstance(footer, dict):
-            footer_text = footer.get("text")
-            if footer_text:
-                collected.append(str(footer_text))
+        if not omit_embed_identity:
+            author = embed.get("author")
+            if isinstance(author, dict):
+                author_name = author.get("name")
+                if author_name:
+                    collected.append(str(author_name))
+                author_url = author.get("url")
+                if author_url:
+                    collected.append(str(author_url))
+            footer = embed.get("footer")
+            if isinstance(footer, dict):
+                footer_text = footer.get("text")
+                if footer_text:
+                    collected.append(str(footer_text))
         fields = embed.get("fields")
         if isinstance(fields, list):
             for field in fields:
@@ -235,14 +242,20 @@ def generate_content_signature(
     content: str,
     embeds: Optional[List[Dict[str, Any]]],
     attachments: Optional[List[Dict[str, Any]]],
+    *,
+    for_cross_post_dedupe: bool = False,
 ) -> str:
-    """Create a normalized signature for content + embeds + attachments."""
+    """Create a normalized signature for content + embeds + attachments.
+
+    ``for_cross_post_dedupe``: omit per-bot embed footers/authors and add a sorted URL multiset
+    so the same deal mirrored by two apps (different footers) still dedupes within TTL.
+    """
     components: List[str] = []
     components.append(normalize_message(content or ""))
 
     embed_strings = sorted(
         normalize_message(str(item))
-        for item in collect_embed_strings(embeds or [])
+        for item in collect_embed_strings(embeds or [], omit_embed_identity=bool(for_cross_post_dedupe))
         if item
     )
     components.extend(embed_strings)
@@ -256,6 +269,12 @@ def generate_content_signature(
             attachment_urls.append(normalize_url(str(url)))
     attachment_urls.sort()
     components.extend(attachment_urls)
+
+    if for_cross_post_dedupe:
+        url_blob = (content or "") + "\n" + "\n".join(collect_embed_strings(embeds or []))
+        url_set = sorted({u for u in extract_urls_from_text(url_blob) if u})
+        if url_set:
+            components.append("URLSET:" + "|".join(url_set))
 
     signature_source = "||".join(components).strip()
     return hashlib.md5(signature_source.encode("utf-8")).hexdigest()

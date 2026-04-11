@@ -1184,7 +1184,7 @@ class MessageForwarder:
             await self._debug_react(message, allowed=False, reason="filter")
             return
 
-        content_sig = generate_content_signature(content, embeds, attachments)
+        content_sig = generate_content_signature(content, embeds, attachments, for_cross_post_dedupe=True)
         key = f"{channel_id}:{content_sig}"
         now = asyncio.get_event_loop().time()
         last = self.recent_hashes.get(key, 0.0)
@@ -1260,7 +1260,7 @@ class MessageForwarder:
         self._track_link_occurrences(text_to_check, channel_id)
 
         # Global duplicate (cross-channel signature) - do NOT include channel_id.
-        global_sig = generate_content_signature(content, embeds, attachments)
+        global_sig = generate_content_signature(content, embeds, attachments, for_cross_post_dedupe=True)
         if self._is_global_duplicate(global_sig):
             trace["decision"] = {"action": "skip", "reason": "global_duplicate", "global_sig": global_sig}
             try:

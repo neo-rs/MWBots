@@ -15,6 +15,7 @@ from patterns import (
     AMAZON_PROFITABLE_INDICATOR_PATTERN,
     is_amazon_deal_complicated_monitor_blob,
     is_amz_price_errors_monitor_blob,
+    is_divine_helper_price_monitor_blob,
     is_flipflip_restock_monitor_blob,
     is_ringinthedeals_flipfluence_deal_blob,
     should_skip_amazon_profitable_leads_monitor_blob,
@@ -454,6 +455,40 @@ def _looks_like_conversational_amazon_deal(
     ):
         return _skip("clearance_monitor_shape")
 
+    # In-store arbitrage template (Retail / Resell / Where) — not the AMZ_DEALS "promo stack" bucket.
+    if (
+        re.search(r"\bretail\s*[:\-]", text_blob, re.IGNORECASE)
+        and re.search(r"\bresell\s*[:\-]", text_blob, re.IGNORECASE)
+        and re.search(r"\b(where|location)\s*[:\-]", text_blob, re.IGNORECASE)
+    ):
+        return _skip("instore_style_retail_resell_where")
+
+    # Pointer posts (Discord jump link + tiny body) or AMZ Price Errors style snippets.
+    if re.search(
+        r"https?://(?:(?:www|ptb|canary)\.)?discord(?:app)?\.com/channels/\d+/\d+/\d+",
+        text_blob,
+        re.IGNORECASE,
+    ):
+        condensed = re.sub(r"\s+", " ", (text_blob or "").strip())
+        short_pointer = len(condensed) <= 520
+        price_errors_pointer = bool(
+            re.search(r"@?amazon\s+price\s+errors?\b", text_blob, re.IGNORECASE)
+            or re.search(r"\bprice\s+errors?\b", text_blob, re.IGNORECASE)
+        )
+        if short_pointer or price_errors_pointer:
+            return _skip("discord_jump_link_pointer")
+
+    if is_amazon_deal_complicated_monitor_blob(text_blob):
+        return _skip("teaser_or_xx_price_monitor")
+    if is_amz_price_errors_monitor_blob(text_blob):
+        return _skip("amz_price_errors_monitor_template")
+    if is_divine_helper_price_monitor_blob(text_blob):
+        return _skip("divine_helper_monitor")
+    if is_flipflip_restock_monitor_blob(text_blob):
+        return _skip("flipflip_restock_monitor")
+    if is_ringinthedeals_flipfluence_deal_blob(text_blob):
+        return _skip("ringinthedeals_flipfluence_template")
+
     amazon_conv = bool(AMAZON_CONVERSATIONAL_DEAL_PATTERN.search(text_blob))
     retail_conv = bool(RETAIL_CONVERSATIONAL_DEAL_PATTERN.search(text_blob))
     if not amazon_conv and not retail_conv:
@@ -647,20 +682,6 @@ def select_target_channel_id(
                 pass
         return cfg.SMARTFILTER_AMAZON_CHANNEL_ID, "AMAZON"
 
-    # Conversational Amazon deal bucket (deal templates without explicit amazon.com/amzn.to).
-    if (
-        not skip_amazon
-        and source_group == "online"
-        and cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID
-        and _looks_like_conversational_amazon_deal(
-            text_blob,
-            source_group=source_group,
-            source_channel_id=source_channel_id,
-            trace=trace,
-        )
-    ):
-        return cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID, "AMZ_DEALS"
-
     # 2) MONITORED_KEYWORD
     keyword_hit = bool(keywords_list and check_keyword_match(text_blob, keywords_list, trace=trace))
     if trace is not None:
@@ -719,6 +740,21 @@ def select_target_channel_id(
     )
     if instore_result:
         return instore_result
+
+    # Conversational Amazon deal bucket — evaluated *after* instore/keyword so Ross-style online posts
+    # do not get mis-bucketed as AMZ_DEALS.
+    if (
+        not skip_amazon
+        and source_group == "online"
+        and cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID
+        and _looks_like_conversational_amazon_deal(
+            text_blob,
+            source_group=source_group,
+            source_channel_id=source_channel_id,
+            trace=trace,
+        )
+    ):
+        return cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID, "AMZ_DEALS"
 
     # 9) UPCOMING (online only; explainable)
     if cfg.SMARTFILTER_UPCOMING_CHANNEL_ID and (source_group == "online") and TIMESTAMP_PATTERN.search(text_to_check or ""):
@@ -944,21 +980,6 @@ def detect_all_link_types(
     ):
         results.append((cfg.SMARTFILTER_AMAZON_CHANNEL_ID, "AMAZON"))
 
-    # Conversational Amazon deal bucket (deal templates without explicit amazon.com/amzn.to).
-    if (
-        (not skip_amazon)
-        and source_group == "online"
-        and cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID
-        and not amazon_detected
-        and _looks_like_conversational_amazon_deal(
-            text_blob,
-            source_group=source_group,
-            source_channel_id=source_channel_id,
-            trace=trace,
-        )
-    ):
-        results.append((cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID, "AMZ_DEALS"))
-
     keyword_hit = bool(keywords_list and check_keyword_match(text_blob, keywords_list, trace=trace))
     if trace is not None:
         try:
@@ -1012,6 +1033,22 @@ def detect_all_link_types(
     )
     if instore_selection:
         results.append(instore_selection)
+
+    # Conversational Amazon deal bucket — after instore classification so Retail/Resell/Where leads
+    # route to instore buckets first; skips inside _looks_like_conversational_amazon_deal gate noise.
+    if (
+        (not skip_amazon)
+        and source_group == "online"
+        and cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID
+        and not amazon_detected
+        and _looks_like_conversational_amazon_deal(
+            text_blob,
+            source_group=source_group,
+            source_channel_id=source_channel_id,
+            trace=trace,
+        )
+    ):
+        results.append((cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID, "AMZ_DEALS"))
 
     if cfg.SMARTFILTER_UPCOMING_CHANNEL_ID and (source_group == "online") and TIMESTAMP_PATTERN.search(text_to_check or ""):
         upcoming_explain = is_truly_upcoming_explain(text_to_check or "")
