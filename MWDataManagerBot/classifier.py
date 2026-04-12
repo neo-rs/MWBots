@@ -174,6 +174,33 @@ def is_definitive_major_clearance_embed(text: str) -> bool:
     return bool(has_title and has_inventory and has_internet_number and has_price_shape)
 
 
+def is_tempo_monitors_major_clearance_candidate(text: str) -> bool:
+    """
+    TempoMonitors-style stock embed (MSRP / As low as + SKU or UPC + Tempo footer).
+    Canonical with live_forwarder major-clearance pairing (embed gate).
+    """
+    tl = (text or "").lower()
+    if not tl:
+        return False
+    has_msrp = "msrp" in tl
+    has_as_low = ("as low as" in tl) or ("as-low-as" in tl)
+    has_upc = "upc" in tl and bool(re.search(r"\b\d{11,14}\b", tl))
+    has_sku = "sku" in tl and bool(re.search(r"\bsku\b[^\n]{0,50}\b\d{6,}\b", tl))
+    has_tempo = "tempomonitors.com" in tl or "powered by tempomonitors" in tl
+    if has_msrp and has_as_low and (has_upc or has_sku) and has_tempo:
+        return True
+    return is_definitive_major_clearance_embed(text)
+
+
+def is_major_clearance_monitor_embed_blob(text: str) -> bool:
+    """True for definitive HD clearance embeds OR Tempo stock-monitor embed shape."""
+    if not (text or "").strip():
+        return False
+    if is_definitive_major_clearance_embed(text):
+        return True
+    return is_tempo_monitors_major_clearance_candidate(text)
+
+
 def classify_instore_destination(
     text_to_check: str,
     where_location: str,
@@ -257,6 +284,19 @@ def classify_instore_destination(
         return cfg.SMARTFILTER_INSTORE_SNEAKERS_CHANNEL_ID, "INSTORE_SNEAKERS"
     if theatre_hit and cfg.SMARTFILTER_INSTORE_THEATRE_CHANNEL_ID:
         return cfg.SMARTFILTER_INSTORE_THEATRE_CHANNEL_ID, "INSTORE_THEATRE"
+    # HD clearance monitors + Tempo stock embeds: never MAJOR_STORES / DISCOUNTED / INSTORE_LEADS.
+    # live_forwarder major-clearance pairing + sends own these on configured source channels.
+    if int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0) > 0 and is_major_clearance_monitor_embed_blob(
+        text_to_check or ""
+    ):
+        if trace is not None:
+            try:
+                trace.setdefault("classifier", {}).setdefault("matches", {})[
+                    "major_clearance_monitor_suppress_instore_buckets"
+                ] = True
+            except Exception:
+                pass
+        return None
     if major_hit and cfg.SMARTFILTER_MAJOR_STORES_CHANNEL_ID:
         return cfg.SMARTFILTER_MAJOR_STORES_CHANNEL_ID, "MAJOR_STORES"
     if discounted_hit and cfg.SMARTFILTER_DISCOUNTED_STORES_CHANNEL_ID:
@@ -582,16 +622,25 @@ def select_target_channel_id(
     # (MAJOR_CLEARANCE destination).
     if source_group == "clearance":
         mc_id = int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0)
-        if mc_id > 0 and is_definitive_major_clearance_embed(text_blob):
+        # `text_to_check` from live_forwarder already merges embed strings; callers without embeds must pass merged text.
+        if mc_id > 0 and is_major_clearance_monitor_embed_blob(text_blob):
             if trace is not None:
                 try:
-                    trace.setdefault("classifier", {}).setdefault("matches", {})["definitive_major_clearance"] = True
+                    trace.setdefault("classifier", {}).setdefault("matches", {})["definitive_major_clearance"] = bool(
+                        is_definitive_major_clearance_embed(text_blob)
+                    )
+                    trace.setdefault("classifier", {}).setdefault("matches", {})["tempo_major_clearance_candidate"] = bool(
+                        is_tempo_monitors_major_clearance_candidate(text_blob)
+                    )
                 except Exception:
                     pass
             return mc_id, "MAJOR_CLEARANCE"
         return None
 
+    mc_id = int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0)
     skip_amazon = bool(source_group == "clearance")
+    if mc_id > 0 and is_instore_source and is_major_clearance_monitor_embed_blob(text_blob):
+        skip_amazon = True
     if trace is not None:
         try:
             trace.setdefault("classifier", {}).setdefault("matches", {})["skip_amazon_for_clearance"] = bool(skip_amazon)
@@ -766,6 +815,8 @@ def select_target_channel_id(
     )
     if instore_result:
         return instore_result
+    if mc_id > 0 and is_instore_source and is_major_clearance_monitor_embed_blob(text_blob):
+        return mc_id, "MAJOR_CLEARANCE"
 
     # Conversational Amazon deal bucket — evaluated *after* instore/keyword so Ross-style online posts
     # do not get mis-bucketed as AMZ_DEALS.
@@ -884,7 +935,10 @@ def detect_all_link_types(
         except Exception:
             pe_check_blob = text_blob
 
+    mc_id = int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0)
     skip_amazon = bool(source_group == "clearance")
+    if mc_id > 0 and is_instore_source and is_major_clearance_monitor_embed_blob(pe_check_blob):
+        skip_amazon = True
     if trace is not None:
         try:
             trace.setdefault("classifier", {}).setdefault("matches", {})["skip_amazon_for_clearance"] = bool(skip_amazon)
@@ -893,13 +947,17 @@ def detect_all_link_types(
 
     # CLEARANCE routing policy:
     # Clearance source channels should not participate in general routing.
-    # Only the definitive "Home Depot store clearance deals" embed can route to MAJOR_CLEARANCE.
+    # Definitive HD clearance embeds + Tempo stock-monitor embeds route to MAJOR_CLEARANCE only.
     if source_group == "clearance":
-        mc_id = int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0)
-        if mc_id > 0 and is_definitive_major_clearance_embed(text_blob):
+        if mc_id > 0 and is_major_clearance_monitor_embed_blob(pe_check_blob):
             if trace is not None:
                 try:
-                    trace.setdefault("classifier", {}).setdefault("matches", {})["definitive_major_clearance"] = True
+                    trace.setdefault("classifier", {}).setdefault("matches", {})["definitive_major_clearance"] = bool(
+                        is_definitive_major_clearance_embed(pe_check_blob)
+                    )
+                    trace.setdefault("classifier", {}).setdefault("matches", {})["tempo_major_clearance_candidate"] = bool(
+                        is_tempo_monitors_major_clearance_candidate(pe_check_blob)
+                    )
                 except Exception:
                     pass
             return [(mc_id, "MAJOR_CLEARANCE")]
@@ -1071,6 +1129,14 @@ def detect_all_link_types(
     )
     if instore_selection:
         results.append(instore_selection)
+
+    if (
+        mc_id > 0
+        and is_instore_source
+        and is_major_clearance_monitor_embed_blob(pe_check_blob)
+        and not instore_selection
+    ):
+        results.append((mc_id, "MAJOR_CLEARANCE"))
 
     # Conversational Amazon deal bucket — after instore classification so Retail/Resell/Where leads
     # route to instore buckets first; skips inside _looks_like_conversational_amazon_deal gate noise.

@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from classifier import (
     detect_all_link_types,
     is_definitive_major_clearance_embed,
+    is_major_clearance_monitor_embed_blob,
     order_link_types,
     select_target_channel_id,
 )
@@ -336,22 +337,6 @@ class MessageForwarder:
             return int(m.group(1))
         except Exception:
             return 0
-
-    def _looks_like_major_clearance_embed(self, text: str) -> bool:
-        tl = (text or "").lower()
-        if not tl:
-            return False
-        # TempoMonitors stock-monitor embed shape (not Retail:/Resell:/Where: template).
-        has_msrp = "msrp" in tl
-        has_as_low = ("as low as" in tl) or ("as-low-as" in tl)
-        # Some TempoMonitors feeds include SKU instead of UPC.
-        has_upc = "upc" in tl and bool(re.search(r"\b\d{11,14}\b", tl))
-        has_sku = "sku" in tl and bool(re.search(r"\bsku\b[^\n]{0,50}\b\d{6,}\b", tl))
-        has_tempo = "tempomonitors.com" in tl or "powered by tempomonitors" in tl
-        if has_msrp and has_as_low and (has_upc or has_sku) and has_tempo:
-            return True
-        # New stricter Home Depot monitor shape (edited embeds often hydrate into this form).
-        return is_definitive_major_clearance_embed(tl)
 
     def _embed_dict_has_image(self, ed: Dict[str, Any]) -> bool:
         try:
@@ -1337,7 +1322,7 @@ class MessageForwarder:
                     if cfg.VERBOSE:
                         log_warn(f"major-clearance timeout fallback failed: {type(e).__name__}: {e}")
 
-            is_candidate_embed = self._looks_like_major_clearance_embed(text_to_check)
+            is_candidate_embed = is_major_clearance_monitor_embed_blob(text_to_check)
             if is_candidate_embed:
                 is_definitive_embed = is_definitive_major_clearance_embed(text_to_check)
                 if is_definitive_embed:
