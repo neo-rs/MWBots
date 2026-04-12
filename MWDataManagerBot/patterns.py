@@ -131,8 +131,7 @@ SNEAKERS_PATTERN = re.compile(
     r"superstar|"
     r"samba|"
     r"gazelle|"
-    r"forum|"
-    r"retro"
+    r"forum"
     r")\b",
     re.IGNORECASE,
 )
@@ -142,6 +141,7 @@ SNEAKERS_PATTERN = re.compile(
 _INSTORE_APPAREL_SUPPRESS_SNEAKERS_PATTERN = re.compile(
     r"\b("
     r"dri[-\s]?fit|"
+    r"tech\s+fleece|"
     r"(?:running|athletic|gym|yoga|bike|compression)\s+(?:tights?|shorts?|pants|leggings?|top|tank|singlet|suit|jacket|hoodie|bra|shirt|tee)|"
     r"\b(?:tights?|leggings?)\b|"
     r"\bjoggers?\b|"
@@ -151,7 +151,58 @@ _INSTORE_APPAREL_SUPPRESS_SNEAKERS_PATTERN = re.compile(
     r"\bsports?\s+bras?\b|"
     r"\bsleeveless\b|"
     r"\brunning\s+suit\b|"
+    r"\b(?:track|bomber|denim|varsity)\s+jacket\b|"
+    r"\btrack\s+jacket\b|"
+    r"\bhoodie\b|"
+    r"\b(?:full[-\s]?zip|zip[-\s]?up)\b|"
+    r"\bvest\b|"
+    r"\bwork\s+vest\b|"
+    r"\bpadded\b|"
+    r"\bspeedsuit\b|"
+    r"\bwindrunner\b|"
     r"\b(?:polo|henley|crewneck|pullover|windbreaker)\b"
+    r")\b",
+    re.IGNORECASE,
+)
+# Collectibles / toys: "Retro" SKUs and brand lines often still hit athletic brand tokens in SNEAKERS_PATTERN.
+_INSTORE_COLLECTIBLE_TOY_SUPPRESS_SNEAKERS_PATTERN = re.compile(
+    r"\b("
+    r"action\s+figure|action\s+figures|"
+    r"marvel\s+legends|star\s+wars|gi\s*joe|g\.?\s*i\.?\s*joe|"
+    r"super\s*7|hasbro|mcfarlane|mattel|funko|"
+    r"retro\s+collection|vintage\s+collection|"
+    r"legends\s+series|classified\s+series|"
+    r"multipack|"
+    r"\bfigs?\b|\bfigures?\b"
+    r")\b",
+    re.IGNORECASE,
+)
+_INSTORE_SPORTS_PROTECTIVE_SUPPRESS_SNEAKERS_PATTERN = re.compile(
+    r"\b("
+    r"catcher|catcher'?s?|catchers|"
+    r"chest\s+guard|chest\s+protector|converge|"
+    r"batting\s+helmet|shoulder\s+pads|shin\s+guards|"
+    r"football\s+helmet|hockey\s+helmet|lacrosse\s+helmet"
+    r")\b",
+    re.IGNORECASE,
+)
+# Shoe-shaped signals that should beat generic brand + apparel/toy ambiguity.
+_INSTORE_STRONG_FOOTWEAR_ONLY_INTENT_PATTERN = re.compile(
+    r"\b("
+    r"sneakers?|sneaks?|kicks?\b|"
+    r"\bshoes?\b|"
+    r"footwear|"
+    r"cleats?|"
+    r"\bslides?\b|"
+    r"\bdunks?\b(?:\s+(?:low|high))?|"
+    r"\baf1\b|"
+    r"\byeezy\b|"
+    r"air\s*max|air\s*force|air\s*jordan|"
+    r"sb\s*dunks?\b|"
+    r"retro\s*jordans?\b|"
+    r"jordan\s*\d+|aj\s*\d+|\baj\d+\b|"
+    r"(?:running|basketball|tennis)\s+shoes?\b|"
+    r"(?:running|basketball|tennis)\s+trainers?\b"
     r")\b",
     re.IGNORECASE,
 )
@@ -166,9 +217,10 @@ _INSTORE_EXPLICIT_FOOTWEAR_INTENT_PATTERN = re.compile(
     r"\baf1\b|"
     r"\bjordans?\b|"
     r"\byeezy\b|"
-    r"air\s*max|air\s*force|"
+    r"air\s*max|air\s*force|air\s*jordan|"
     r"sb\s*dunks?\b|"
     r"retro\s*jordans?\b|"
+    r"jordan\s*\d+|aj\s*\d+|\baj\d+\b|"
     r"(?:running|basketball|tennis)\s+shoes?\b|"
     r"(?:running|basketball|tennis)\s+trainers?\b"
     r")\b",
@@ -180,6 +232,18 @@ def instore_apparel_suppresses_sneakers_bucket(text: str) -> bool:
     return bool(_INSTORE_APPAREL_SUPPRESS_SNEAKERS_PATTERN.search(text or ""))
 
 
+def instore_collectible_toy_suppresses_sneakers_bucket(text: str) -> bool:
+    return bool(_INSTORE_COLLECTIBLE_TOY_SUPPRESS_SNEAKERS_PATTERN.search(text or ""))
+
+
+def instore_sports_protective_suppresses_sneakers_bucket(text: str) -> bool:
+    return bool(_INSTORE_SPORTS_PROTECTIVE_SUPPRESS_SNEAKERS_PATTERN.search(text or ""))
+
+
+def instore_strong_footwear_only_intent(text: str) -> bool:
+    return bool(_INSTORE_STRONG_FOOTWEAR_ONLY_INTENT_PATTERN.search(text or ""))
+
+
 def instore_explicit_footwear_intent(text: str) -> bool:
     return bool(_INSTORE_EXPLICIT_FOOTWEAR_INTENT_PATTERN.search(text or ""))
 
@@ -188,10 +252,14 @@ def instore_sneakers_bucket_active(text: str) -> bool:
     raw = str(text or "").strip()
     if not raw or not SNEAKERS_PATTERN.search(raw):
         return False
+    if instore_collectible_toy_suppresses_sneakers_bucket(raw):
+        return False
+    if instore_sports_protective_suppresses_sneakers_bucket(raw):
+        return False
+    if instore_apparel_suppresses_sneakers_bucket(raw):
+        return bool(instore_strong_footwear_only_intent(raw))
     if instore_explicit_footwear_intent(raw):
         return True
-    if instore_apparel_suppresses_sneakers_bucket(raw):
-        return False
     return True
 
 
