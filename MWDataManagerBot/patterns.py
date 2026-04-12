@@ -132,8 +132,7 @@ SNEAKERS_PATTERN = re.compile(
     r"samba|"
     r"gazelle|"
     r"forum|"
-    r"retro|"
-    r"collab|collaboration"
+    r"retro"
     r")\b",
     re.IGNORECASE,
 )
@@ -701,6 +700,7 @@ MAJOR_STORES = [
     "starbucks",
     "dunkin",
     "dunkin donuts",
+    "popeyes",
     "kohl's",
     "kohls",
     "jcpennys",
