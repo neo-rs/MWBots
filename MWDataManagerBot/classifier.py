@@ -204,9 +204,16 @@ def classify_instore_destination(
     theatre_hit = bool(matches_instore_theatre(text_to_check or "", where_location))
     major_hit = bool(MAJOR_STORE_PATTERN.search(text_to_check or "") or store_category == "major")
     discounted_hit = bool(DISCOUNTED_STORE_PATTERN.search(text_to_check or "") or store_category == "discounted")
-    # Keep store traits mutually exclusive to avoid "major + discounted" overlap leakage.
-    # Prefer explicit discounted detection when both patterns happen to match.
-    if discounted_hit:
+    # Keep store traits mutually exclusive when both store-list regexes hit the same blob (e.g. Where lists
+    # Target + Five Below). Dispatch order still evaluates MAJOR before DISCOUNTED, so without a tie-break
+    # we'd incorrectly zero major whenever any discount banner token appeared anywhere in the message.
+    if major_hit and discounted_hit:
+        if store_category == "discounted":
+            major_hit = False
+        else:
+            # store_category "major", unknown, or unset → prefer MAJOR_STORES (typical national retail lists).
+            discounted_hit = False
+    elif discounted_hit:
         major_hit = False
     elif major_hit:
         discounted_hit = False
