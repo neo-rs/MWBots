@@ -201,6 +201,71 @@ def is_major_clearance_monitor_embed_blob(text: str) -> bool:
     return is_tempo_monitors_major_clearance_candidate(text)
 
 
+_DISCORD_MESSAGE_LINK_ONLY = re.compile(
+    r"^\s*https?://(?:www\.|(?:(?:ptb|canary)\.)?)discord(?:app)?\.com/channels/\d+/\d+/\d+\s*$",
+    re.IGNORECASE,
+)
+
+
+def is_major_clearance_followup_blob(
+    text_to_check: str,
+    *,
+    message_content: str = "",
+    embeds: Optional[List[Dict[str, Any]]] = None,
+) -> bool:
+    """
+    Second-message shapes for major-clearance pairing (Tempo stock lists, nationwide stock embeds,
+    Deal Soldier jump links). Canonical with live_forwarder follow-up gate.
+    Not for primary monitor embeds (those use is_major_clearance_monitor_embed_blob).
+    """
+    if is_major_clearance_monitor_embed_blob(text_to_check or ""):
+        return False
+    tl = (text_to_check or "").lower()
+    if not tl:
+        return False
+    try:
+        embed_extra = " ".join(collect_embed_strings(embeds or [])).lower()
+    except Exception:
+        embed_extra = ""
+    tl_all = (tl + " " + embed_extra).strip().lower()
+    if not tl_all:
+        return False
+
+    c = (message_content or "").strip()
+    if c and re.fullmatch(r"[\d\s\-\.]{8,}", c):
+        return False
+    if re.search(r"\bretail\s*[:\-]|\bresell\s*[:\-]|\bwhere\s*[:\-]|\blocation\s*[:\-]", tl_all):
+        return False
+
+    if c and _DISCORD_MESSAGE_LINK_ONLY.match(c):
+        return True
+
+    hints = (
+        "would look for this",
+        "would look for these",
+        "lots of stock",
+        "lots of additional stores",
+    )
+    if any(h in tl_all for h in hints):
+        return True
+
+    if "nationwide stock check" in tl_all:
+        return True
+    if ("stores on sale" in tl_all or "percentage of stores on sale" in tl_all) and (
+        "nationwide" in tl_all or "across the nation" in tl_all or "units on sale" in tl_all
+    ):
+        return True
+    if "units on sale" in tl_all and "across the nation" in tl_all:
+        return True
+
+    if re.search(r"\btons of stock\s*@", tl_all):
+        return True
+
+    if re.search(r"\bstock\s*@\s*\$?\s*\d+", tl_all):
+        return True
+    return False
+
+
 def classify_instore_destination(
     text_to_check: str,
     where_location: str,
@@ -586,6 +651,9 @@ def select_target_channel_id(
     keywords_list: List[str] | None = None,
     source_channel_id: Optional[int] = None,
     trace: Optional[Dict[str, Any]] = None,
+    *,
+    message_content: str = "",
+    embeds: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[Tuple[int, str]]:
     """Single-target classifier (used as fallback if multi-type detection returns nothing)."""
     source_group = determine_source_group(source_channel_id)
@@ -638,8 +706,17 @@ def select_target_channel_id(
         return None
 
     mc_id = int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0)
+    pe_sel = text_blob
+    if embeds:
+        try:
+            pe_sel = (text_blob + "\n" + " ".join(collect_embed_strings(embeds))).strip()
+        except Exception:
+            pe_sel = text_blob
     skip_amazon = bool(source_group == "clearance")
-    if mc_id > 0 and is_instore_source and is_major_clearance_monitor_embed_blob(text_blob):
+    if mc_id > 0 and is_instore_source and (
+        is_major_clearance_monitor_embed_blob(pe_sel)
+        or is_major_clearance_followup_blob(pe_sel, message_content=message_content or "", embeds=embeds)
+    ):
         skip_amazon = True
     if trace is not None:
         try:
@@ -815,7 +892,11 @@ def select_target_channel_id(
     )
     if instore_result:
         return instore_result
-    if mc_id > 0 and is_instore_source and is_major_clearance_monitor_embed_blob(text_blob):
+    if mc_id > 0 and is_instore_source and is_major_clearance_monitor_embed_blob(pe_sel):
+        return mc_id, "MAJOR_CLEARANCE"
+    if mc_id > 0 and is_instore_source and is_major_clearance_followup_blob(
+        pe_sel, message_content=message_content or "", embeds=embeds
+    ):
         return mc_id, "MAJOR_CLEARANCE"
 
     # Conversational Amazon deal bucket — evaluated *after* instore/keyword so Ross-style online posts
@@ -898,6 +979,8 @@ def detect_all_link_types(
     embeds: List[Dict[str, Any]] | None = None,
     source_channel_id: Optional[int] = None,
     trace: Optional[Dict[str, Any]] = None,
+    *,
+    message_content: str = "",
 ) -> List[Tuple[int, str]]:
     """Multi-type classifier used by live forwarder for multi-destination routing."""
     results: List[Tuple[int, str]] = []
@@ -937,7 +1020,12 @@ def detect_all_link_types(
 
     mc_id = int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0)
     skip_amazon = bool(source_group == "clearance")
-    if mc_id > 0 and is_instore_source and is_major_clearance_monitor_embed_blob(pe_check_blob):
+    if mc_id > 0 and is_instore_source and (
+        is_major_clearance_monitor_embed_blob(pe_check_blob)
+        or is_major_clearance_followup_blob(
+            pe_check_blob, message_content=message_content or "", embeds=embeds
+        )
+    ):
         skip_amazon = True
     if trace is not None:
         try:
@@ -1135,6 +1223,16 @@ def detect_all_link_types(
         and is_instore_source
         and is_major_clearance_monitor_embed_blob(pe_check_blob)
         and not instore_selection
+    ):
+        results.append((mc_id, "MAJOR_CLEARANCE"))
+
+    if (
+        mc_id > 0
+        and is_instore_source
+        and is_major_clearance_followup_blob(
+            pe_check_blob, message_content=message_content or "", embeds=embeds
+        )
+        and not any(tag == "MAJOR_CLEARANCE" for _, tag in results)
     ):
         results.append((mc_id, "MAJOR_CLEARANCE"))
 

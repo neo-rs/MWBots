@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from classifier import (
     detect_all_link_types,
     is_definitive_major_clearance_embed,
+    is_major_clearance_followup_blob,
     is_major_clearance_monitor_embed_blob,
     order_link_types,
     select_target_channel_id,
@@ -423,30 +424,6 @@ class MessageForwarder:
             out.append((w[0], w[1]))
             emitted.add(d)
         return out
-
-    def _looks_like_major_clearance_followup(self, text: str, *, raw_content: str = "") -> bool:
-        tl = (text or "").lower()
-        if not tl:
-            return False
-        # Standalone UPC / barcode number posts (no real follow-up sentence).
-        c = (raw_content or "").strip()
-        if c and re.fullmatch(r"[\d\s\-\.]{8,}", c):
-            return False
-        # Avoid catching normal in-store templates (Retail/Resell/Where) as follow-ups.
-        if re.search(r"\bretail\s*[:\-]|\bresell\s*[:\-]|\bwhere\s*[:\-]|\blocation\s*[:\-]", tl):
-            return False
-        # Keep this strict: only clear "context reply" phrasing should count.
-        hints = [
-            "would look for this",
-            "lots of stock",
-        ]
-        if any(h in tl for h in hints):
-            return True
-        # TempoMonitors stock-list follow-ups are often like:
-        # "@Arizona 85541 - 1 stock @ $14"
-        if re.search(r"\bstock\s*@\s*\$?\s*\d+", tl):
-            return True
-        return False
 
     async def _send_to_destination(
         self,
@@ -1069,6 +1046,7 @@ class MessageForwarder:
             embeds,
             source_channel_id=channel_id,
             trace=trace,
+            message_content=content,
         )
         global_types = detect_global_triggers(
             text_to_check,
@@ -1168,7 +1146,13 @@ class MessageForwarder:
 
         if not dispatch_link_types:
             fallback = select_target_channel_id(
-                text_to_check, attachments, self.keywords_list, source_channel_id=channel_id, trace=trace
+                text_to_check,
+                attachments,
+                self.keywords_list,
+                source_channel_id=channel_id,
+                trace=trace,
+                message_content=content,
+                embeds=embeds,
             )
             if fallback:
                 dispatch_link_types = [fallback]
@@ -1464,7 +1448,7 @@ class MessageForwarder:
                     pending_key = (source_ch_id, last_mid)
 
             pending = (self.pending_major_clearance or {}).get(pending_key) if pending_key else None
-            if self._looks_like_major_clearance_followup(text_to_check, raw_content=content):
+            if is_major_clearance_followup_blob(text_to_check, message_content=content, embeds=embeds):
                 try:
                     import discord
 
