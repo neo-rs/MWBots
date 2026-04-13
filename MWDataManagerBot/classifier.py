@@ -39,7 +39,7 @@ from patterns import (
     WOOT_DEALS_PATTERN,
     TIMESTAMP_PATTERN,
 )
-from utils import collect_embed_strings, matches_instore_theatre
+from utils import collect_embed_strings, extract_urls_from_text, is_discord_media_url, matches_instore_theatre
 
 
 # Strong toy / figure signals — suppress INSTORE_CARDS when TCG heuristics misfire (eBay URLs, embeds).
@@ -720,6 +720,21 @@ def _looks_like_conversational_amazon_deal(
     return False
 
 
+_AFFILIATE_GRAB_TEMPLATE = re.compile(r"\bnew\s+deal\s+found\b[\s\S]{0,300}\bgrab\s+it\s+here\b", re.IGNORECASE)
+
+
+def _affiliate_has_non_discord_url(blob: str) -> bool:
+    """True when blob includes at least one non-Discord-media http(s) URL."""
+    urls = extract_urls_from_text(blob or "")
+    for u in urls:
+        if not u:
+            continue
+        if is_discord_media_url(u):
+            continue
+        return True
+    return False
+
+
 def select_target_channel_id(
     text_to_check: str,
     attachments: List[Dict[str, Any]],
@@ -1026,7 +1041,13 @@ def select_target_channel_id(
                 )
             except Exception:
                 pass
-        if "http" in blob and (_STORE_DOMAIN_PATTERN.search(blob) or "mavely.app" in blob.lower()):
+        if _AFFILIATE_GRAB_TEMPLATE.search(blob or ""):
+            if trace is not None:
+                try:
+                    trace.setdefault("classifier", {}).setdefault("matches", {})["affiliate_skip"] = "grab_it_here_template"
+                except Exception:
+                    pass
+        elif "http" in blob and (_STORE_DOMAIN_PATTERN.search(blob) or "mavely.app" in blob.lower()):
             if trace is not None:
                 try:
                     trace.setdefault("classifier", {}).setdefault("matches", {})["affiliate_reason"] = "store_domain_or_mavely"
@@ -1039,7 +1060,14 @@ def select_target_channel_id(
                     trace.setdefault("classifier", {}).setdefault("matches", {})["affiliate_reason"] = "http_present"
                 except Exception:
                     pass
-            return cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID, "AFFILIATED_LINKS"
+            # Avoid routing image-only posts (Discord CDN) into affiliate bucket.
+            if _affiliate_has_non_discord_url(blob):
+                return cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID, "AFFILIATED_LINKS"
+            if trace is not None:
+                try:
+                    trace.setdefault("classifier", {}).setdefault("matches", {})["affiliate_skip"] = "discord_media_only"
+                except Exception:
+                    pass
 
     # 11) DEFAULT fallback
     if (not skip_amazon) and AMAZON_ASIN_PATTERN.search(text_to_check or "") and cfg.SMARTFILTER_AMAZON_CHANNEL_ID and _is_amazon_primary(text_blob):
@@ -1360,7 +1388,13 @@ def detect_all_link_types(
         if cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID and (source_group == "online"):
             att_text = " ".join([str(a.get("url", "")) for a in (attachments or []) if isinstance(a, dict)])
             blob = (text_to_check or "") + " " + att_text
-            if "http" in blob:
+            if _AFFILIATE_GRAB_TEMPLATE.search(blob or ""):
+                if trace is not None:
+                    try:
+                        trace.setdefault("classifier", {}).setdefault("matches", {})["affiliate_skip"] = "grab_it_here_template"
+                    except Exception:
+                        pass
+            elif "http" in blob:
                 if trace is not None:
                     try:
                         m = _STORE_DOMAIN_PATTERN.search(blob)
@@ -1376,7 +1410,14 @@ def detect_all_link_types(
                         )
                     except Exception:
                         pass
-                results.append((cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID, "AFFILIATED_LINKS"))
+                # Avoid routing image-only posts (Discord CDN) into affiliate bucket.
+                if _affiliate_has_non_discord_url(blob):
+                    results.append((cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID, "AFFILIATED_LINKS"))
+                elif trace is not None:
+                    try:
+                        trace.setdefault("classifier", {}).setdefault("matches", {})["affiliate_skip"] = "discord_media_only"
+                    except Exception:
+                        pass
 
     # If Amazon detected, suppress other store destinations (keep PRICE_ERROR as it can co-exist)
     if any(tag in ("AMAZON", "AMAZON_PROFITABLE_LEAD", "AMAZON_FALLBACK", "AMZ_DEALS") for _, tag in results):

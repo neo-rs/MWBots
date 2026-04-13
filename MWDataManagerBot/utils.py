@@ -411,6 +411,25 @@ def _is_discord_media_url(url: str) -> bool:
         return False
 
 
+def is_discord_media_url(url: str) -> bool:
+    """Public wrapper for internal Discord CDN/media URL detection."""
+    return _is_discord_media_url(url)
+
+
+def is_mavely_wrapper_url(url: str) -> bool:
+    """
+    True for Mavely/Branch-style wrapper URLs that we should NOT rewrite inline.
+    These links are intentionally "the share link" and should be forwarded as-is.
+    """
+    try:
+        host = (urlparse(url).netloc or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        return host in {"mavely.app.link", "mavelylife.com"}
+    except Exception:
+        return False
+
+
 def canonicalize_amazon_url(url: str) -> str:
     """Best-effort canonical Amazon URL (strip tracking, normalize /dp/<ASIN>)."""
     if not url:
@@ -1090,7 +1109,14 @@ async def rewrite_affiliate_links_in_message(content: str, raw_urls: Optional[Li
                 src_token = urls[0]
                 src, tail = _split_trailing_url_punct(src_token)
                 try:
-                    if src and _is_affiliate_domain(src) and target != src and target not in content:
+                    # Do NOT rewrite Mavely share links (mavely.app.link / mavelylife.com).
+                    if (
+                        src
+                        and _is_affiliate_domain(src)
+                        and (not is_mavely_wrapper_url(src))
+                        and target != src
+                        and target not in content
+                    ):
                         content = content.replace(src_token, f"<{target}>{tail}")
                         did_replace = True
                 except Exception:
