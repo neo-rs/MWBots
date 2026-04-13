@@ -174,6 +174,74 @@ def is_definitive_major_clearance_embed(text: str) -> bool:
     return bool(has_title and has_inventory and has_internet_number and has_price_shape)
 
 
+_HD_TOTAL_INVENTORY_VALUE_PATTERN = re.compile(
+    r"\btotal\s*inventory\b[^0-9]{0,160}(\d{1,7})\b",
+    re.IGNORECASE,
+)
+
+
+def parse_major_clearance_total_inventory(text: str) -> Optional[int]:
+    """Best-effort parse of Total Inventory count from flattened embed/text. None if not found."""
+    if not (text or "").strip():
+        return None
+    m = _HD_TOTAL_INVENTORY_VALUE_PATTERN.search(str(text))
+    if not m:
+        return None
+    try:
+        v = int(m.group(1))
+        return v if v >= 0 else None
+    except Exception:
+        return None
+
+
+def qualifies_hd_total_inventory_route(
+    *,
+    source_channel_id: Optional[int],
+    pe_check_blob: str,
+    trace: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """
+    True when HD 1:1 source/dest are configured, source matches, embed is definitive HD clearance,
+    and optional min total inventory (HD_TOTAL_INVENTORY_MIN_TOTAL) is satisfied.
+    """
+    hd_inv_src = int(getattr(cfg, "HD_TOTAL_INVENTORY_SOURCE_CHANNEL_ID", 0) or 0)
+    hd_inv_dest = int(getattr(cfg, "HD_TOTAL_INVENTORY_DESTINATION_CHANNEL_ID", 0) or 0)
+    if hd_inv_src <= 0 or hd_inv_dest <= 0:
+        return False
+    if int(source_channel_id or 0) != hd_inv_src:
+        return False
+    if not is_definitive_major_clearance_embed(pe_check_blob):
+        return False
+    min_total = int(getattr(cfg, "HD_TOTAL_INVENTORY_MIN_TOTAL", 0) or 0)
+    parsed = parse_major_clearance_total_inventory(pe_check_blob)
+    if trace is not None:
+        try:
+            tr = trace.setdefault("classifier", {}).setdefault("matches", {})
+            tr["hd_total_inventory_min_total"] = int(min_total)
+            tr["hd_total_inventory_parsed"] = parsed
+        except Exception:
+            pass
+    if min_total <= 0:
+        if trace is not None:
+            try:
+                trace.setdefault("classifier", {}).setdefault("matches", {})["hd_total_inventory"] = True
+            except Exception:
+                pass
+        return True
+    ok = parsed is not None and parsed >= min_total
+    if trace is not None:
+        try:
+            tr = trace.setdefault("classifier", {}).setdefault("matches", {})
+            tr["hd_total_inventory_passes_min"] = bool(ok)
+            if not ok:
+                tr["hd_total_inventory_blocked_min"] = True
+            else:
+                tr["hd_total_inventory"] = True
+        except Exception:
+            pass
+    return bool(ok)
+
+
 def is_tempo_monitors_major_clearance_candidate(text: str) -> bool:
     """
     TempoMonitors-style **Home Depot** stock embed (MSRP / As low as + SKU or UPC + Tempo footer).
@@ -697,19 +765,10 @@ def select_target_channel_id(
         except Exception:
             pe_sel = text_blob
 
-    hd_inv_src = int(getattr(cfg, "HD_TOTAL_INVENTORY_SOURCE_CHANNEL_ID", 0) or 0)
     hd_inv_dest = int(getattr(cfg, "HD_TOTAL_INVENTORY_DESTINATION_CHANNEL_ID", 0) or 0)
-    if (
-        hd_inv_src > 0
-        and hd_inv_dest > 0
-        and int(source_channel_id or 0) == hd_inv_src
-        and is_definitive_major_clearance_embed(pe_sel)
+    if qualifies_hd_total_inventory_route(
+        source_channel_id=source_channel_id, pe_check_blob=pe_sel, trace=trace
     ):
-        if trace is not None:
-            try:
-                trace.setdefault("classifier", {}).setdefault("matches", {})["hd_total_inventory"] = True
-            except Exception:
-                pass
         return hd_inv_dest, "HD_TOTAL_INVENTORY"
 
     # CLEARANCE routing policy:
@@ -1039,19 +1098,10 @@ def detect_all_link_types(
         except Exception:
             pe_check_blob = text_blob
 
-    hd_inv_src = int(getattr(cfg, "HD_TOTAL_INVENTORY_SOURCE_CHANNEL_ID", 0) or 0)
     hd_inv_dest = int(getattr(cfg, "HD_TOTAL_INVENTORY_DESTINATION_CHANNEL_ID", 0) or 0)
-    if (
-        hd_inv_src > 0
-        and hd_inv_dest > 0
-        and int(source_channel_id or 0) == hd_inv_src
-        and is_definitive_major_clearance_embed(pe_check_blob)
+    if qualifies_hd_total_inventory_route(
+        source_channel_id=source_channel_id, pe_check_blob=pe_check_blob, trace=trace
     ):
-        if trace is not None:
-            try:
-                trace.setdefault("classifier", {}).setdefault("matches", {})["hd_total_inventory"] = True
-            except Exception:
-                pass
         return [(hd_inv_dest, "HD_TOTAL_INVENTORY")]
 
     mc_id = int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0)

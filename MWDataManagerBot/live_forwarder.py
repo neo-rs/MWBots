@@ -11,6 +11,7 @@ from classifier import (
     is_major_clearance_followup_blob,
     is_major_clearance_monitor_embed_blob,
     order_link_types,
+    qualifies_hd_total_inventory_route,
     select_target_channel_id,
 )
 from global_triggers import detect_global_triggers
@@ -71,6 +72,27 @@ def _dispatch_tag_priority(tag: str) -> int:
     if t == "DEFAULT":
         return 10
     return 40
+
+
+def _major_clearance_pairing_source_channel_ids() -> Set[int]:
+    """
+    Channels where Tempo/HD major-clearance embeds use the pending-cache pairing flow.
+
+    `major_clearance_source_channel_ids` extends the default (all `source_channel_ids_clearance`);
+    it must not *replace* clearance — otherwise clearance Tempos never enter pairing and MAJOR_CLEARANCE
+    is sent immediately by the normal dispatch loop (single embed, no follow-up).
+    """
+    try:
+        explicit = set(getattr(cfg, "MAJOR_CLEARANCE_SOURCE_CHANNEL_IDS", set()) or set())
+    except Exception:
+        explicit = set()
+    try:
+        clearance = set(getattr(cfg, "SMART_SOURCE_CHANNELS_CLEARANCE", set()) or set())
+    except Exception:
+        clearance = set()
+    if not explicit:
+        return clearance
+    return explicit | clearance
 
 
 def _should_filter_message(payload: Dict[str, Any]) -> bool:
@@ -1195,24 +1217,13 @@ class MessageForwarder:
             wh_avatar_url = ""
 
         # Special paired-flow: "major clearance" stock-monitor embeds + follow-up message.
-        # IMPORTANT: Only on *clearance* source channels. If we also intercept instore sources,
-        # Tempo-shaped embeds there return early and never run instore smartfilters (sneakers/seasonal/etc.).
+        # Runs on configured clearance sources plus any extra ids in `major_clearance_source_channel_ids`
+        # (see `_major_clearance_pairing_source_channel_ids`; clearance is always unioned in when explicit).
         try:
             major_clearance_dest = int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0)
         except Exception:
             major_clearance_dest = 0
-        # Major-clearance pairing sources:
-        # - If `major_clearance_source_channel_ids` is configured, use it (explicit allowlist).
-        # - Otherwise fall back to `source_channel_ids_clearance`.
-        try:
-            mc_sources = set(getattr(cfg, "MAJOR_CLEARANCE_SOURCE_CHANNEL_IDS", set()) or set())
-        except Exception:
-            mc_sources = set()
-        if not mc_sources:
-            try:
-                mc_sources = set(getattr(cfg, "SMART_SOURCE_CHANNELS_CLEARANCE", set()) or set())
-            except Exception:
-                mc_sources = set()
+        mc_sources = _major_clearance_pairing_source_channel_ids()
         is_major_clearance_source = bool(int(channel_id or 0) in mc_sources)
         if major_clearance_dest > 0 and is_major_clearance_source:
             now_ts = asyncio.get_event_loop().time()
@@ -1314,16 +1325,17 @@ class MessageForwarder:
                         log_warn(f"major-clearance timeout fallback failed: {type(e).__name__}: {e}")
 
             try:
-                hd_inv_src = int(getattr(cfg, "HD_TOTAL_INVENTORY_SOURCE_CHANNEL_ID", 0) or 0)
+                hd_exclusive_dispatch = bool(
+                    qualifies_hd_total_inventory_route(
+                        source_channel_id=int(channel_id or 0),
+                        pe_check_blob=str(text_to_check or ""),
+                        trace=trace,
+                    )
+                )
             except Exception:
-                hd_inv_src = 0
-            hd_exclusive_definitive = bool(
-                hd_inv_src > 0
-                and int(channel_id or 0) == hd_inv_src
-                and is_definitive_major_clearance_embed(text_to_check)
-            )
+                hd_exclusive_dispatch = False
             is_candidate_embed = is_major_clearance_monitor_embed_blob(text_to_check)
-            if is_candidate_embed and not hd_exclusive_definitive:
+            if is_candidate_embed and not hd_exclusive_dispatch:
                 is_definitive_embed = is_definitive_major_clearance_embed(text_to_check)
                 if is_definitive_embed:
                     try:
