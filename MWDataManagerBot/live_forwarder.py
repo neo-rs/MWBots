@@ -51,6 +51,8 @@ def _dispatch_tag_priority(tag: str) -> int:
     t = str(tag or "")
     if t == "PRICE_ERROR":
         return 200
+    if t == "HD_TOTAL_INVENTORY":
+        return 196
     if t == "MAJOR_CLEARANCE":
         return 195
     if t.startswith("INSTORE"):
@@ -661,6 +663,11 @@ class MessageForwarder:
         _add("LUNCHMONEY_FLIP", cfg.SMARTFILTER_FLIPS_LUNCHMONEY_CHANNEL_ID, "Global • Lunchmoney flip")
         _add("AMAZON_PROFITABLE_LEAD", cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID, "Global • Amazon profitable lead")
         _add("MAJOR_CLEARANCE", int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0), "Global • Major clearance")
+        _add(
+            "HD_TOTAL_INVENTORY",
+            int(getattr(cfg, "HD_TOTAL_INVENTORY_DESTINATION_CHANNEL_ID", 0) or 0),
+            "Clearance • HD total inventory (1:1)",
+        )
 
         # Discord select supports max 25 options.
         return out[:25]
@@ -1306,8 +1313,17 @@ class MessageForwarder:
                     if cfg.VERBOSE:
                         log_warn(f"major-clearance timeout fallback failed: {type(e).__name__}: {e}")
 
+            try:
+                hd_inv_src = int(getattr(cfg, "HD_TOTAL_INVENTORY_SOURCE_CHANNEL_ID", 0) or 0)
+            except Exception:
+                hd_inv_src = 0
+            hd_exclusive_definitive = bool(
+                hd_inv_src > 0
+                and int(channel_id or 0) == hd_inv_src
+                and is_definitive_major_clearance_embed(text_to_check)
+            )
             is_candidate_embed = is_major_clearance_monitor_embed_blob(text_to_check)
-            if is_candidate_embed:
+            if is_candidate_embed and not hd_exclusive_definitive:
                 is_definitive_embed = is_definitive_major_clearance_embed(text_to_check)
                 if is_definitive_embed:
                     try:

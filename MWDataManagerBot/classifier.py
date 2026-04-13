@@ -176,8 +176,12 @@ def is_definitive_major_clearance_embed(text: str) -> bool:
 
 def is_tempo_monitors_major_clearance_candidate(text: str) -> bool:
     """
-    TempoMonitors-style stock embed (MSRP / As low as + SKU or UPC + Tempo footer).
-    Canonical with live_forwarder major-clearance pairing (embed gate).
+    TempoMonitors-style **Home Depot** stock embed (MSRP / As low as + SKU or UPC + Tempo footer).
+
+    Walmart/Target/other Tempo feeds share the same MSRP/As-low/UPC shape; they must NOT use the
+    major-clearance / HD-clearance bucket. Gate the Tempo branch on explicit Home Depot wording
+    (footer copy like "Home Depot Finds" / "Home Depot Leads"). Definitive HD clearance embeds are
+    still accepted via is_definitive_major_clearance_embed below.
     """
     tl = (text or "").lower()
     if not tl:
@@ -188,12 +192,15 @@ def is_tempo_monitors_major_clearance_candidate(text: str) -> bool:
     has_sku = "sku" in tl and bool(re.search(r"\bsku\b[^\n]{0,50}\b\d{6,}\b", tl))
     has_tempo = "tempomonitors.com" in tl or "powered by tempomonitors" in tl
     if has_msrp and has_as_low and (has_upc or has_sku) and has_tempo:
+        compact = re.sub(r"\s+", "", tl)
+        if "homedepot" not in compact and "home depot" not in tl:
+            return is_definitive_major_clearance_embed(text)
         return True
     return is_definitive_major_clearance_embed(text)
 
 
 def is_major_clearance_monitor_embed_blob(text: str) -> bool:
-    """True for definitive HD clearance embeds OR Tempo stock-monitor embed shape."""
+    """True for definitive HD clearance embeds OR Tempo **Home Depot** stock-monitor embed shape."""
     if not (text or "").strip():
         return False
     if is_definitive_major_clearance_embed(text):
@@ -683,6 +690,27 @@ def select_target_channel_id(
     where_location = where_match.group(1).strip() if where_match else ""
     store_category = store_category_from_location(where_location)
     text_blob = text_to_check or ""
+    pe_sel = text_blob
+    if embeds:
+        try:
+            pe_sel = (text_blob + "\n" + " ".join(collect_embed_strings(embeds))).strip()
+        except Exception:
+            pe_sel = text_blob
+
+    hd_inv_src = int(getattr(cfg, "HD_TOTAL_INVENTORY_SOURCE_CHANNEL_ID", 0) or 0)
+    hd_inv_dest = int(getattr(cfg, "HD_TOTAL_INVENTORY_DESTINATION_CHANNEL_ID", 0) or 0)
+    if (
+        hd_inv_src > 0
+        and hd_inv_dest > 0
+        and int(source_channel_id or 0) == hd_inv_src
+        and is_definitive_major_clearance_embed(pe_sel)
+    ):
+        if trace is not None:
+            try:
+                trace.setdefault("classifier", {}).setdefault("matches", {})["hd_total_inventory"] = True
+            except Exception:
+                pass
+        return hd_inv_dest, "HD_TOTAL_INVENTORY"
 
     # CLEARANCE routing policy:
     # Clearance source channels should not participate in general routing (PRICE_ERROR/flips/etc).
@@ -690,15 +718,14 @@ def select_target_channel_id(
     # (MAJOR_CLEARANCE destination).
     if source_group == "clearance":
         mc_id = int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0)
-        # `text_to_check` from live_forwarder already merges embed strings; callers without embeds must pass merged text.
-        if mc_id > 0 and is_major_clearance_monitor_embed_blob(text_blob):
+        if mc_id > 0 and is_major_clearance_monitor_embed_blob(pe_sel):
             if trace is not None:
                 try:
                     trace.setdefault("classifier", {}).setdefault("matches", {})["definitive_major_clearance"] = bool(
-                        is_definitive_major_clearance_embed(text_blob)
+                        is_definitive_major_clearance_embed(pe_sel)
                     )
                     trace.setdefault("classifier", {}).setdefault("matches", {})["tempo_major_clearance_candidate"] = bool(
-                        is_tempo_monitors_major_clearance_candidate(text_blob)
+                        is_tempo_monitors_major_clearance_candidate(pe_sel)
                     )
                 except Exception:
                     pass
@@ -706,12 +733,6 @@ def select_target_channel_id(
         return None
 
     mc_id = int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0)
-    pe_sel = text_blob
-    if embeds:
-        try:
-            pe_sel = (text_blob + "\n" + " ".join(collect_embed_strings(embeds))).strip()
-        except Exception:
-            pe_sel = text_blob
     skip_amazon = bool(source_group == "clearance")
     if mc_id > 0 and is_instore_source and (
         is_major_clearance_monitor_embed_blob(pe_sel)
@@ -1018,6 +1039,21 @@ def detect_all_link_types(
         except Exception:
             pe_check_blob = text_blob
 
+    hd_inv_src = int(getattr(cfg, "HD_TOTAL_INVENTORY_SOURCE_CHANNEL_ID", 0) or 0)
+    hd_inv_dest = int(getattr(cfg, "HD_TOTAL_INVENTORY_DESTINATION_CHANNEL_ID", 0) or 0)
+    if (
+        hd_inv_src > 0
+        and hd_inv_dest > 0
+        and int(source_channel_id or 0) == hd_inv_src
+        and is_definitive_major_clearance_embed(pe_check_blob)
+    ):
+        if trace is not None:
+            try:
+                trace.setdefault("classifier", {}).setdefault("matches", {})["hd_total_inventory"] = True
+            except Exception:
+                pass
+        return [(hd_inv_dest, "HD_TOTAL_INVENTORY")]
+
     mc_id = int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0)
     skip_amazon = bool(source_group == "clearance")
     if mc_id > 0 and is_instore_source and (
@@ -1268,7 +1304,7 @@ def detect_all_link_types(
     # Affiliate links only if not instore-classified and no Amazon hard match
     if not any(
         tag.startswith("INSTORE")
-        or tag in {"MAJOR_STORES", "DISCOUNTED_STORES", "MAJOR_CLEARANCE"}
+        or tag in {"MAJOR_STORES", "DISCOUNTED_STORES", "MAJOR_CLEARANCE", "HD_TOTAL_INVENTORY"}
         for _, tag in results
     ):
         if cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID and (source_group == "online"):
