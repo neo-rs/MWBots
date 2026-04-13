@@ -44,6 +44,7 @@
   "send_min_interval_seconds": 0.75,
   "enable_default_fallback": true,
   "enable_raw_link_unwrap": true,
+  "affiliate_skip_link_only_messages": true,
   "mirrorworld_route_online": {
     "1438969997178306661": 1438969997178306661,
     "1435985494356918333": 1435985494356918333

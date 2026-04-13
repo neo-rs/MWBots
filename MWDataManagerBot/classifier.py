@@ -735,6 +735,60 @@ def _affiliate_has_non_discord_url(blob: str) -> bool:
     return False
 
 
+_AFFILIATE_LINK_ONLY_LINE_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
+
+
+def _affiliate_is_link_only_noise(
+    *,
+    message_content: str,
+    embeds: Optional[List[Dict[str, Any]]],
+    attachments: Optional[List[Dict[str, Any]]],
+) -> bool:
+    """
+    True when the user-visible message body is only bare URL line(s) and there is no embed/attachment payload.
+    These are not useful "affiliated leads" forwards (often link-drops / collection pages).
+    """
+    if embeds:
+        for e in embeds:
+            if isinstance(e, dict) and e:
+                return False
+    if attachments:
+        for a in attachments:
+            if isinstance(a, dict) and a:
+                return False
+    body = (message_content or "").strip()
+    if not body:
+        return True
+    lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+    if not lines:
+        return True
+    return all(bool(_AFFILIATE_LINK_ONLY_LINE_RE.match(ln)) for ln in lines)
+
+
+def _affiliate_skip_link_only_route(
+    *,
+    message_content: str,
+    embeds: Optional[List[Dict[str, Any]]],
+    attachments: Optional[List[Dict[str, Any]]],
+    trace: Optional[Dict[str, Any]],
+) -> bool:
+    """If True, caller must not route to AFFILIATED_LINKS for this message."""
+    if not bool(getattr(cfg, "AFFILIATE_SKIP_LINK_ONLY_MESSAGES", True)):
+        return False
+    if not _affiliate_is_link_only_noise(
+        message_content=message_content or "",
+        embeds=embeds,
+        attachments=attachments,
+    ):
+        return False
+    if trace is not None:
+        try:
+            trace.setdefault("classifier", {}).setdefault("matches", {})["affiliate_skip"] = "link_only_body"
+        except Exception:
+            pass
+    return True
+
+
 def select_target_channel_id(
     text_to_check: str,
     attachments: List[Dict[str, Any]],
@@ -1001,7 +1055,7 @@ def select_target_channel_id(
         and source_group == "online"
         and cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID
         and _looks_like_conversational_amazon_deal(
-            text_blob,
+            pe_sel,
             source_group=source_group,
             source_channel_id=source_channel_id,
             trace=trace,
@@ -1053,7 +1107,13 @@ def select_target_channel_id(
                     trace.setdefault("classifier", {}).setdefault("matches", {})["affiliate_reason"] = "store_domain_or_mavely"
                 except Exception:
                     pass
-            return cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID, "AFFILIATED_LINKS"
+            if not _affiliate_skip_link_only_route(
+                message_content=message_content or "",
+                embeds=embeds,
+                attachments=attachments,
+                trace=trace,
+            ):
+                return cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID, "AFFILIATED_LINKS"
         if "http" in blob:
             if trace is not None:
                 try:
@@ -1062,7 +1122,13 @@ def select_target_channel_id(
                     pass
             # Avoid routing image-only posts (Discord CDN) into affiliate bucket.
             if _affiliate_has_non_discord_url(blob):
-                return cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID, "AFFILIATED_LINKS"
+                if not _affiliate_skip_link_only_route(
+                    message_content=message_content or "",
+                    embeds=embeds,
+                    attachments=attachments,
+                    trace=trace,
+                ):
+                    return cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID, "AFFILIATED_LINKS"
             if trace is not None:
                 try:
                     trace.setdefault("classifier", {}).setdefault("matches", {})["affiliate_skip"] = "discord_media_only"
@@ -1358,7 +1424,7 @@ def detect_all_link_types(
         and cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID
         and not amazon_detected
         and _looks_like_conversational_amazon_deal(
-            text_blob,
+            pe_check_blob,
             source_group=source_group,
             source_channel_id=source_channel_id,
             trace=trace,
@@ -1412,7 +1478,13 @@ def detect_all_link_types(
                         pass
                 # Avoid routing image-only posts (Discord CDN) into affiliate bucket.
                 if _affiliate_has_non_discord_url(blob):
-                    results.append((cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID, "AFFILIATED_LINKS"))
+                    if not _affiliate_skip_link_only_route(
+                        message_content=message_content or "",
+                        embeds=embeds,
+                        attachments=attachments,
+                        trace=trace,
+                    ):
+                        results.append((cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID, "AFFILIATED_LINKS"))
                 elif trace is not None:
                     try:
                         trace.setdefault("classifier", {}).setdefault("matches", {})["affiliate_skip"] = "discord_media_only"
