@@ -1425,7 +1425,7 @@ def detect_all_link_types(
     if (
         (not skip_amazon)
         and source_group == "online"
-        and cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID
+        and cfg.SMARTFILTER_CONVERSATIONAL_DEALS_CHANNEL_ID
         and not amazon_detected
         and _looks_like_conversational_amazon_deal(
             pe_check_blob,
@@ -1434,7 +1434,7 @@ def detect_all_link_types(
             trace=trace,
         )
     ):
-        results.append((cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID, "AMZ_DEALS"))
+        results.append((cfg.SMARTFILTER_CONVERSATIONAL_DEALS_CHANNEL_ID, "CONVERSATIONAL_DEALS"))
 
     if cfg.SMARTFILTER_UPCOMING_CHANNEL_ID and (source_group == "online") and TIMESTAMP_PATTERN.search(text_to_check or ""):
         upcoming_explain = is_truly_upcoming_explain(text_to_check or "")
@@ -1496,7 +1496,7 @@ def detect_all_link_types(
                         pass
 
     # If Amazon detected, suppress other store destinations (keep PRICE_ERROR as it can co-exist)
-    if any(tag in ("AMAZON", "AMAZON_PROFITABLE_LEAD", "AMAZON_FALLBACK", "AMZ_DEALS") for _, tag in results):
+    if any(tag in ("AMAZON", "AMAZON_PROFITABLE_LEAD", "AMAZON_FALLBACK", "CONVERSATIONAL_DEALS") for _, tag in results):
         results = [(cid, tag) for cid, tag in results if tag in ("AMAZON", "AMAZON_PROFITABLE_LEAD", "AMAZON_FALLBACK", "AMZ_DEALS", "PRICE_ERROR")]
 
     # DEFAULT fallback if nothing
