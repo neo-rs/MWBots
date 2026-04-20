@@ -2980,12 +2980,21 @@ async def run_fetch_auto_sequence_all_entries(
     return {"ok": all_ok, "results": results, "total_sent": total_sent, "entry_count": len(results)}
 
 
+def _config_path_for_display(path: Path) -> str:
+    """Path relative to MWDiscumBot folder for readable audit lines (avoids long Windows profile prefixes)."""
+    try:
+        rel = path.resolve().relative_to(_BOT_DIR.resolve())
+        return rel.as_posix()
+    except (ValueError, OSError):
+        return str(path)
+
+
 def _audit_related_config_paths() -> Dict[str, str]:
-    """Resolved paths for audit output (same files load_fetchall_mappings / cfg.init use)."""
+    """Paths for audit output (same files as load_fetchall_mappings / cfg.init; shown short, under MWDiscumBot/)."""
     return {
-        "settings_json": str(_CONFIG_DIR / "settings.json"),
-        "fetchall_mappings_json": str(_FETCHALL_PATH),
-        "fetchall_mappings_runtime_json": str(_FETCHALL_RUNTIME_PATH),
+        "settings_json": _config_path_for_display(_CONFIG_DIR / "settings.json"),
+        "fetchall_mappings_json": _config_path_for_display(_FETCHALL_PATH),
+        "fetchall_mappings_runtime_json": _config_path_for_display(_FETCHALL_RUNTIME_PATH),
     }
 
 
