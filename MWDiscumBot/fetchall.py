@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import time
 import threading
 import unicodedata
@@ -1379,6 +1380,151 @@ async def list_user_guilds(*, user_token: str) -> Dict[str, Any]:
         out.append({"id": gid, "name": name, "owner": owner, "icon": icon})
     out.sort(key=lambda x: (str(x.get("name") or "").lower(), int(x.get("id") or 0)))
     return {"ok": True, "http_status": int(status or 0), "guilds": out}
+
+
+async def list_all_user_guilds_paginated(*, user_token: str) -> Dict[str, Any]:
+    """
+    Paginate GET /users/@me/guilds (200 guilds per page) so accounts in many servers see the full list.
+    Returns the same shape as list_user_guilds: {ok, guilds, http_status?, reason?}.
+    """
+    token = str(user_token or "").strip()
+    if not token:
+        return {"ok": False, "reason": "missing_user_token", "guilds": []}
+    url = f"{_DISCORD_API_BASE}/users/@me/guilds"
+    merged: Dict[int, Dict[str, Any]] = {}
+    after: Optional[str] = None
+    last_status = 0
+    page = 0
+    while page < 50:
+        page += 1
+        params: Dict[str, Any] = {"limit": "200", "with_counts": "true"}
+        if after:
+            params["after"] = str(after)
+        status, data = await _discord_api_get_json(url=url, user_token=token, params=params)
+        last_status = int(status or 0)
+        if status != 200 or not isinstance(data, list) or not data:
+            break
+        last_id = 0
+        for g in data:
+            if not isinstance(g, dict):
+                continue
+            try:
+                gid = int(g.get("id") or 0)
+            except Exception:
+                gid = 0
+            if gid <= 0:
+                continue
+            name = str(g.get("name") or "").strip() or f"guild_{gid}"
+            try:
+                owner = bool(g.get("owner"))
+            except Exception:
+                owner = False
+            icon = str(g.get("icon") or "").strip()
+            merged[gid] = {"id": gid, "name": name, "owner": owner, "icon": icon}
+            last_id = gid
+        if len(data) < 200:
+            break
+        if last_id <= 0:
+            break
+        after = str(last_id)
+    out = sorted(merged.values(), key=lambda x: (str(x.get("name") or "").lower(), int(x.get("id") or 0)))
+    if not out and last_status not in (0, 200):
+        return {"ok": False, "reason": "failed_to_list_user_guilds", "http_status": last_status, "guilds": []}
+    return {"ok": True, "http_status": last_status, "guilds": out}
+
+
+def load_fetchall_base_mappings_document() -> Dict[str, Any]:
+    """Read git-tracked fetchall_mappings.json only (no merge with runtime)."""
+    try:
+        if not _FETCHALL_PATH.exists():
+            return {"guilds": []}
+        with open(_FETCHALL_PATH, "r", encoding="utf-8-sig") as f:
+            d = json.load(f)
+        if not isinstance(d, dict):
+            return {"guilds": []}
+        g = d.get("guilds")
+        if not isinstance(g, list):
+            d["guilds"] = []
+        return d
+    except Exception as e:
+        log_warn(f"[FETCHALL] load_fetchall_base_mappings_document failed: {e}")
+    return {"guilds": []}
+
+
+def runtime_overlay_source_guild_ids() -> Set[int]:
+    """source_guild_id values that appear in fetchall_mappings.runtime.json (file alone, not merged)."""
+    out: Set[int] = set()
+    try:
+        if not _FETCHALL_RUNTIME_PATH.exists():
+            return out
+        with open(_FETCHALL_RUNTIME_PATH, "r", encoding="utf-8-sig") as f:
+            d = json.load(f)
+        if not isinstance(d, dict):
+            return out
+        guilds = d.get("guilds")
+        if not isinstance(guilds, list):
+            return out
+        for e in guilds:
+            if not isinstance(e, dict):
+                continue
+            try:
+                sgid = int(e.get("source_guild_id", 0) or 0)
+            except Exception:
+                sgid = 0
+            if sgid > 0:
+                out.add(sgid)
+    except Exception:
+        pass
+    return out
+
+
+def upsert_guild_in_mappings_guilds_list(guilds: List[Dict[str, Any]], entry: Dict[str, Any]) -> None:
+    """Replace first dict with matching source_guild_id or append. Mutates guilds list."""
+    if not isinstance(entry, dict):
+        return
+    try:
+        sgid = int(entry.get("source_guild_id", 0) or 0)
+    except Exception:
+        sgid = 0
+    if sgid <= 0:
+        return
+    for i, ex in enumerate(guilds):
+        if not isinstance(ex, dict):
+            continue
+        try:
+            if int(ex.get("source_guild_id", 0) or 0) == sgid:
+                guilds[i] = dict(entry)
+                return
+        except Exception:
+            continue
+    guilds.append(dict(entry))
+
+
+def save_fetchall_base_mappings_document(data: Dict[str, Any], *, backup: bool = True) -> bool:
+    """
+    Write git-tracked config/fetchall_mappings.json only (rare / wizard).
+    Atomic replace; optional timestamped .wizardbak copy beside the file.
+    """
+    try:
+        if not isinstance(data, dict):
+            return False
+        guilds = data.get("guilds")
+        if not isinstance(guilds, list):
+            return False
+        with _FILE_LOCK:
+            _FETCHALL_PATH.parent.mkdir(parents=True, exist_ok=True)
+            if backup and _FETCHALL_PATH.is_file():
+                ts = time.strftime("%Y%m%d-%H%M%S")
+                bak = _FETCHALL_PATH.with_suffix(_FETCHALL_PATH.suffix + f".wizardbak.{ts}")
+                shutil.copy2(_FETCHALL_PATH, bak)
+            tmp = Path(str(_FETCHALL_PATH) + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            os.replace(str(tmp), str(_FETCHALL_PATH))
+        return True
+    except Exception as e:
+        log_warn(f"[FETCHALL] save_fetchall_base_mappings_document failed: {e}")
+    return False
 
 
 async def list_source_guild_channels(
@@ -2834,11 +2980,42 @@ async def run_fetch_auto_sequence_all_entries(
     return {"ok": all_ok, "results": results, "total_sent": total_sent, "entry_count": len(results)}
 
 
+def _audit_related_config_paths() -> Dict[str, str]:
+    """Resolved paths for audit output (same files load_fetchall_mappings / cfg.init use)."""
+    return {
+        "settings_json": str(_CONFIG_DIR / "settings.json"),
+        "fetchall_mappings_json": str(_FETCHALL_PATH),
+        "fetchall_mappings_runtime_json": str(_FETCHALL_RUNTIME_PATH),
+    }
+
+
+async def audit_resolve_source_guild_display_name(
+    *, source_guild_id: int, user_token: str, entry: Dict[str, Any]
+) -> str:
+    """Best-effort Discord guild name for audit headers (REST), else mapping entry name, else placeholder."""
+    sgid = int(source_guild_id or 0)
+    tok = str(user_token or "").strip()
+    if sgid > 0 and tok:
+        try:
+            st, data = await _fetch_guild_info_via_user_token(source_guild_id=sgid, user_token=tok)
+            if int(st or 0) == 200 and isinstance(data, dict):
+                n = str(data.get("name") or "").strip()
+                if n:
+                    return n
+        except Exception:
+            pass
+    n2 = str(entry.get("name") or "").strip() if isinstance(entry, dict) else ""
+    if n2:
+        return n2
+    return f"guild_{sgid}" if sgid else "unknown_guild"
+
+
 def build_source_fetch_audit_report(
     *,
     source_guild_id: int,
     api_channels: List[Dict[str, Any]],
     entry: Dict[str, Any],
+    source_guild_display_name: str = "",
 ) -> Dict[str, Any]:
     """
     Local audit helper: same channel selection as fetchsync/fetchall REST path, without Discord.py guild objects.
@@ -2855,6 +3032,27 @@ def build_source_fetch_audit_report(
         ignored_ids = {int(x) for x in raw_ignored if int(x) > 0}
     except Exception:
         ignored_ids = set()
+
+    # Must match run_fetchall / run_fetchsync: empty source_category_ids is a hard stop (never mirror whole guild).
+    if not _cats:
+        gname = str(source_guild_display_name or "").strip()
+        entry_label = str(entry.get("name") or "").strip() if isinstance(entry, dict) else ""
+        paths = _audit_related_config_paths()
+        return {
+            "source_guild_id": int(source_guild_id),
+            "source_guild_display_name": gname,
+            "entry_mapping_name": entry_label,
+            "source_category_ids": [],
+            "ignored_channel_ids": sorted(ignored_ids),
+            "require_status_emoji_prefix": bool(getattr(cfg, "FETCHMIRROR_REQUIRE_STATUS_EMOJI_PREFIX", False)),
+            "categories": [],
+            "channels": [],
+            "included_count": 0,
+            "excluded_count": 0,
+            "final_mirror_targets": [],
+            "related_config_paths": paths,
+            "missing_source_category_ids": True,
+        }
 
     allow_cat: Set[int] = set(_cats)
     cat_meta: Dict[int, Tuple[str, int]] = {}
@@ -2948,8 +3146,13 @@ def build_source_fetch_audit_report(
 
     rows.sort(key=lambda r: (int(r.get("parent_id") or 0), int(r.get("position") or 0), int(r.get("id") or 0)))
     cat_order = sorted(cat_meta.items(), key=lambda kv: (kv[1][1], kv[0]))
+    gname = str(source_guild_display_name or "").strip()
+    entry_label = str(entry.get("name") or "").strip() if isinstance(entry, dict) else ""
+    paths = _audit_related_config_paths()
     return {
         "source_guild_id": int(source_guild_id),
+        "source_guild_display_name": gname,
+        "entry_mapping_name": entry_label,
         "source_category_ids": list(_cats),
         "ignored_channel_ids": sorted(ignored_ids),
         "require_status_emoji_prefix": bool(getattr(cfg, "FETCHMIRROR_REQUIRE_STATUS_EMOJI_PREFIX", False)),
@@ -2958,6 +3161,7 @@ def build_source_fetch_audit_report(
         "included_count": sum(1 for r in rows if r.get("status") == "included"),
         "excluded_count": sum(1 for r in rows if r.get("status") == "excluded"),
         "final_mirror_targets": list(final_pairs),
+        "related_config_paths": paths,
     }
 
 
@@ -2965,7 +3169,49 @@ def format_source_fetch_audit_tree(report: Dict[str, Any]) -> str:
     """Render build_source_fetch_audit_report() as a Discord-like category → channel list."""
     lines: List[str] = []
     gid = int(report.get("source_guild_id") or 0)
-    lines.append(f"══ Source guild {gid} (audit) ══")
+    gdisp = str(report.get("source_guild_display_name") or "").strip()
+    title = f"{gdisp}  (source_guild_id={gid})" if gdisp else f"source_guild_id={gid}"
+    lines.append(f"══ {title}  — channel audit ══")
+    emap = str(report.get("entry_mapping_name") or "").strip()
+    if emap:
+        lines.append(f'Mapping entry label (field "name" on this source_guild_id): {emap}')
+    paths = report.get("related_config_paths") if isinstance(report.get("related_config_paths"), dict) else {}
+    if paths:
+        lines.append("Config files (same as live fetchall / fetchsync):")
+        lines.append(f"  • settings.json (global filters, e.g. fetchmirror_require_status_emoji_prefix)")
+        lines.append(f"    → {paths.get('settings_json', '')}")
+        lines.append(f"  • fetchall_mappings.json + optional fetchall_mappings.runtime.json (merged by load_fetchall_mappings)")
+        lines.append(f"    → base: {paths.get('fetchall_mappings_json', '')}")
+        lines.append(f"    → runtime overlay (if present): {paths.get('fetchall_mappings_runtime_json', '')}")
+    sc = report.get("source_category_ids")
+    if isinstance(sc, list) and sc:
+        lines.append(f'source_category_ids (from merged mapping entry for this guild): {sc}')
+    else:
+        lines.append(
+            "source_category_ids: (none — live fetchall/fetchsync aborts with reason missing_source_category_ids; "
+            "no mirrors are created.)"
+        )
+    if bool(report.get("missing_source_category_ids")):
+        lines.append(
+            "AUDIT: No per-channel preview is shown when source_category_ids is empty (avoids implying the whole "
+            "guild would be scanned). Add one or more source category snowflakes to the merged mapping entry."
+        )
+    lines.append(
+        'ignored_channel_ids: from the SAME merged mapping object (field "ignored_channel_ids"); '
+        "channels OUT with reason ignored_channel_ids match this list. Other OUT reasons are filters."
+    )
+    ign_prev = report.get("ignored_channel_ids")
+    if isinstance(ign_prev, list) and ign_prev:
+        lines.append(f"  → {ign_prev}")
+    elif isinstance(ign_prev, list):
+        lines.append("  → (empty)")
+    lines.append("")
+    if bool(report.get("missing_source_category_ids")):
+        lines.append(
+            "Summary: no preview (missing_source_category_ids). Fix: set source_category_ids on this guild in "
+            "fetchall_mappings.json and/or fetchall_mappings.runtime.json (merged = live config)."
+        )
+        return "\n".join(lines)
     cats = report.get("categories") if isinstance(report.get("categories"), list) else []
     chans = report.get("channels") if isinstance(report.get("channels"), list) else []
     by_parent: Dict[int, List[Dict[str, Any]]] = {}
@@ -3019,7 +3265,9 @@ def format_source_fetch_audit_tree(report: Dict[str, Any]) -> str:
 
     ign = report.get("ignored_channel_ids")
     if isinstance(ign, list) and ign:
-        lines.append(f"Ignored channel ids ({len(ign)}): {ign[:40]}{'...' if len(ign) > 40 else ''}")
+        lines.append(
+            f"Reminder: ignored list above ({len(ign)} id(s)) is exactly the mapping entry's ignored_channel_ids."
+        )
     lines.append(
         f"Summary: included={int(report.get('included_count') or 0)} excluded={int(report.get('excluded_count') or 0)} "
         f"status_emoji_filter={'on' if report.get('require_status_emoji_prefix') else 'off'}"

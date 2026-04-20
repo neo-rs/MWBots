@@ -40,7 +40,8 @@ def load_env_file(path: str) -> Dict[str, str]:
     """Load KEY=VALUE from .env; return dict. No python-dotenv dependency."""
     out: Dict[str, str] = {}
     try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        # utf-8-sig strips a leading BOM so the first key is not "\ufeffDISCUM_..." (Windows editors).
+        with open(path, "r", encoding="utf-8-sig", errors="ignore") as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith("#") or line.startswith("-"):
