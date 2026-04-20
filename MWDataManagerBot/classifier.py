@@ -1057,7 +1057,7 @@ def select_target_channel_id(
     if (
         not skip_amazon
         and source_group == "online"
-        and cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID
+        and cfg.SMARTFILTER_CONVERSATIONAL_DEALS_CHANNEL_ID
         and _looks_like_conversational_amazon_deal(
             pe_sel,
             source_group=source_group,
@@ -1065,7 +1065,7 @@ def select_target_channel_id(
             trace=trace,
         )
     ):
-        return cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID, "AMZ_DEALS"
+        return cfg.SMARTFILTER_CONVERSATIONAL_DEALS_CHANNEL_ID, "CONVERSATIONAL_DEALS"
 
     # 9) UPCOMING (online only; explainable)
     if cfg.SMARTFILTER_UPCOMING_CHANNEL_ID and (source_group == "online") and TIMESTAMP_PATTERN.search(text_to_check or ""):

@@ -92,7 +92,7 @@ def _dispatch_tag_priority(tag: str) -> int:
     # classify_instore_destination store buckets (often paired with MONITORED_KEYWORD on same lead)
     if t in ("MAJOR_STORES", "DISCOUNTED_STORES"):
         return 130
-    if t in ("AMAZON_PROFITABLE_LEAD", "AMAZON", "AMAZON_FALLBACK", "AMZ_DEALS"):
+    if t in ("AMAZON_PROFITABLE_LEAD", "AMAZON", "AMAZON_FALLBACK", "CONVERSATIONAL_DEALS"):
         return 160
     if t == "UPCOMING":
         return 140
