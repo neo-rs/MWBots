@@ -6,7 +6,9 @@
                              "1202423534891311176",
                              "1081282387507429387",
                              "521154543195521025",
-                             "663388213964046336"
+                             "663388213964046336",
+                             "1296182793407168614",
+                             "1327642354664083547"
                          ],
     "mirrorworld_server_id":  "1431314516364230689",
     "duplicate_ttl_seconds":  180,
@@ -33,12 +35,14 @@
     "forward_attachments_max_files": 10,
     "forward_attachments_max_bytes": 7500000,
 
-    "fetchall_startup_clear_enabled": false,
+    "fetchall_runtime_mappings_reset_on_startup": true,
+
+    "fetchall_startup_clear_enabled": true,
     "fetchall_startup_clear_category_ids": [ 1437856372300451851 ],
     "fetchall_startup_clear_only_mirror_channels": true,
     "fetchall_startup_clear_all_channels": true,
     "fetchall_startup_clear_delay_seconds": 2,
-    "fetchsync_auto_poll_seconds": 0,
+    "fetchsync_auto_poll_seconds": 3600,
 
     "fetchmirror_require_status_emoji_prefix": true,
     "fetch_auto_sequence_sleep_seconds": 1,

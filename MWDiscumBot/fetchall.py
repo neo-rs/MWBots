@@ -134,7 +134,11 @@ def load_fetchall_mappings() -> Dict[str, Any]:
 
         # Merge strategy (by source_guild_id):
         # - Start from base (git-tracked)
-        # - Overlay runtime entries (saved from Discord UI) so ignores/categories persist across updates
+        # - Overlay runtime entries (saved from Discord UI / state) **shallowly** on top of base.
+        #
+        # Important: runtime rows are often partial (state, updated_at, ignores) and must NOT
+        # wipe base-only fields like source_category_ids or status_emoji_prefix_exempt_channel_ids.
+        # Replacing the whole dict used to drop those keys and broke fetchsync/audit until base was re-copied.
         out: Dict[str, Any] = dict(base or {})
         base_guilds = base.get("guilds", [])
         rt_guilds = runtime.get("guilds", [])
@@ -164,7 +168,11 @@ def load_fetchall_mappings() -> Dict[str, Any]:
                 sgid = 0
             if sgid <= 0:
                 continue
-            merged[sgid] = dict(e)
+            prev = merged.get(sgid)
+            if isinstance(prev, dict) and prev:
+                merged[sgid] = {**prev, **dict(e)}
+            else:
+                merged[sgid] = dict(e)
             if sgid not in order:
                 order.append(sgid)
         out["guilds"] = [merged[sgid] for sgid in order if sgid in merged]
@@ -188,6 +196,49 @@ def save_fetchall_mappings(data: Dict[str, Any]) -> None:
                     json.dump(data, f, indent=2, ensure_ascii=False)
     except Exception as e:
         log_warn(f"[FETCHALL] Failed to save fetchall mappings: {e}")
+
+
+def clear_fetchall_runtime_mappings_overlay(*, log_event: bool = True) -> None:
+    """
+    Replace fetchall_mappings.runtime.json with an empty guild list.
+
+    After this, load_fetchall_mappings() merges base fetchall_mappings.json only (no runtime overlay)
+    until something writes runtime again. Also drops stored fetchsync cursors in that file.
+    """
+    payload: Dict[str, Any] = {"guilds": []}
+    try:
+        with _FILE_LOCK:
+            _FETCHALL_RUNTIME_PATH.parent.mkdir(parents=True, exist_ok=True)
+            tmp = Path(str(_FETCHALL_RUNTIME_PATH) + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, ensure_ascii=False)
+            try:
+                os.replace(str(tmp), str(_FETCHALL_RUNTIME_PATH))
+            except Exception:
+                with open(_FETCHALL_RUNTIME_PATH, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, indent=2, ensure_ascii=False)
+        if log_event:
+            log_fetchall(
+                "[FETCHALL] Cleared fetchall_mappings.runtime.json overlay (guilds=[]); merged mappings are base-only until rewritten.",
+                event="runtime_reset",
+            )
+    except Exception as e:
+        log_warn(f"[FETCHALL] Failed to clear fetchall_mappings.runtime.json: {e}")
+
+
+def maybe_reset_fetchall_runtime_mappings_at_startup() -> bool:
+    """
+    If fetchall_runtime_mappings_reset_on_startup is enabled in settings.json, clear the runtime overlay file.
+    Returns True when a reset was performed.
+    """
+    if not bool(getattr(cfg, "FETCHALL_RUNTIME_MAPPINGS_RESET_ON_STARTUP", False)):
+        return False
+    log_warn(
+        "[FETCHALL] fetchall_runtime_mappings_reset_on_startup: clearing fetchall_mappings.runtime.json "
+        "(drops overlay + fetchsync cursors; next fetchsync may re-backfill recent windows)."
+    )
+    clear_fetchall_runtime_mappings_overlay(log_event=True)
+    return True
 
 
 def iter_fetchall_entries() -> List[Dict[str, Any]]:
@@ -270,6 +321,46 @@ def set_ignored_channel_ids(*, source_guild_id: int, ignored_channel_ids: List[i
     except Exception:
         ids = []
     entry["ignored_channel_ids"] = ids
+    entry["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    save_fetchall_mappings(config)
+    return entry
+
+
+def _status_emoji_prefix_exempt_ids_from_entry(entry: Optional[Dict[str, Any]]) -> Set[int]:
+    """Per-mapping allowlist: these source channel ids bypass fetchmirror_require_status_emoji_prefix when it is ON."""
+    if not isinstance(entry, dict):
+        return set()
+    raw = entry.get("status_emoji_prefix_exempt_channel_ids")
+    if not isinstance(raw, list):
+        return set()
+    out: Set[int] = set()
+    for x in raw:
+        try:
+            v = int(x)
+        except Exception:
+            continue
+        if v > 0:
+            out.add(v)
+    return out
+
+
+def set_status_emoji_prefix_exempt_channel_ids(
+    *, source_guild_id: int, channel_ids: List[int]
+) -> Optional[Dict[str, Any]]:
+    """Set status_emoji_prefix_exempt_channel_ids on the merged mapping entry (runtime file)."""
+    sgid = int(source_guild_id or 0)
+    if sgid <= 0:
+        return None
+    upsert_mapping(source_guild_id=sgid)
+    config = load_fetchall_mappings()
+    entry = _find_entry(config, source_guild_id=sgid)
+    if entry is None:
+        return None
+    try:
+        ids = [int(x) for x in (channel_ids or []) if int(x) > 0]
+    except Exception:
+        ids = []
+    entry["status_emoji_prefix_exempt_channel_ids"] = ids
     entry["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     save_fetchall_mappings(config)
     return entry
@@ -1285,19 +1376,32 @@ def _channel_name_matches_status_emoji_prefix(name: str) -> bool:
 
 
 def _apply_status_emoji_channel_filter(
-    pairs: List[Tuple[int, str]], *, source_guild_id: int, context: str
+    pairs: List[Tuple[int, str]],
+    *,
+    source_guild_id: int,
+    context: str,
+    exempt_channel_ids: Optional[Set[int]] = None,
 ) -> List[Tuple[int, str]]:
     """
     Optional filter: keep only channels whose names start with status/calendar emoji.
     When enabled, fetchall prune may delete mirrors for sources no longer in the kept set.
+    Channel ids listed in exempt_channel_ids (mapping field status_emoji_prefix_exempt_channel_ids) are kept anyway.
     """
     if not bool(getattr(cfg, "FETCHMIRROR_REQUIRE_STATUS_EMOJI_PREFIX", False)):
         return list(pairs or [])
+    ex: Set[int] = {int(x) for x in (exempt_channel_ids or set()) if int(x) > 0}
     kept: List[Tuple[int, str]] = []
     skipped = 0
+    exempt_kept = 0
     for cid, cname in pairs or []:
+        cid_i = int(cid)
+        if cid_i in ex:
+            kept.append((cid_i, str(cname)))
+            if not _channel_name_matches_status_emoji_prefix(cname):
+                exempt_kept += 1
+            continue
         if _channel_name_matches_status_emoji_prefix(cname):
-            kept.append((int(cid), str(cname)))
+            kept.append((cid_i, str(cname)))
         else:
             skipped += 1
             try:
@@ -1307,6 +1411,13 @@ def _apply_status_emoji_channel_filter(
                 )
             except Exception:
                 pass
+    if exempt_kept:
+        log_fetchall(
+            f"{context} source_guild={source_guild_id} status_emoji_prefix exempt kept={exempt_kept} "
+            f"(mapping status_emoji_prefix_exempt_channel_ids)",
+            event="channel_filter",
+            exempt_kept=int(exempt_kept),
+        )
     if skipped:
         log_fetchall(
             f"{context} source_guild={source_guild_id} status_emoji_prefix filter dropped={skipped} kept={len(kept)}",
@@ -1863,6 +1974,14 @@ async def run_fetchall(
     if ignored_ids:
         log_fetchall(f"source={source_guild_id} ignored_channel_ids={len(ignored_ids)} channels (excluded from fetch): {sorted(ignored_ids)[:15]}{'...' if len(ignored_ids) > 15 else ''}")
 
+    status_emoji_exempt = _status_emoji_prefix_exempt_ids_from_entry(entry)
+    if status_emoji_exempt:
+        log_fetchall(
+            f"source={source_guild_id} status_emoji_prefix_exempt_channel_ids={len(status_emoji_exempt)} "
+            f"(these ids bypass fetchmirror_require_status_emoji_prefix when ON): "
+            f"{sorted(status_emoji_exempt)[:15]}{'...' if len(status_emoji_exempt) > 15 else ''}"
+        )
+
     if bool(getattr(cfg, "FETCHMIRROR_REQUIRE_STATUS_EMOJI_PREFIX", False)):
         log_fetchall(
             "config fetchmirror_require_status_emoji_prefix=ON — only channels named with leading 🟢🟡🔴🟠📅🗓 are mirrored; "
@@ -1990,7 +2109,10 @@ async def run_fetchall(
     )
 
     src_channels_to_mirror = _apply_status_emoji_channel_filter(
-        src_channels_to_mirror, source_guild_id=int(source_guild_id), context="FETCHALL"
+        src_channels_to_mirror,
+        source_guild_id=int(source_guild_id),
+        context="FETCHALL",
+        exempt_channel_ids=status_emoji_exempt,
     )
 
     # Build existing mirror index by topic (scan across ALL destination channels, including overflow categories)
@@ -2341,6 +2463,12 @@ async def run_fetchsync(
     if ignored_ids:
         log_fetchall(f"fetchsync source={source_guild_id} ignored_channel_ids={len(ignored_ids)} channels (excluded)")
 
+    status_emoji_exempt = _status_emoji_prefix_exempt_ids_from_entry(entry)
+    if status_emoji_exempt:
+        log_fetchall(
+            f"fetchsync source={source_guild_id} status_emoji_prefix_exempt_channel_ids={len(status_emoji_exempt)}"
+        )
+
     # Always enumerate channels via user token (source access is assumed to be via user token).
     status, api_channels = await _fetch_guild_channels_via_user_token(source_guild_id=source_guild_id, user_token=token)
     log_fetchall(
@@ -2359,7 +2487,10 @@ async def run_fetchsync(
         ignored_channel_ids=ignored_ids,
     )
     src_channels_to_mirror = _apply_status_emoji_channel_filter(
-        src_channels_to_mirror, source_guild_id=int(source_guild_id), context="FETCHSYNC"
+        src_channels_to_mirror,
+        source_guild_id=int(source_guild_id),
+        context="FETCHSYNC",
+        exempt_channel_ids=status_emoji_exempt,
     )
     if not src_channels_to_mirror:
         extra = {
@@ -3042,6 +3173,8 @@ def build_source_fetch_audit_report(
     except Exception:
         ignored_ids = set()
 
+    exempt_ids: Set[int] = _status_emoji_prefix_exempt_ids_from_entry(entry)
+
     # Must match run_fetchall / run_fetchsync: empty source_category_ids is a hard stop (never mirror whole guild).
     if not _cats:
         gname = str(source_guild_display_name or "").strip()
@@ -3053,6 +3186,7 @@ def build_source_fetch_audit_report(
             "entry_mapping_name": entry_label,
             "source_category_ids": [],
             "ignored_channel_ids": sorted(ignored_ids),
+            "status_emoji_prefix_exempt_channel_ids": sorted(exempt_ids),
             "require_status_emoji_prefix": bool(getattr(cfg, "FETCHMIRROR_REQUIRE_STATUS_EMOJI_PREFIX", False)),
             "categories": [],
             "channels": [],
@@ -3095,9 +3229,13 @@ def build_source_fetch_audit_report(
     )
     selected_ids = {int(cid) for cid, _ in selected_pairs if int(cid or 0) > 0}
     final_pairs = _apply_status_emoji_channel_filter(
-        list(selected_pairs), source_guild_id=int(source_guild_id), context="AUDIT"
+        list(selected_pairs),
+        source_guild_id=int(source_guild_id),
+        context="AUDIT",
+        exempt_channel_ids=exempt_ids,
     )
     final_ids = {int(cid) for cid, _ in final_pairs if int(cid or 0) > 0}
+    emoji_required = bool(getattr(cfg, "FETCHMIRROR_REQUIRE_STATUS_EMOJI_PREFIX", False))
 
     rows: List[Dict[str, Any]] = []
     for c in api_channels or []:
@@ -3142,6 +3280,12 @@ def build_source_fetch_audit_report(
         elif ch_id not in final_ids:
             status = "excluded"
             reason = "fetchmirror_require_status_emoji_prefix"
+        elif (
+            emoji_required
+            and ch_id in exempt_ids
+            and not _channel_name_matches_status_emoji_prefix(name)
+        ):
+            reason = "status_emoji_prefix_exempt_channel_ids"
         rows.append(
             {
                 "id": ch_id,
@@ -3164,6 +3308,7 @@ def build_source_fetch_audit_report(
         "entry_mapping_name": entry_label,
         "source_category_ids": list(_cats),
         "ignored_channel_ids": sorted(ignored_ids),
+        "status_emoji_prefix_exempt_channel_ids": sorted(exempt_ids),
         "require_status_emoji_prefix": bool(getattr(cfg, "FETCHMIRROR_REQUIRE_STATUS_EMOJI_PREFIX", False)),
         "categories": [{"id": cid, "name": cat_meta[cid][0], "position": cat_meta[cid][1]} for cid, _ in cat_order if cid in cat_meta],
         "channels": rows,
@@ -3214,6 +3359,16 @@ def format_source_fetch_audit_tree(report: Dict[str, Any]) -> str:
         lines.append(f"  → {ign_prev}")
     elif isinstance(ign_prev, list):
         lines.append("  → (empty)")
+    lines.append(
+        'status_emoji_prefix_exempt_channel_ids: optional per-mapping list on the SAME merged mapping object. '
+        "When settings.json fetchmirror_require_status_emoji_prefix is true, these source channel ids are still "
+        "mirrored even if the channel name does not start with 🟢🟡🔴🟠📅🗓."
+    )
+    ex_prev = report.get("status_emoji_prefix_exempt_channel_ids")
+    if isinstance(ex_prev, list) and ex_prev:
+        lines.append(f"  → {ex_prev}")
+    elif isinstance(ex_prev, list):
+        lines.append("  → (empty)")
     lines.append("")
     if bool(report.get("missing_source_category_ids")):
         lines.append(
@@ -3254,7 +3409,14 @@ def format_source_fetch_audit_tree(report: Dict[str, Any]) -> str:
                 lines.append("  (no text/announcement channels under this category in API snapshot)")
             for r in kids:
                 mark = "  # " if str(r.get("status")) == "included" else "  · "
-                tag = "IN" if str(r.get("status")) == "included" else f"OUT ({str(r.get('reason') or '')})"
+                st_s = str(r.get("status") or "")
+                rs = str(r.get("reason") or "")
+                if st_s == "included" and rs:
+                    tag = f"IN ({rs})"
+                elif st_s == "included":
+                    tag = "IN"
+                else:
+                    tag = f"OUT ({rs})"
                 nm = str(r.get("name") or "")
                 lines.append(f"{mark}{nm}  [{tag}]  id={r.get('id')}")
     else:
@@ -3268,7 +3430,14 @@ def format_source_fetch_audit_tree(report: Dict[str, Any]) -> str:
             pass
         for r in flat:
             mark = "  # " if str(r.get("status")) == "included" else "  · "
-            tag = "IN" if str(r.get("status")) == "included" else f"OUT ({str(r.get('reason') or '')})"
+            st_s = str(r.get("status") or "")
+            rs = str(r.get("reason") or "")
+            if st_s == "included" and rs:
+                tag = f"IN ({rs})"
+            elif st_s == "included":
+                tag = "IN"
+            else:
+                tag = f"OUT ({rs})"
             nm = str(r.get("name") or "")
             lines.append(f"{mark}{nm}  [{tag}]  parent={r.get('parent_id')} id={r.get('id')}")
 

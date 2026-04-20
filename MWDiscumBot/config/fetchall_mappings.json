@@ -23,9 +23,9 @@
     {
       "name": "Divine",
       "source_guild_id": 667532381376217089,
-      "destination_category_id": 1437856372300451851,
       "require_date": true,
       "separator_order": 1,
+      "destination_category_id": 1437856372300451851,
       "source_category_ids": [
         755222653299851385
       ],
@@ -33,6 +33,9 @@
         744273597706534952,
         1095374127650586634,
         1299492224945488004
+      ],
+      "status_emoji_prefix_exempt_channel_ids": [
+        1460301833791868979
       ],
       "separator_channel_id": 1439245850495815702
     },
@@ -57,9 +60,12 @@
     {
       "name": "Deal Soldier",
       "source_guild_id": 1202423534891311176,
-      "destination_category_id": 1437856372300451851,
       "require_date": true,
       "separator_order": 3,
+      "destination_category_id": 1437856372300451851,
+      "source_category_ids": [
+        1202423536262578212
+      ],
       "ignored_channel_ids": []
     },
     {

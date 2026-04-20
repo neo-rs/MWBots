@@ -22,6 +22,12 @@ FORWARD_ATTACHMENTS_AS_FILES: bool = True
 FORWARD_ATTACHMENTS_MAX_FILES: int = 10
 FORWARD_ATTACHMENTS_MAX_BYTES: int = 7_500_000
 
+# When True, on MWDiscumBot ready (before startup clear / fetchsync), replace fetchall_mappings.runtime.json
+# with {"guilds": []} so merged mappings are base-only until the bot writes runtime again.
+# Clears stale partial overlay rows and fetchsync cursors (last_seen_message_id_by_channel); next fetchsync may
+# re-backfill recent pages for non-empty mirrors — use with fetchall_startup_clear or accept possible overlap.
+FETCHALL_RUNTIME_MAPPINGS_RESET_ON_STARTUP: bool = False
+
 # Startup clear (optional): remove channels in fetchall categories at bot ready, before fetchsync runs
 FETCHALL_STARTUP_CLEAR_ENABLED: bool = False
 FETCHALL_STARTUP_CLEAR_CATEGORY_IDS: Set[int] = set()
@@ -38,6 +44,8 @@ FETCHSYNC_ONLY_RECENT_MESSAGE_DAYS: int = 0
 FETCHALL_ONLY_CHANNELS_WITH_RECENT_ACTIVITY_DAYS: int = 0
 
 # When True, only mirror channels whose names start with a status/calendar emoji (🟢🟡🔴🟠📅🗓️).
+# Per-mapping exception list (fetchall_mappings*.json field status_emoji_prefix_exempt_channel_ids) still mirrors
+# those source channel ids even when their names use other leading emoji (e.g. 🏬 lanes).
 # Mirrors for excluded sources may be pruned on the next fetchall (prune sees them as "not in selected set").
 FETCHMIRROR_REQUIRE_STATUS_EMOJI_PREFIX: bool = False
 
@@ -110,6 +118,7 @@ def init(settings: Dict[str, Any]) -> None:
     global FETCHSYNC_MIN_CONTENT_CHARS, FETCHSYNC_AUTO_POLL_SECONDS
     global SEND_MIN_INTERVAL_SECONDS, USE_WEBHOOKS_FOR_FORWARDING
     global FORWARD_ATTACHMENTS_AS_FILES, FORWARD_ATTACHMENTS_MAX_FILES, FORWARD_ATTACHMENTS_MAX_BYTES
+    global FETCHALL_RUNTIME_MAPPINGS_RESET_ON_STARTUP
     global FETCHALL_STARTUP_CLEAR_ENABLED, FETCHALL_STARTUP_CLEAR_CATEGORY_IDS
     global FETCHALL_STARTUP_CLEAR_ONLY_MIRROR_CHANNELS, FETCHALL_STARTUP_CLEAR_ALL_CHANNELS, FETCHALL_STARTUP_CLEAR_DELAY_SECONDS
     global FETCHSYNC_ONLY_RECENT_MESSAGE_DAYS, FETCHALL_ONLY_CHANNELS_WITH_RECENT_ACTIVITY_DAYS
@@ -141,6 +150,7 @@ def init(settings: Dict[str, Any]) -> None:
     if FORWARD_ATTACHMENTS_MAX_BYTES < 0:
         FORWARD_ATTACHMENTS_MAX_BYTES = 0
     FETCHSYNC_AUTO_POLL_SECONDS = _get_int(settings, "fetchsync_auto_poll_seconds", 0)
+    FETCHALL_RUNTIME_MAPPINGS_RESET_ON_STARTUP = bool(settings.get("fetchall_runtime_mappings_reset_on_startup", False))
     FETCHALL_STARTUP_CLEAR_ENABLED = bool(settings.get("fetchall_startup_clear_enabled", False))
     FETCHALL_STARTUP_CLEAR_CATEGORY_IDS = _parse_int_set(settings.get("fetchall_startup_clear_category_ids"))
     FETCHALL_STARTUP_CLEAR_ONLY_MIRROR_CHANNELS = bool(settings.get("fetchall_startup_clear_only_mirror_channels", True))

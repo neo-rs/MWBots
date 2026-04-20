@@ -55,6 +55,7 @@ try:
     _FETCHALL_AVAILABLE = bool(run_fetchall and run_fetchsync and iter_fetchall_entries)
 except Exception as _e:
     _FETCHALL_AVAILABLE = False
+    _fetchall_mod = None  # type: ignore
     run_fetchall = run_fetchsync = iter_fetchall_entries = run_startup_clear = run_fetchclear = None  # type: ignore
     run_fetch_auto_sequence_for_entry = None  # type: ignore
     run_fetch_auto_sequence_all_entries = None  # type: ignore
@@ -1794,6 +1795,17 @@ class DiscumCommandBot(commands.Bot):
             _fetchall_cfg.init(_fetchall_cfg.load_fetchall_settings())
         except Exception as e:
             print(f"[WARN] [FETCHALL] Config reload failed: {e}", flush=True)
+        if _FETCHALL_AVAILABLE and _fetchall_mod is not None:
+            try:
+                _rt_reset = getattr(_fetchall_mod, "maybe_reset_fetchall_runtime_mappings_at_startup", None)
+                if callable(_rt_reset) and _rt_reset():
+                    print(
+                        "[FETCHALL] fetchall_mappings.runtime.json cleared (fetchall_runtime_mappings_reset_on_startup=true); "
+                        "merged mappings are base-only until runtime is written again.",
+                        flush=True,
+                    )
+            except Exception as _rt_e:
+                print(f"[WARN] [FETCHALL] Runtime mappings reset-on-startup failed: {_rt_e}", flush=True)
         startup_clear_enabled = bool(getattr(_fetchall_cfg, "FETCHALL_STARTUP_CLEAR_ENABLED", False))
         cat_ids = list(getattr(_fetchall_cfg, "FETCHALL_STARTUP_CLEAR_CATEGORY_IDS", set()) or set())
         if not cat_ids and _FETCHALL_AVAILABLE:
