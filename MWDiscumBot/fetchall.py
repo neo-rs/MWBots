@@ -19,7 +19,7 @@ from fetchall_utils import append_image_attachments_as_embeds, chunk_text, forma
 _BOT_DIR = Path(__file__).resolve().parent
 _CONFIG_DIR = _BOT_DIR / "config"
 _FETCHALL_PATH = _CONFIG_DIR / "fetchall_mappings.json"
-# Runtime overrides saved by /fetchmap browse (NOT tracked by git; survives !mwupdate python-only updates).
+# Runtime overlay (merged over fetchall_mappings.json). Tracked in MWBots for deploy; still writable at runtime.
 _FETCHALL_RUNTIME_PATH = _CONFIG_DIR / "fetchall_mappings.runtime.json"
 
 _FILE_LOCK = threading.RLock()

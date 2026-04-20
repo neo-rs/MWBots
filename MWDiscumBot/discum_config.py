@@ -13,8 +13,9 @@ on Oracle and locally; config and channel_map.json stay in MWDiscumBot/config/.
 IMPORTANT — no overlap with fetchall:
 - channel_map.json = D2D forwarder only (source channel ID → webhook URL). Used ONLY by
   discumbot.py for live message forwarding. Never used by fetchall.
-- Fetchall uses its own files: fetchall_mappings.json, fetchall_mappings.runtime.json,
-  and fetchall_destination_webhooks.json (see fetchall_webhook_sender.py).
+- Fetchall uses its own files: fetchall_mappings.json, fetchall_mappings.runtime.json
+  (tracked in MWBots when you want Oracle to match your overlay), and fetchall_destination_webhooks.json
+  (see fetchall_webhook_sender.py). settings.runtime.json is optional overlay for settings.json.
 """
 
 from __future__ import annotations
