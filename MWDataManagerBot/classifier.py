@@ -1298,7 +1298,7 @@ def detect_all_link_types(
             )
             force_amz_deals = bool(
                 source_group == "online"
-                and cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID
+                and cfg.SMARTFILTER_CONVERSATIONAL_DEALS_CHANNEL_ID
                 and is_amz_deals_affiliate_bridge_blob(text_blob)
             )
             if trace is not None:
@@ -1328,7 +1328,7 @@ def detect_all_link_types(
                 # Canonical tag string (matches global_triggers.py and manual picker)
                 results.append((cfg.SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID, "AMAZON_PROFITABLE_LEAD"))
             elif force_amz_deals:
-                results.append((cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID, "AMZ_DEALS"))
+                results.append((cfg.SMARTFILTER_CONVERSATIONAL_DEALS_CHANNEL_ID, "CONVERSATIONAL_DEALS"))
             elif cfg.SMARTFILTER_AMAZON_CHANNEL_ID:
                 results.append((cfg.SMARTFILTER_AMAZON_CHANNEL_ID, "AMAZON"))
             elif cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID:
@@ -1497,7 +1497,11 @@ def detect_all_link_types(
 
     # If Amazon detected, suppress other store destinations (keep PRICE_ERROR as it can co-exist)
     if any(tag in ("AMAZON", "AMAZON_PROFITABLE_LEAD", "AMAZON_FALLBACK", "CONVERSATIONAL_DEALS") for _, tag in results):
-        results = [(cid, tag) for cid, tag in results if tag in ("AMAZON", "AMAZON_PROFITABLE_LEAD", "AMAZON_FALLBACK", "AMZ_DEALS", "PRICE_ERROR")]
+        results = [
+            (cid, tag)
+            for cid, tag in results
+            if tag in ("AMAZON", "AMAZON_PROFITABLE_LEAD", "AMAZON_FALLBACK", "CONVERSATIONAL_DEALS", "PRICE_ERROR")
+        ]
 
     # DEFAULT fallback if nothing
     if not results:
