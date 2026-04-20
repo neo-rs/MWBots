@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
-from fetchall_logging import log_info, log_warn
+from fetchall_logging import fmt_discord_channel, log_info, log_warn
 import fetchall_config as cfg
 
 _ROOT = Path(__file__).resolve().parent
@@ -127,7 +127,7 @@ async def _get_or_create_webhook_url(*, dest_channel, reason: str, force: bool =
         url2 = str(getattr(wh, "url", "") or "").strip()
     except Exception as e:
         try:
-            log_warn(f"[WEBHOOK] create_webhook failed channel_id={cid} ({type(e).__name__}: {e})")
+            log_warn(f"[WEBHOOK] create_webhook failed channel={fmt_discord_channel(cid)} ({type(e).__name__}: {e})")
         except Exception:
             pass
         return ""
@@ -142,7 +142,7 @@ async def _get_or_create_webhook_url(*, dest_channel, reason: str, force: bool =
     except Exception:
         pass
     try:
-        log_info(f"[WEBHOOK] created for channel_id={cid}")
+        log_info(f"[WEBHOOK] created for channel={fmt_discord_channel(cid)}")
     except Exception:
         pass
     return url2

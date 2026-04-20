@@ -1793,6 +1793,12 @@ class DiscumCommandBot(commands.Bot):
         # Always reload fetchall config from settings.json so startup clear and auto-poller see current config (even when fetchall failed to import)
         try:
             _fetchall_cfg.init(_fetchall_cfg.load_fetchall_settings())
+            try:
+                from fetchall_logging import log_fetchall_settings_snapshot
+
+                log_fetchall_settings_snapshot()
+            except Exception as _snap_e:
+                print(f"[WARN] [FETCHALL] settings snapshot failed: {_snap_e}", flush=True)
         except Exception as e:
             print(f"[WARN] [FETCHALL] Config reload failed: {e}", flush=True)
         if _FETCHALL_AVAILABLE and _fetchall_mod is not None:
@@ -1819,7 +1825,21 @@ class DiscumCommandBot(commands.Bot):
                 pass
         dest_gids = list(getattr(_fetchall_cfg, "DESTINATION_GUILD_IDS", set()) or set())
         token_status = "set" if effective_user_token else "NOT_SET"
-        print(f"[FETCHALL] on_ready: DISCUM_USER_DISCUMBOT={token_status} startup_clear_enabled={startup_clear_enabled} category_ids={cat_ids[:5]}{'...' if len(cat_ids) > 5 else ''} destination_guild_ids={dest_gids}", flush=True)
+        try:
+            from fetchall_logging import fmt_discord_channel_list
+
+            cat_disp = fmt_discord_channel_list(cat_ids)
+        except Exception:
+            cat_disp = str(cat_ids)
+        try:
+            dg_sorted = sorted(int(x) for x in dest_gids if int(x or 0) > 0)
+        except Exception:
+            dg_sorted = dest_gids
+        print(
+            f"[FETCHALL] on_ready: DISCUM_USER_DISCUMBOT={token_status} startup_clear_enabled={startup_clear_enabled} "
+            f"startup_clear_categories={cat_disp} destination_guild_ids={dg_sorted}",
+            flush=True,
+        )
         # Fetchall startup clear (same as DataManagerBot before transfer)
         # Resolve run_startup_clear at runtime if missing at import (server may have _FETCHALL_AVAILABLE False due to import path)
         _run_startup_clear = run_startup_clear

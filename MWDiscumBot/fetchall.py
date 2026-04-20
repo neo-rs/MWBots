@@ -12,7 +12,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
-from fetchall_logging import log_fetchall, log_info, log_warn
+from fetchall_logging import fmt_discord_channel, fmt_discord_channel_list, log_fetchall, log_info, log_warn
 import fetchall_config as cfg
 from fetchall_utils import append_image_attachments_as_embeds, chunk_text, format_embeds_for_forwarding, is_image_attachment
 
@@ -547,7 +547,10 @@ async def _prune_separators_with_no_mirrors(destination_guild, *, source_guild_i
             deleted += 1
             await asyncio.sleep(0.35)
         except Exception as e:
-            log_warn(f"[FETCHALL] prune separator failed channel_id={getattr(ch, 'id', None)}: {type(e).__name__}: {e}")
+            log_warn(
+                f"prune separator failed channel={fmt_discord_channel(getattr(ch, 'id', 0) or 0)}: "
+                f"{type(e).__name__}: {e}"
+            )
     return deleted
 
 
@@ -790,7 +793,7 @@ async def _clear_fetchall_destination_channels(
     cat_ids = _resolve_fetchall_clear_base_category_ids()
     if not cat_ids:
         log_warn(
-            f"[FETCHALL] {log_tag} skipped: no category IDs (set fetchall_startup_clear_category_ids in settings.json "
+            f"{log_tag} skipped: no category IDs (set fetchall_startup_clear_category_ids in settings.json "
             "or add destination_category_id in fetchall_mappings.json)"
         )
         return {"deleted": 0, "skipped": 0, "errors": 0, "guilds_found": 0, "category_ids_used": sorted(cat_ids)}
@@ -812,16 +815,16 @@ async def _clear_fetchall_destination_channels(
             except Exception:
                 pass
             if not dest_guild_ids:
-                log_warn(f"[FETCHALL] {log_tag} skipped: no destination_guild_ids in settings.json")
+                log_warn(f"{log_tag} skipped: no destination_guild_ids in settings.json")
             else:
                 log_warn(
-                    f"[FETCHALL] {log_tag} begin categories={sorted(cat_ids)} only_mirror={only_mirror} clear_all={clear_all}"
+                    f"{log_tag} begin categories={fmt_discord_channel_list(sorted(cat_ids))} only_mirror={only_mirror} clear_all={clear_all}"
                 )
                 for gid in dest_guild_ids:
                     guild = bot.get_guild(int(gid))
                     if guild is None:
                         log_warn(
-                            f"[FETCHALL] {log_tag}: bot.get_guild({gid}) returned None "
+                            f"{log_tag}: bot.get_guild({gid}) returned None "
                             "(bot may not be in this server or guild cache not ready)"
                         )
                         continue
@@ -860,31 +863,31 @@ async def _clear_fetchall_destination_channels(
                                         ch_id = getattr(ch, "id", None) or "?"
                                         ch_name = getattr(ch, "name", None) or "?"
                                         log_warn(
-                                            f"[FETCHALL] {log_tag}: ignoring channel id={ch_id} name={ch_name} (not a mirror channel)"
+                                            f"{log_tag}: ignoring channel {fmt_discord_channel(ch_id)} name={ch_name} (not a mirror channel)"
                                         )
                                         continue
                             try:
                                 ch_id = getattr(ch, "id", None) or "?"
                                 ch_name = getattr(ch, "name", None) or "?"
-                                log_warn(f"[FETCHALL] {log_tag}: deleting channel id={ch_id} name={ch_name}")
+                                log_warn(f"{log_tag}: deleting channel {fmt_discord_channel(ch_id)} name={ch_name}")
                                 await ch.delete(reason=delete_reason)
                                 deleted += 1
-                                log_warn(f"[FETCHALL] {log_tag}: deleted channel id={ch_id}")
+                                log_warn(f"{log_tag}: deleted channel {fmt_discord_channel(ch_id)}")
                                 await asyncio.sleep(0.35)
                             except discord.Forbidden:
                                 errors += 1
-                                log_warn(f"[FETCHALL] {log_tag} forbidden channel_id={getattr(ch, 'id', '?')}")
+                                log_warn(f"{log_tag} forbidden channel={fmt_discord_channel(getattr(ch, 'id', 0) or 0)}")
                             except discord.HTTPException as e:
                                 errors += 1
                                 log_warn(
-                                    f"[FETCHALL] {log_tag} http_failed channel_id={getattr(ch, 'id', '?')} "
+                                    f"{log_tag} http_failed channel={fmt_discord_channel(getattr(ch, 'id', 0) or 0)} "
                                     f"status={getattr(e, 'status', None)}"
                                 )
                                 await asyncio.sleep(1.0)
                             except Exception as e:
                                 errors += 1
                                 log_warn(
-                                    f"[FETCHALL] {log_tag} failed channel_id={getattr(ch, 'id', '?')} ({type(e).__name__}: {e})"
+                                    f"{log_tag} failed channel={fmt_discord_channel(getattr(ch, 'id', 0) or 0)} ({type(e).__name__}: {e})"
                                 )
         finally:
             try:
@@ -894,10 +897,10 @@ async def _clear_fetchall_destination_channels(
 
     if guilds_found == 0 and dest_guild_ids:
         log_warn(
-            f"[FETCHALL] {log_tag}: no destination guild found (bot.get_guild returned None for all destination_guild_ids "
+            f"{log_tag}: no destination guild found (bot.get_guild returned None for all destination_guild_ids "
             "— ensure the command bot is in the Mirror World server)"
         )
-    log_warn(f"[FETCHALL] {log_tag} done deleted={deleted} skipped={skipped} errors={errors}")
+    log_warn(f"{log_tag} done deleted={deleted} skipped={skipped} errors={errors}")
     return {
         "deleted": deleted,
         "skipped": skipped,
@@ -1406,7 +1409,8 @@ def _apply_status_emoji_channel_filter(
             skipped += 1
             try:
                 log_info(
-                    f"{context} guild={source_guild_id} skip channel_id={cid} name={cname!r} (require status/calendar emoji prefix)",
+                    f"{context} guild={source_guild_id} skip channel={fmt_discord_channel(cid)} name={cname!r} "
+                    f"(require status/calendar emoji prefix)",
                     event="channel_filter",
                 )
             except Exception:
@@ -1972,14 +1976,17 @@ async def run_fetchall(
     except Exception:
         ignored_ids = set()
     if ignored_ids:
-        log_fetchall(f"source={source_guild_id} ignored_channel_ids={len(ignored_ids)} channels (excluded from fetch): {sorted(ignored_ids)[:15]}{'...' if len(ignored_ids) > 15 else ''}")
+        log_fetchall(
+            f"source={source_guild_id} ignored_channel_ids={len(ignored_ids)} channels (excluded from fetch): "
+            f"{fmt_discord_channel_list(sorted(ignored_ids), limit=15)}"
+        )
 
     status_emoji_exempt = _status_emoji_prefix_exempt_ids_from_entry(entry)
     if status_emoji_exempt:
         log_fetchall(
             f"source={source_guild_id} status_emoji_prefix_exempt_channel_ids={len(status_emoji_exempt)} "
-            f"(these ids bypass fetchmirror_require_status_emoji_prefix when ON): "
-            f"{sorted(status_emoji_exempt)[:15]}{'...' if len(status_emoji_exempt) > 15 else ''}"
+            f"(these bypass fetchmirror_require_status_emoji_prefix when ON): "
+            f"{fmt_discord_channel_list(sorted(status_emoji_exempt), limit=15)}"
         )
 
     if bool(getattr(cfg, "FETCHMIRROR_REQUIRE_STATUS_EMOJI_PREFIX", False)):
@@ -2284,7 +2291,10 @@ async def run_fetchall(
                     pruned += 1
                     await asyncio.sleep(0.35)
                 except Exception as e:
-                    log_warn(f"[FETCHALL] prune failed channel_id={getattr(mirror_ch,'id',None)}: {type(e).__name__}: {e}")
+                    log_warn(
+                        f"prune failed mirror_channel={fmt_discord_channel(getattr(mirror_ch, 'id', 0) or 0)}: "
+                        f"{type(e).__name__}: {e}"
+                    )
                     errors += 1
                 continue
             await asyncio.sleep(0.15)
@@ -2298,12 +2308,13 @@ async def run_fetchall(
         try:
             separators_pruned = await _prune_separators_with_no_mirrors(destination_guild, source_guild_id=source_guild_id)
         except Exception as e:
-            log_warn(f"[FETCHALL] prune separators failed: {type(e).__name__}: {e}")
+            log_warn(f"prune separators failed: {type(e).__name__}: {e}")
         if separators_pruned > 0:
             log_fetchall(f"source={source_guild_id} separators_pruned={separators_pruned} (no mirrors left)")
 
     log_fetchall(
-        f"source={source_guild_id} dest_category={dest_category_id} mode={mode} attempted={attempted} created={created} existing={kept} pruned={pruned} separators_pruned={separators_pruned}"
+        f"source={source_guild_id} dest_category={fmt_discord_channel(dest_category_id)} mode={mode} "
+        f"attempted={attempted} created={created} existing={kept} pruned={pruned} separators_pruned={separators_pruned}"
     )
     if progress_cb is not None:
         try:
@@ -2461,12 +2472,16 @@ async def run_fetchsync(
     except Exception:
         ignored_ids = set()
     if ignored_ids:
-        log_fetchall(f"fetchsync source={source_guild_id} ignored_channel_ids={len(ignored_ids)} channels (excluded)")
+        log_fetchall(
+            f"fetchsync source={source_guild_id} ignored_channel_ids={len(ignored_ids)} channels (excluded): "
+            f"{fmt_discord_channel_list(sorted(ignored_ids), limit=15)}"
+        )
 
     status_emoji_exempt = _status_emoji_prefix_exempt_ids_from_entry(entry)
     if status_emoji_exempt:
         log_fetchall(
-            f"fetchsync source={source_guild_id} status_emoji_prefix_exempt_channel_ids={len(status_emoji_exempt)}"
+            f"fetchsync source={source_guild_id} status_emoji_prefix_exempt_channel_ids={len(status_emoji_exempt)}: "
+            f"{fmt_discord_channel_list(sorted(status_emoji_exempt), limit=15)}"
         )
 
     # Always enumerate channels via user token (source access is assumed to be via user token).
@@ -2776,7 +2791,7 @@ async def run_fetchsync(
                     if send_min_interval > 0:
                         await asyncio.sleep(send_min_interval)
                 except Exception as e:
-                    log_warn(f"[FETCHSYNC] send_failed source_channel_id={src_channel_id} ({type(e).__name__}: {e})")
+                    log_warn(f"FETCHSYNC send_failed source_channel={fmt_discord_channel(src_channel_id)} ({type(e).__name__}: {e})")
                     err_inc += 1
                     break
                 i = j
@@ -2859,7 +2874,7 @@ async def run_fetchsync(
                 if send_min_interval > 0:
                     await asyncio.sleep(send_min_interval)
             except Exception as e:
-                log_warn(f"[FETCHSYNC] send_failed source_channel_id={src_channel_id} ({type(e).__name__}: {e})")
+                log_warn(f"FETCHSYNC send_failed source_channel={fmt_discord_channel(src_channel_id)} ({type(e).__name__}: {e})")
                 err_inc += 1
                 break
             i += 1
@@ -2875,7 +2890,8 @@ async def run_fetchsync(
         dest_channel = mirror_by_source.get(sid)
         if dest_channel is None and not dryrun:
             log_info(
-                f"FETCHSYNC skip channel_id={sid} ({src_name!r}) — no mirror TextChannel in destination (create failed or dryrun)",
+                f"FETCHSYNC skip channel={fmt_discord_channel(sid)} ({src_name!r}) — no mirror TextChannel in destination "
+                f"(create failed or dryrun)",
                 event="fetchsync_skip",
             )
             continue
@@ -2895,7 +2911,7 @@ async def run_fetchsync(
         sent_before_ch = int(sent)
 
         log_info(
-            f"FETCHSYNC channel_id={sid} ({src_name!r}) mode={'backfill' if not cursor else 'incremental'} "
+            f"FETCHSYNC channel={fmt_discord_channel(sid)} ({src_name!r}) mode={'backfill' if not cursor else 'incremental'} "
             f"stored_cursor={'none' if not cursor else str(cursor)[:24] + '...'}",
             event="fetchsync_channel",
         )
