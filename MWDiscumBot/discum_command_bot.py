@@ -1,11 +1,10 @@
-"""Discum Command Bot - Slash Command Handler for MWDiscumBot
+"""Discum Command Bot — slash + prefix commands for MWDiscumBot
 
-This bot handles slash commands for the MWDiscumBot, specifically the /discum browse command.
-It runs separately from the main discum client (which uses a user account token) and uses
-a regular bot token (discord.py) to handle slash commands.
+Slash: `/discum` (channel map UI). Prefix (`!`): fetchall family (`!fetchall`, `!fetchsync`,
+`!fetchcycle`, `!fetchclear`) plus optional quick-map messages (`!g...`).
 
-Commands:
-- /discum browse: View current mappings, or browse source guilds/channels and map to webhooks.
+Runs in the same process as `discumbot.py` (background thread) or standalone; uses a bot token
+for Discord.py and the user token from config only for fetchall source reads / browse previews.
 """
 
 import asyncio
@@ -50,12 +49,13 @@ try:
     run_fetchsync = getattr(_fetchall_mod, "run_fetchsync", None)
     iter_fetchall_entries = getattr(_fetchall_mod, "iter_fetchall_entries", None)
     run_startup_clear = getattr(_fetchall_mod, "run_startup_clear", None)
+    run_fetchclear = getattr(_fetchall_mod, "run_fetchclear", None)
     run_fetch_auto_sequence_for_entry = getattr(_fetchall_mod, "run_fetch_auto_sequence_for_entry", None)
     run_fetch_auto_sequence_all_entries = getattr(_fetchall_mod, "run_fetch_auto_sequence_all_entries", None)
     _FETCHALL_AVAILABLE = bool(run_fetchall and run_fetchsync and iter_fetchall_entries)
 except Exception as _e:
     _FETCHALL_AVAILABLE = False
-    run_fetchall = run_fetchsync = iter_fetchall_entries = run_startup_clear = None  # type: ignore
+    run_fetchall = run_fetchsync = iter_fetchall_entries = run_startup_clear = run_fetchclear = None  # type: ignore
     run_fetch_auto_sequence_for_entry = None  # type: ignore
     run_fetch_auto_sequence_all_entries = None  # type: ignore
 
@@ -159,7 +159,7 @@ def cfg_get(key: str, default: str = "") -> str:
     return default
 
 # BOT_TOKEN: used ONLY for registering/running the command bot — nothing more, nothing less.
-# - bot.start(BOT_TOKEN): so the bot can receive /discum and !fetchall/!fetchsync.
+# - bot.start(BOT_TOKEN): so the bot can receive /discum and !fetchall/!fetchsync/!fetchcycle/!fetchclear.
 # - _list_guild_commands_via_api(BOT_TOKEN): list slash commands (--list-commands).
 # Set in config/tokens.env as BOT_TOKEN (or DISCORD_BOT_TOKEN / DISCORD_BOT_DISCUMBOT).
 BOT_TOKEN = str(
@@ -1698,7 +1698,7 @@ async def _discum_browse_for_guild(interaction: discord.Interaction, *, source_g
 
 
 class DiscumCommandBot(commands.Bot):
-    """Command bot for handling /discum browse command."""
+    """discord.py bot: `/discum` plus prefix fetchall commands (`!fetchall`, `!fetchsync`, `!fetchcycle`, `!fetchclear`)."""
     
     def __init__(self):
         intents = discord.Intents.default()
@@ -1734,13 +1734,14 @@ class DiscumCommandBot(commands.Bot):
         try:
             if isinstance(error, commands.MissingPermissions):
                 await ctx.send(
-                    "[FETCHALL] You need **Manage Channels** permission to run !fetchall / !fetchsync / !fetchcycle."
+                    "[FETCHALL] You need **Manage Channels** permission to run "
+                    "!fetchall / !fetchsync / !fetchcycle / !fetchclear."
                 )
                 return
             if isinstance(error, commands.CommandNotFound):
                 return  # ignore wrong prefix / unknown command
             name = getattr(ctx.command, "name", None) if ctx.command else None
-            if name in ("fetchall", "fetchsync", "fetchcycle"):
+            if name in ("fetchall", "fetchsync", "fetchcycle", "fetchclear"):
                 msg = str(getattr(error, "original", error) or error)
                 await ctx.send(f"[FETCHALL] Command failed: {msg[:400]}")
         except Exception:
@@ -1772,7 +1773,7 @@ class DiscumCommandBot(commands.Bot):
 
     async def on_ready(self) -> None:
         global run_fetchsync, run_fetchall, iter_fetchall_entries, _FETCHALL_AVAILABLE
-        global run_fetch_auto_sequence_for_entry, run_fetch_auto_sequence_all_entries
+        global run_fetch_auto_sequence_for_entry, run_fetch_auto_sequence_all_entries, run_fetchclear
         print(f"[INFO] Logged in as {self.user}")
         app_id = self.user.id if self.user else None
         if app_id and MIRRORWORLD_SERVER_ID:
@@ -1826,6 +1827,7 @@ class DiscumCommandBot(commands.Bot):
                         sys.modules["fetchall_ondemand"] = _fm
                         _spec.loader.exec_module(_fm)
                         _run_startup_clear = getattr(_fm, "run_startup_clear", None)
+                        _run_fetchclear_fn = getattr(_fm, "run_fetchclear", None)
                         _run_fetchsync = getattr(_fm, "run_fetchsync", None)
                         _run_fetchall = getattr(_fm, "run_fetchall", None)
                         _iter_entries = getattr(_fm, "iter_fetchall_entries", None)
@@ -1833,6 +1835,9 @@ class DiscumCommandBot(commands.Bot):
                         _run_seq_all = getattr(_fm, "run_fetch_auto_sequence_all_entries", None)
                         if _run_startup_clear is not None:
                             print("[FETCHALL] run_startup_clear loaded from fetchall.py at runtime", flush=True)
+                        if _run_fetchclear_fn is not None:
+                            run_fetchclear = _run_fetchclear_fn
+                            print("[FETCHALL] run_fetchclear loaded from fetchall.py at runtime", flush=True)
                         if _run_fetchsync and _run_fetchall and _iter_entries:
                             run_fetchsync = _run_fetchsync
                             run_fetchall = _run_fetchall
@@ -2097,6 +2102,44 @@ async def _cmd_fetchcycle(ctx: commands.Context, source_guild_id: int = 0) -> No
         )
     except Exception as e:
         await msg.edit(content=f"Fetchcycle error: {e}")
+        raise
+
+
+@bot.command(name="fetchclear")
+@commands.has_permissions(manage_channels=True)
+async def _cmd_fetchclear(ctx: commands.Context) -> None:
+    """Delete channels under fetchall destination categories (same rules as optional startup clear)."""
+    if not run_fetchclear:
+        await ctx.send(
+            "[FETCHALL] fetchclear not loaded. Restart the bot or ensure `fetchall.py` is in the MWDiscumBot folder."
+        )
+        return
+    try:
+        _fetchall_cfg.init(_fetchall_cfg.load_fetchall_settings())
+    except Exception:
+        pass
+    msg = await ctx.send("[FETCHALL] Fetchclear running (channel deletes per `config/settings.json`)…")
+    try:
+        result = await run_fetchclear(ctx.bot)
+        if not result.get("ok"):
+            reason = str(result.get("reason") or "failed")
+            await msg.edit(
+                content=(
+                    f"[FETCHALL] Fetchclear: **{reason}** — set `fetchall_startup_clear_category_ids` "
+                    "and/or `destination_category_id` in `fetchall_mappings.json`."
+                )
+            )
+            return
+        await msg.edit(
+            content=(
+                f"[FETCHALL] Fetchclear done: deleted={result.get('deleted')} skipped={result.get('skipped')} "
+                f"errors={result.get('errors')} guilds_hit={result.get('guilds_found')} "
+                f"overflow_cats_removed={result.get('overflow_categories_deleted')} "
+                f"overflow_cat_errors={result.get('overflow_category_errors')}."
+            )
+        )
+    except Exception as e:
+        await msg.edit(content=f"[FETCHALL] Fetchclear error: {e}")
         raise
 
 

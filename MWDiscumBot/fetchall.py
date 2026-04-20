@@ -662,6 +662,159 @@ def get_fetchall_clear_category_ids(destination_guild, *, base_category_ids: Set
     return out if out else base_category_ids
 
 
+def _resolve_fetchall_clear_base_category_ids() -> Set[int]:
+    """Category IDs to clear: explicit settings plus each mapping's destination_category_id."""
+    cat_ids: Set[int] = set(getattr(cfg, "FETCHALL_STARTUP_CLEAR_CATEGORY_IDS", set()) or set())
+    if not cat_ids:
+        for e in iter_fetchall_entries():
+            if not isinstance(e, dict):
+                continue
+            try:
+                cid = int(e.get("destination_category_id", 0) or 0)
+            except Exception:
+                cid = 0
+            if cid > 0:
+                cat_ids.add(cid)
+    return {int(x) for x in cat_ids if int(x) > 0}
+
+
+async def _clear_fetchall_destination_channels(
+    bot,
+    *,
+    delete_reason: str,
+    log_tag: str,
+) -> Dict[str, Any]:
+    """
+    Delete channels under fetchall destination categories (and named overflow categories under those bases).
+    Uses FETCHALL_STARTUP_CLEAR_ONLY_MIRROR_CHANNELS / FETCHALL_STARTUP_CLEAR_ALL_CHANNELS from settings.
+    Sets FETCHALL_MAINTENANCE_EVENT for the duration (fetchsync cooperates).
+    Returns deleted, skipped, errors, guilds_found, and category_ids_used (base IDs, sorted ints).
+    """
+    try:
+        import discord
+    except Exception:
+        return {"deleted": 0, "skipped": 0, "errors": 0, "guilds_found": 0, "category_ids_used": []}
+
+    cat_ids = _resolve_fetchall_clear_base_category_ids()
+    if not cat_ids:
+        log_warn(
+            f"[FETCHALL] {log_tag} skipped: no category IDs (set fetchall_startup_clear_category_ids in settings.json "
+            "or add destination_category_id in fetchall_mappings.json)"
+        )
+        return {"deleted": 0, "skipped": 0, "errors": 0, "guilds_found": 0, "category_ids_used": sorted(cat_ids)}
+
+    only_mirror = bool(getattr(cfg, "FETCHALL_STARTUP_CLEAR_ONLY_MIRROR_CHANNELS", True))
+    clear_all = bool(getattr(cfg, "FETCHALL_STARTUP_CLEAR_ALL_CHANNELS", False))
+
+    deleted, skipped, errors = 0, 0, 0
+    guilds_found = 0
+    try:
+        dest_guild_ids = sorted(int(x) for x in (getattr(cfg, "DESTINATION_GUILD_IDS", set()) or set()) if int(x) > 0)
+    except Exception:
+        dest_guild_ids = []
+
+    async with FETCHALL_MAINTENANCE_LOCK:
+        try:
+            try:
+                FETCHALL_MAINTENANCE_EVENT.set()
+            except Exception:
+                pass
+            if not dest_guild_ids:
+                log_warn(f"[FETCHALL] {log_tag} skipped: no destination_guild_ids in settings.json")
+            else:
+                log_warn(
+                    f"[FETCHALL] {log_tag} begin categories={sorted(cat_ids)} only_mirror={only_mirror} clear_all={clear_all}"
+                )
+                for gid in dest_guild_ids:
+                    guild = bot.get_guild(int(gid))
+                    if guild is None:
+                        log_warn(
+                            f"[FETCHALL] {log_tag}: bot.get_guild({gid}) returned None "
+                            "(bot may not be in this server or guild cache not ready)"
+                        )
+                        continue
+                    guilds_found += 1
+                    clear_cat_ids = get_fetchall_clear_category_ids(guild, base_category_ids=cat_ids)
+                    try:
+                        all_channels = list(getattr(guild, "channels", []) or [])
+                    except Exception:
+                        all_channels = []
+                    for cat_id in sorted(clear_cat_ids):
+                        candidates = []
+                        for ch in all_channels:
+                            try:
+                                if int(getattr(ch, "category_id", 0) or 0) != int(cat_id):
+                                    continue
+                            except Exception:
+                                continue
+                            if not hasattr(ch, "delete"):
+                                continue
+                            candidates.append(ch)
+                        try:
+                            candidates.sort(
+                                key=lambda c: (int(getattr(c, "position", 0) or 0), int(getattr(c, "id", 0) or 0))
+                            )
+                        except Exception:
+                            pass
+                        for ch in candidates:
+                            if not clear_all:
+                                topic = str(getattr(ch, "topic", "") or "").strip()
+                                if only_mirror:
+                                    if not (
+                                        topic.startswith(MIRROR_TOPIC_PREFIX)
+                                        or topic.lower().startswith("separator for")
+                                    ):
+                                        skipped += 1
+                                        ch_id = getattr(ch, "id", None) or "?"
+                                        ch_name = getattr(ch, "name", None) or "?"
+                                        log_warn(
+                                            f"[FETCHALL] {log_tag}: ignoring channel id={ch_id} name={ch_name} (not a mirror channel)"
+                                        )
+                                        continue
+                            try:
+                                ch_id = getattr(ch, "id", None) or "?"
+                                ch_name = getattr(ch, "name", None) or "?"
+                                log_warn(f"[FETCHALL] {log_tag}: deleting channel id={ch_id} name={ch_name}")
+                                await ch.delete(reason=delete_reason)
+                                deleted += 1
+                                log_warn(f"[FETCHALL] {log_tag}: deleted channel id={ch_id}")
+                                await asyncio.sleep(0.35)
+                            except discord.Forbidden:
+                                errors += 1
+                                log_warn(f"[FETCHALL] {log_tag} forbidden channel_id={getattr(ch, 'id', '?')}")
+                            except discord.HTTPException as e:
+                                errors += 1
+                                log_warn(
+                                    f"[FETCHALL] {log_tag} http_failed channel_id={getattr(ch, 'id', '?')} "
+                                    f"status={getattr(e, 'status', None)}"
+                                )
+                                await asyncio.sleep(1.0)
+                            except Exception as e:
+                                errors += 1
+                                log_warn(
+                                    f"[FETCHALL] {log_tag} failed channel_id={getattr(ch, 'id', '?')} ({type(e).__name__}: {e})"
+                                )
+        finally:
+            try:
+                FETCHALL_MAINTENANCE_EVENT.clear()
+            except Exception:
+                pass
+
+    if guilds_found == 0 and dest_guild_ids:
+        log_warn(
+            f"[FETCHALL] {log_tag}: no destination guild found (bot.get_guild returned None for all destination_guild_ids "
+            "— ensure the command bot is in the Mirror World server)"
+        )
+    log_warn(f"[FETCHALL] {log_tag} done deleted={deleted} skipped={skipped} errors={errors}")
+    return {
+        "deleted": deleted,
+        "skipped": skipped,
+        "errors": errors,
+        "guilds_found": guilds_found,
+        "category_ids_used": sorted(cat_ids),
+    }
+
+
 async def run_startup_clear(bot) -> None:
     """
     Optional startup cleanup for fetchall destination categories. Runs before fetchsync so the
@@ -672,7 +825,7 @@ async def run_startup_clear(bot) -> None:
     """
     print("[FETCHALL] run_startup_clear: entered", flush=True)
     try:
-        import discord
+        import discord  # noqa: F401
     except Exception:
         return
     if not bool(getattr(cfg, "FETCHALL_STARTUP_CLEAR_ENABLED", False)):
@@ -687,101 +840,77 @@ async def run_startup_clear(bot) -> None:
     delay_s = int(getattr(cfg, "FETCHALL_STARTUP_CLEAR_DELAY_SECONDS", 0) or 0)
     if delay_s > 0:
         await asyncio.sleep(min(60, max(0, delay_s)))
-    cat_ids: Set[int] = set(getattr(cfg, "FETCHALL_STARTUP_CLEAR_CATEGORY_IDS", set()) or set())
-    if not cat_ids:
-        for e in iter_fetchall_entries():
-            if not isinstance(e, dict):
-                continue
-            try:
-                cid = int(e.get("destination_category_id", 0) or 0)
-            except Exception:
-                cid = 0
-            if cid > 0:
-                cat_ids.add(cid)
-    cat_ids = {int(x) for x in cat_ids if int(x) > 0}
-    if not cat_ids:
-        log_warn("[FETCHALL] startup clear skipped: no category IDs (set fetchall_startup_clear_category_ids in settings.json or add destination_category_id in fetchall_mappings.json)")
-        return
-    only_mirror = bool(getattr(cfg, "FETCHALL_STARTUP_CLEAR_ONLY_MIRROR_CHANNELS", True))
-    clear_all = bool(getattr(cfg, "FETCHALL_STARTUP_CLEAR_ALL_CHANNELS", False))
-    async with FETCHALL_MAINTENANCE_LOCK:
-        try:
-            FETCHALL_MAINTENANCE_EVENT.set()
-        except Exception:
-            pass
-        deleted, skipped, errors = 0, 0, 0
-        try:
-            dest_guild_ids = sorted(int(x) for x in (getattr(cfg, "DESTINATION_GUILD_IDS", set()) or set()) if int(x) > 0)
-        except Exception:
-            dest_guild_ids = []
-        if not dest_guild_ids:
-            log_warn("[FETCHALL] startup clear skipped: no destination_guild_ids in settings.json")
-            return
-        log_warn(f"[FETCHALL] startup clear begin categories={sorted(cat_ids)} only_mirror={only_mirror} clear_all={clear_all}")
-        guilds_found = 0
-        try:
-            for gid in dest_guild_ids:
-                guild = bot.get_guild(int(gid))
-                if guild is None:
-                    log_warn(f"[FETCHALL] startup clear: bot.get_guild({gid}) returned None (bot may not be in this server or guild cache not ready)")
-                    continue
-                guilds_found += 1
-                clear_cat_ids = get_fetchall_clear_category_ids(guild, base_category_ids=cat_ids)
-                try:
-                    all_channels = list(getattr(guild, "channels", []) or [])
-                except Exception:
-                    all_channels = []
-                for cat_id in sorted(clear_cat_ids):
-                    candidates = []
-                    for ch in all_channels:
-                        try:
-                            if int(getattr(ch, "category_id", 0) or 0) != int(cat_id):
-                                continue
-                        except Exception:
-                            continue
-                        if not hasattr(ch, "delete"):
-                            continue
-                        candidates.append(ch)
-                    try:
-                        candidates.sort(key=lambda c: (int(getattr(c, "position", 0) or 0), int(getattr(c, "id", 0) or 0)))
-                    except Exception:
-                        pass
-                    for ch in candidates:
-                        if not clear_all:
-                            topic = str(getattr(ch, "topic", "") or "").strip()
-                            if only_mirror:
-                                if not (topic.startswith(MIRROR_TOPIC_PREFIX) or topic.lower().startswith("separator for")):
-                                    skipped += 1
-                                    ch_id = getattr(ch, "id", None) or "?"
-                                    ch_name = getattr(ch, "name", None) or "?"
-                                    log_warn(f"[FETCHALL] startup clear: ignoring channel id={ch_id} name={ch_name} (not a mirror channel)")
-                                    continue
-                        try:
-                            ch_id = getattr(ch, "id", None) or "?"
-                            ch_name = getattr(ch, "name", None) or "?"
-                            log_warn(f"[FETCHALL] startup clear: deleting channel id={ch_id} name={ch_name}")
-                            await ch.delete(reason="MWDiscumBot startup clear fetchall mirrors")
-                            deleted += 1
-                            log_warn(f"[FETCHALL] startup clear: deleted channel id={ch_id}")
-                            await asyncio.sleep(0.35)
-                        except discord.Forbidden:
-                            errors += 1
-                            log_warn(f"[FETCHALL] startup clear forbidden channel_id={getattr(ch, 'id', '?')}")
-                        except discord.HTTPException as e:
-                            errors += 1
-                            log_warn(f"[FETCHALL] startup clear http_failed channel_id={getattr(ch, 'id', '?')} status={getattr(e, 'status', None)}")
-                            await asyncio.sleep(1.0)
-                        except Exception as e:
-                            errors += 1
-                            log_warn(f"[FETCHALL] startup clear failed channel_id={getattr(ch, 'id', '?')} ({type(e).__name__}: {e})")
-        finally:
-            try:
-                FETCHALL_MAINTENANCE_EVENT.clear()
-            except Exception:
-                pass
-        if guilds_found == 0:
-            log_warn("[FETCHALL] startup clear: no destination guild found (bot.get_guild returned None for all destination_guild_ids — ensure the command bot is in the Mirror World server)")
-        log_warn(f"[FETCHALL] startup clear done deleted={deleted} skipped={skipped} errors={errors}")
+    await _clear_fetchall_destination_channels(
+        bot,
+        delete_reason="MWDiscumBot startup clear fetchall mirrors",
+        log_tag="startup clear",
+    )
+
+
+async def run_fetchclear(bot) -> Dict[str, Any]:
+    """
+    Manual cleanup: same deletion rules as startup clear, but does not require fetchall_startup_clear_enabled.
+    Uses fetchall_startup_clear_category_ids (or mapping destination_category_id), plus
+    fetchall_startup_clear_only_mirror_channels / fetchall_startup_clear_all_channels.
+    Then deletes empty overflow categories (…-overflow-N) under those base categories.
+    """
+    print("[FETCHALL] run_fetchclear: entered", flush=True)
+    try:
+        import discord  # noqa: F401
+    except Exception as e:
+        return {"ok": False, "reason": f"discord_import_failed: {e}"}
+
+    cfg.init(cfg.load_fetchall_settings())
+
+    stats = await _clear_fetchall_destination_channels(
+        bot,
+        delete_reason="MWDiscumBot fetchclear",
+        log_tag="fetchclear",
+    )
+    base_ids = [int(x) for x in (stats.get("category_ids_used") or []) if int(x) > 0]
+    if not base_ids:
+        return {
+            "ok": False,
+            "reason": "no_category_ids",
+            "deleted": 0,
+            "skipped": 0,
+            "errors": 0,
+            "guilds_found": 0,
+            "overflow_categories_deleted": 0,
+            "overflow_category_errors": 0,
+            "category_ids_used": [],
+        }
+
+    ov_del, ov_err = 0, 0
+    try:
+        dest_guild_ids = sorted(int(x) for x in (getattr(cfg, "DESTINATION_GUILD_IDS", set()) or set()) if int(x) > 0)
+    except Exception:
+        dest_guild_ids = []
+
+    for gid in dest_guild_ids:
+        guild = bot.get_guild(int(gid))
+        if guild is None:
+            continue
+        overflow_cats: List[Any] = []
+        for bid in base_ids:
+            base = guild.get_channel(int(bid))
+            if base is not None:
+                overflow_cats.extend(_list_overflow_categories(destination_guild=guild, base_category=base))
+        if overflow_cats:
+            d, e = await delete_empty_overflow_categories(guild, overflow_cats)
+            ov_del += int(d or 0)
+            ov_err += int(e or 0)
+
+    return {
+        "ok": True,
+        "deleted": int(stats.get("deleted", 0) or 0),
+        "skipped": int(stats.get("skipped", 0) or 0),
+        "errors": int(stats.get("errors", 0) or 0),
+        "guilds_found": int(stats.get("guilds_found", 0) or 0),
+        "overflow_categories_deleted": ov_del,
+        "overflow_category_errors": ov_err,
+        "category_ids_used": base_ids,
+    }
 
 
 def _is_overflow_category_name(name: str) -> bool:
@@ -2519,7 +2648,7 @@ async def run_fetchsync(
             would_send += int(w_inc)
             errors += int(e_inc)
             cursor_saved = False
-            if new_cursor:
+            if new_cursor and not dryrun:
                 persist_channel_cursor(source_guild_id=source_guild_id, source_channel_id=sid, last_seen_message_id=str(new_cursor))
                 cursor_saved = True
             log_fetchall(
@@ -2568,7 +2697,7 @@ async def run_fetchsync(
                 break
 
         cursor_saved = False
-        if last_cursor_id:
+        if last_cursor_id and not dryrun:
             persist_channel_cursor(source_guild_id=source_guild_id, source_channel_id=sid, last_seen_message_id=last_cursor_id)
             cursor_saved = True
 
@@ -2703,4 +2832,197 @@ async def run_fetch_auto_sequence_all_entries(
         event="auto_sequence",
     )
     return {"ok": all_ok, "results": results, "total_sent": total_sent, "entry_count": len(results)}
+
+
+def build_source_fetch_audit_report(
+    *,
+    source_guild_id: int,
+    api_channels: List[Dict[str, Any]],
+    entry: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Local audit helper: same channel selection as fetchsync/fetchall REST path, without Discord.py guild objects.
+    Returns a structure suitable for terminal trees (categories → channels with include/exclude reasons).
+    """
+    source_category_ids = entry.get("source_category_ids") if isinstance(entry.get("source_category_ids"), list) else []
+    try:
+        _cats = [int(x) for x in (source_category_ids or []) if int(x) > 0]
+    except Exception:
+        _cats = []
+    ignored_ids: Set[int] = set()
+    try:
+        raw_ignored = entry.get("ignored_channel_ids") if isinstance(entry.get("ignored_channel_ids"), list) else []
+        ignored_ids = {int(x) for x in raw_ignored if int(x) > 0}
+    except Exception:
+        ignored_ids = set()
+
+    allow_cat: Set[int] = set(_cats)
+    cat_meta: Dict[int, Tuple[str, int]] = {}
+    for c in api_channels or []:
+        if not isinstance(c, dict):
+            continue
+        try:
+            raw_type = c.get("type", None)
+            t = int(raw_type) if raw_type is not None else -1
+        except Exception:
+            t = -1
+        if t != 4:
+            continue
+        try:
+            cid = int(c.get("id") or 0)
+        except Exception:
+            cid = 0
+        if cid <= 0 or (allow_cat and cid not in allow_cat):
+            continue
+        nm = str(c.get("name") or "").strip() or f"category_{cid}"
+        try:
+            pos = int(c.get("position") or 0)
+        except Exception:
+            pos = 0
+        cat_meta[cid] = (nm, pos)
+
+    selected_pairs = _select_source_text_channels_from_api(
+        api_channels,
+        source_category_ids=_cats,
+        ignored_channel_ids=ignored_ids,
+    )
+    selected_ids = {int(cid) for cid, _ in selected_pairs if int(cid or 0) > 0}
+    final_pairs = _apply_status_emoji_channel_filter(
+        list(selected_pairs), source_guild_id=int(source_guild_id), context="AUDIT"
+    )
+    final_ids = {int(cid) for cid, _ in final_pairs if int(cid or 0) > 0}
+
+    rows: List[Dict[str, Any]] = []
+    for c in api_channels or []:
+        if not isinstance(c, dict):
+            continue
+        try:
+            raw_type = c.get("type", None)
+            ch_type = int(raw_type) if raw_type is not None else -1
+        except Exception:
+            ch_type = -1
+        if ch_type not in (0, 5):
+            continue
+        try:
+            ch_id = int(c.get("id") or 0)
+        except Exception:
+            ch_id = 0
+        if ch_id <= 0:
+            continue
+        parent_id = 0
+        try:
+            pid = c.get("parent_id")
+            if pid is not None and str(pid).strip():
+                parent_id = int(pid)
+        except Exception:
+            parent_id = 0
+        if allow_cat and int(parent_id) not in allow_cat:
+            continue
+        name = str(c.get("name") or f"channel_{ch_id}")
+        try:
+            pos = int(c.get("position") or 0)
+        except Exception:
+            pos = 0
+
+        status = "included"
+        reason = ""
+        if ch_id in ignored_ids:
+            status = "excluded"
+            reason = "ignored_channel_ids"
+        elif ch_id not in selected_ids:
+            status = "excluded"
+            reason = "not_selected_by_rules_type_or_parent"
+        elif ch_id not in final_ids:
+            status = "excluded"
+            reason = "fetchmirror_require_status_emoji_prefix"
+        rows.append(
+            {
+                "id": ch_id,
+                "name": name,
+                "parent_id": int(parent_id),
+                "position": pos,
+                "status": status,
+                "reason": reason,
+            }
+        )
+
+    rows.sort(key=lambda r: (int(r.get("parent_id") or 0), int(r.get("position") or 0), int(r.get("id") or 0)))
+    cat_order = sorted(cat_meta.items(), key=lambda kv: (kv[1][1], kv[0]))
+    return {
+        "source_guild_id": int(source_guild_id),
+        "source_category_ids": list(_cats),
+        "ignored_channel_ids": sorted(ignored_ids),
+        "require_status_emoji_prefix": bool(getattr(cfg, "FETCHMIRROR_REQUIRE_STATUS_EMOJI_PREFIX", False)),
+        "categories": [{"id": cid, "name": cat_meta[cid][0], "position": cat_meta[cid][1]} for cid, _ in cat_order if cid in cat_meta],
+        "channels": rows,
+        "included_count": sum(1 for r in rows if r.get("status") == "included"),
+        "excluded_count": sum(1 for r in rows if r.get("status") == "excluded"),
+        "final_mirror_targets": list(final_pairs),
+    }
+
+
+def format_source_fetch_audit_tree(report: Dict[str, Any]) -> str:
+    """Render build_source_fetch_audit_report() as a Discord-like category → channel list."""
+    lines: List[str] = []
+    gid = int(report.get("source_guild_id") or 0)
+    lines.append(f"══ Source guild {gid} (audit) ══")
+    cats = report.get("categories") if isinstance(report.get("categories"), list) else []
+    chans = report.get("channels") if isinstance(report.get("channels"), list) else []
+    by_parent: Dict[int, List[Dict[str, Any]]] = {}
+    for r in chans:
+        if not isinstance(r, dict):
+            continue
+        try:
+            pid = int(r.get("parent_id") or 0)
+        except Exception:
+            pid = 0
+        by_parent.setdefault(pid, []).append(r)
+    for pid, lst in list(by_parent.items()):
+        try:
+            lst.sort(key=lambda x: (int(x.get("position") or 0), int(x.get("id") or 0)))
+        except Exception:
+            pass
+        by_parent[pid] = lst
+
+    if cats:
+        for cat in cats:
+            if not isinstance(cat, dict):
+                continue
+            try:
+                cid = int(cat.get("id") or 0)
+            except Exception:
+                cid = 0
+            cname = str(cat.get("name") or f"category_{cid}")
+            lines.append(f"📁 {cname}  (category_id={cid})")
+            kids = by_parent.get(cid, [])
+            if not kids:
+                lines.append("  (no text/announcement channels under this category in API snapshot)")
+            for r in kids:
+                mark = "  # " if str(r.get("status")) == "included" else "  · "
+                tag = "IN" if str(r.get("status")) == "included" else f"OUT ({str(r.get('reason') or '')})"
+                nm = str(r.get("name") or "")
+                lines.append(f"{mark}{nm}  [{tag}]  id={r.get('id')}")
+    else:
+        lines.append("📁 (no matching categories in API snapshot — check source_category_ids)")
+        flat = []
+        for pid in sorted(by_parent.keys()):
+            flat.extend(by_parent.get(pid) or [])
+        try:
+            flat.sort(key=lambda x: (int(x.get("parent_id") or 0), int(x.get("position") or 0), int(x.get("id") or 0)))
+        except Exception:
+            pass
+        for r in flat:
+            mark = "  # " if str(r.get("status")) == "included" else "  · "
+            tag = "IN" if str(r.get("status")) == "included" else f"OUT ({str(r.get('reason') or '')})"
+            nm = str(r.get("name") or "")
+            lines.append(f"{mark}{nm}  [{tag}]  parent={r.get('parent_id')} id={r.get('id')}")
+
+    ign = report.get("ignored_channel_ids")
+    if isinstance(ign, list) and ign:
+        lines.append(f"Ignored channel ids ({len(ign)}): {ign[:40]}{'...' if len(ign) > 40 else ''}")
+    lines.append(
+        f"Summary: included={int(report.get('included_count') or 0)} excluded={int(report.get('excluded_count') or 0)} "
+        f"status_emoji_filter={'on' if report.get('require_status_emoji_prefix') else 'off'}"
+    )
+    return "\n".join(lines)
 

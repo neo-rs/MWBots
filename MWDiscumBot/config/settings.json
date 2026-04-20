@@ -27,7 +27,7 @@
     "fetchall_max_messages_per_channel": 10,
     "fetchsync_initial_backfill_limit": 10,
     "fetchsync_min_content_chars": 1,
-    "send_min_interval_seconds": 0.75,
+    "send_min_interval_seconds": 3,
     "use_webhooks_for_forwarding": true,
     "forward_attachments_as_files": true,
     "forward_attachments_max_files": 10,

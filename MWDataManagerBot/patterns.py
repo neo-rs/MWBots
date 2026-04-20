@@ -588,8 +588,8 @@ def is_amz_deals_affiliate_bridge_blob(text: str) -> bool:
         return True
     if re.search(r"miablogs\.us/[^\s]*paid-ad", sl, re.IGNORECASE) and re.search(r"\bB0[A-Z0-9]{8}\b", raw, re.IGNORECASE):
         return True
-    if is_ringinthedeals_flipfluence_deal_blob(text):
-        return True
+    # RingInTheDeals / FLIPFLUENCE templated deal blasts are high-volume feed posts; they should NOT
+    # force routing into the conversational deals bucket.
     return False
 
 
