@@ -41,8 +41,21 @@ from utils import (
     format_embeds_for_forwarding,
     generate_content_signature,
     is_image_attachment,
+    is_discord_media_url,
     rewrite_affiliate_links_in_message,
 )
+
+def _first_non_discord_url(urls: List[str]) -> str:
+    for u in urls or []:
+        if not u:
+            continue
+        try:
+            if is_discord_media_url(u):
+                continue
+        except Exception:
+            pass
+        return u
+    return ""
 
 def _dispatch_tag_priority(tag: str) -> int:
     """
@@ -1156,6 +1169,19 @@ class MessageForwarder:
                         non_image_urls.append(u)
                 if non_image_urls:
                     formatted_content = (formatted_content + "\n\n" + "\n".join(non_image_urls[:10])).strip()
+            except Exception:
+                pass
+
+        # If the upstream post is embed-only (common for monitor bots), forwarding can look "cut"
+        # because `content` is empty and the only visible URL lived inside the embed. In that case,
+        # append the first non-Discord URL we can find from the embed strings so the forward includes a link.
+        if not (formatted_content or "").strip():
+            try:
+                embed_blob = " ".join(collect_embed_strings(embeds) or [])
+                urls = extract_urls_from_text(embed_blob)
+                picked = _first_non_discord_url(urls)
+                if picked:
+                    formatted_content = picked
             except Exception:
                 pass
 
