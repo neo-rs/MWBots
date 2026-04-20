@@ -57,6 +57,24 @@ def _first_non_discord_url(urls: List[str]) -> str:
         return u
     return ""
 
+def _content_is_only_urls(content: str) -> bool:
+    body = (content or "").strip()
+    if not body:
+        return True
+    urls = extract_urls_from_text(body)
+    if not urls:
+        return False
+    # Remove urls from the body; if nothing meaningful remains, it's "url-only"
+    cleaned = body
+    try:
+        for u in sorted(set(urls), key=len, reverse=True):
+            if u:
+                cleaned = cleaned.replace(u, " ")
+    except Exception:
+        pass
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned == ""
+
 def _dispatch_tag_priority(tag: str) -> int:
     """
     When multiple classifier tags route to the same destination channel, prefer the more specific bucket.
@@ -1171,19 +1189,23 @@ class MessageForwarder:
                     formatted_content = (formatted_content + "\n\n" + "\n".join(non_image_urls[:10])).strip()
             except Exception:
                 pass
-
-        # If the upstream post is embed-only (common for monitor bots), forwarding can look "cut"
-        # because `content` is empty and the only visible URL lived inside the embed. In that case,
-        # append the first non-Discord URL we can find from the embed strings so the forward includes a link.
-        if not (formatted_content or "").strip():
-            try:
+        # If the source content is *only* a URL (common for monitor bots), and the embed already contains
+        # that same URL, don't forward the duplicate top-line link. The embed remains intact.
+        try:
+            if _content_is_only_urls(formatted_content) and embeds:
                 embed_blob = " ".join(collect_embed_strings(embeds) or [])
-                urls = extract_urls_from_text(embed_blob)
-                picked = _first_non_discord_url(urls)
-                if picked:
-                    formatted_content = picked
-            except Exception:
-                pass
+                embed_urls = set(extract_urls_from_text(embed_blob) or [])
+                content_urls = set(extract_urls_from_text(formatted_content or "") or [])
+                content_urls = {u for u in content_urls if u}
+                if content_urls and embed_urls and content_urls.issubset(embed_urls):
+                    formatted_content = ""
+                    if trace is not None:
+                        try:
+                            trace.setdefault("classifier", {}).setdefault("matches", {})["forward_drop_duplicate_url_only_content"] = True
+                        except Exception:
+                            pass
+        except Exception:
+            pass
 
         # Route maps apply to *destinations* (legacy MirrorWorld routing maps).
         source_group = "unknown"
@@ -1672,9 +1694,21 @@ class MessageForwarder:
                 dest_traces.append(dest_trace)
                 continue
             try:
+                # PRICE_ERROR can be embed-only; if content is empty, append a real URL so the forward
+                # isn't "cut" / missing the product link.
+                content_to_send = formatted_content
+                if str(tag or "") == "PRICE_ERROR" and not (content_to_send or "").strip():
+                    try:
+                        embed_blob = " ".join(collect_embed_strings(embeds) or [])
+                        urls = extract_urls_from_text(embed_blob)
+                        picked = _first_non_discord_url(urls)
+                        if picked:
+                            content_to_send = picked
+                    except Exception:
+                        content_to_send = formatted_content
                 await self._send_to_destination(
                     dest_channel_id=dest_channel_id,
-                    content=formatted_content,
+                    content=content_to_send,
                     embeds=embeds_out,
                     attachments=attachments if use_files else None,
                     webhook_username=wh_username,

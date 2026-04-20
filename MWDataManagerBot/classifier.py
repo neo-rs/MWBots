@@ -643,6 +643,10 @@ def _looks_like_conversational_amazon_deal(
             return _skip("not_configured_online_channel")
     except Exception:
         return _skip("channel_id_error")
+    # "New Deal Found! ... GRAB IT HERE" templates are affiliate-banner style posts (often galaxydeals redirect)
+    # and should never land in conversational AMZ_DEALS.
+    if _AFFILIATE_GRAB_TEMPLATE.search(text_blob or ""):
+        return _skip("grab_it_here_template")
     if _NEW_DEAL_FOUND_PATTERN.search(text_blob) and not allow_amz_deals_despite_complicated_monitor(text_blob):
         return _skip("new_deal_found_banner")
     # These templates almost always include at least one explicit price token.
