@@ -575,6 +575,45 @@ async def _create_mirror_text_channel_for_source(
         return None
 
 
+async def _filter_source_channels_by_recent_activity_days(
+    channels: List[Tuple[int, str]],
+    *,
+    source_guild_id: int,
+    user_token: str,
+    activity_days: int,
+    context_label: str,
+) -> List[Tuple[int, str]]:
+    """
+    Keep only source channels whose *latest* message is within the last `activity_days` (same rule as run_fetchall).
+    run_fetchsync must use this when the setting is enabled, or it will mirror a wider channel set than run_fetchall
+    and create empty destination channels for sources that were excluded from the fetchall pass.
+    """
+    if activity_days <= 0:
+        return list(channels or [])
+    tok = str(user_token or "").strip()
+    if not tok or not channels:
+        return list(channels or [])
+    filtered: List[Tuple[int, str]] = []
+    for ch_id, ch_name in channels:
+        ok, msgs, _ = await _fetch_channel_messages_page(
+            source_channel_id=int(ch_id), user_token=tok, limit=1, after=None
+        )
+        if ok and msgs and _is_message_within_recent_days(msgs[0], days=activity_days):
+            filtered.append((int(ch_id), str(ch_name)))
+        else:
+            log_fetchall(
+                f"source={source_guild_id} channel {ch_id} ({ch_name}) excluded (no recent activity in {activity_days}d)"
+            )
+    dropped = len(channels) - len(filtered)
+    if dropped > 0:
+        log_warn(
+            f"source={source_guild_id} filtered to channels with recent activity: "
+            f"kept={len(filtered)} dropped={dropped} (context={context_label}; "
+            f"fetchall_only_channels_with_recent_activity_days={activity_days})"
+        )
+    return filtered
+
+
 async def _prune_separators_with_no_mirrors(destination_guild, *, source_guild_id: int) -> int:
     """
     Delete separator channels for this source_guild_id if there are no mirror channels left.
@@ -2158,19 +2197,13 @@ async def run_fetchall(
         # Optional: only keep channels that have at least one message in the last N days
         activity_days = int(getattr(cfg, "FETCHALL_ONLY_CHANNELS_WITH_RECENT_ACTIVITY_DAYS", 0) or 0)
         if activity_days > 0 and token and src_channels_to_mirror:
-            filtered: List[Tuple[int, str]] = []
-            for ch_id, ch_name in src_channels_to_mirror:
-                ok, msgs, _ = await _fetch_channel_messages_page(
-                    source_channel_id=ch_id, user_token=token, limit=1, after=None
-                )
-                if ok and msgs and _is_message_within_recent_days(msgs[0], days=activity_days):
-                    filtered.append((ch_id, ch_name))
-                else:
-                    log_fetchall(f"source={source_guild_id} channel {ch_id} ({ch_name}) excluded (no recent activity in {activity_days}d)")
-            dropped = len(src_channels_to_mirror) - len(filtered)
-            if dropped > 0:
-                log_warn(f"[FETCHALL] source={source_guild_id} filtered to channels with recent activity: kept={len(filtered)} dropped={dropped} (fetchall_only_channels_with_recent_activity_days={activity_days})")
-            src_channels_to_mirror = filtered
+            src_channels_to_mirror = await _filter_source_channels_by_recent_activity_days(
+                src_channels_to_mirror,
+                source_guild_id=int(source_guild_id),
+                user_token=token,
+                activity_days=activity_days,
+                context_label="FETCHALL",
+            )
 
     log_fetchall(
         f"FETCHALL mirror candidates (before status-emoji filter) count={len(src_channels_to_mirror)} mode={mode}",
@@ -2520,6 +2553,15 @@ async def run_fetchsync(
         source_category_ids=_cats,
         ignored_channel_ids=ignored_ids,
     )
+    activity_days_cfg = int(getattr(cfg, "FETCHALL_ONLY_CHANNELS_WITH_RECENT_ACTIVITY_DAYS", 0) or 0)
+    if activity_days_cfg > 0 and token and src_channels_to_mirror:
+        src_channels_to_mirror = await _filter_source_channels_by_recent_activity_days(
+            src_channels_to_mirror,
+            source_guild_id=int(source_guild_id),
+            user_token=token,
+            activity_days=activity_days_cfg,
+            context_label="FETCHSYNC",
+        )
     src_channels_to_mirror = _apply_status_emoji_channel_filter(
         src_channels_to_mirror,
         source_guild_id=int(source_guild_id),
@@ -2921,8 +2963,18 @@ async def run_fetchsync(
             if new_cursor and not dryrun:
                 persist_channel_cursor(source_guild_id=source_guild_id, source_channel_id=sid, last_seen_message_id=str(new_cursor))
                 cursor_saved = True
+            posts_ch = int(sent) - sent_before_ch
+            n_src = len(msgs or []) if ok else 0
+            sum_note = ""
+            if posts_ch == 0:
+                sum_note = (
+                    " note=no_source_messages"
+                    if n_src <= 0
+                    else " note=0_posts_all_filtered (fetchsync_min_content_chars / fetchsync_only_recent_days / empty_or_mentions_only)"
+                )
             log_fetchall(
-                f"FETCHSYNC channel_summary id={sid} api_reads={api_reads} posts_sent={int(sent) - sent_before_ch} "
+                f"FETCHSYNC channel_summary id={sid} api_reads={api_reads} posts_sent={posts_ch} "
+                f"source_msgs_in_batch={n_src}{sum_note} "
                 f"cursor_persisted={'yes' if cursor_saved else 'no'}",
                 event="fetchsync_channel",
             )
@@ -2971,9 +3023,17 @@ async def run_fetchsync(
             persist_channel_cursor(source_guild_id=source_guild_id, source_channel_id=sid, last_seen_message_id=last_cursor_id)
             cursor_saved = True
 
+        posts_ch2 = int(sent) - sent_before_ch
+        sum_note2 = ""
+        if posts_ch2 == 0:
+            sum_note2 = (
+                " note=no_pages_or_empty_source"
+                if total_fetched <= 0
+                else " note=0_posts_all_filtered (fetchsync_min_content_chars / fetchsync_only_recent_days / empty_or_mentions_only)"
+            )
         log_fetchall(
-            f"FETCHSYNC channel_summary id={sid} api_reads={api_reads} posts_sent={int(sent) - sent_before_ch} "
-            f"msgs_fetched={total_fetched} cursor_persisted={'yes' if cursor_saved else 'no'}",
+            f"FETCHSYNC channel_summary id={sid} api_reads={api_reads} posts_sent={posts_ch2} "
+            f"msgs_fetched={total_fetched}{sum_note2} cursor_persisted={'yes' if cursor_saved else 'no'}",
             event="fetchsync_channel",
         )
 
