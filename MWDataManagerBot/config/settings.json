@@ -90,7 +90,7 @@
   "fetchall_max_messages_per_channel": 400,
   "fetchsync_auto_poll_seconds": 60,
   "edit_cooldown_seconds": 30,
-  "major_clearance_pair_ttl_seconds": 180,
+  "major_clearance_pair_ttl_seconds": 200,
   "major_clearance_send_single_on_timeout": false,
   "hd_total_inventory_source_channel_id": 1435308770128298044,
   "hd_total_inventory_destination_channel_id": 1484118129402450041,
