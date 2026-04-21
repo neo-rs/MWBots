@@ -95,6 +95,7 @@
   "hd_total_inventory_source_channel_id": 1435308770128298044,
   "hd_total_inventory_destination_channel_id": 1484118129402450041,
   "hd_total_inventory_min_total": 500,
+  "hd_total_inventory_delete_source_on_success": false,
   "major_clearance_source_channel_ids": [1434967990406873169,1435277398886060073,1434974855215714354,1435268708632363200],
   "fallback_channel_id": 1435066509860012073,
   "debug_reactions": {

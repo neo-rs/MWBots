@@ -73,6 +73,8 @@ HD_TOTAL_INVENTORY_SOURCE_CHANNEL_ID: int = 0
 HD_TOTAL_INVENTORY_DESTINATION_CHANNEL_ID: int = 0
 # When > 0, HD_TOTAL_INVENTORY only routes if "Total Inventory" parses to this value or higher.
 HD_TOTAL_INVENTORY_MIN_TOTAL: int = 0
+# Optional: after a successful forward to the HD_TOTAL_INVENTORY destination, delete the original source message.
+HD_TOTAL_INVENTORY_DELETE_SOURCE_ON_SUCCESS: bool = False
 
 # Runtime knobs
 RECENT_TTL_SECONDS: int = 10
@@ -177,6 +179,7 @@ def init(settings: Dict[str, Any]) -> None:
     global SMARTFILTER_FLIPS_LUNCHMONEY_CHANNEL_ID, SMARTFILTER_AMAZON_PROFITABLE_LEADS_CHANNEL_ID
     global SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID
     global HD_TOTAL_INVENTORY_SOURCE_CHANNEL_ID, HD_TOTAL_INVENTORY_DESTINATION_CHANNEL_ID, HD_TOTAL_INVENTORY_MIN_TOTAL
+    global HD_TOTAL_INVENTORY_DELETE_SOURCE_ON_SUCCESS
     global RECENT_TTL_SECONDS, GLOBAL_DUPLICATE_TTL_SECONDS, MONITOR_EMBED_TTL_SECONDS, LINK_TRACKING_TTL_SECONDS
     global FORWARD_ON_EDIT
     global SHORT_EMBED_CHAR_THRESHOLD, SHORT_EMBED_RETRY_DELAY_SECONDS, SHORT_EMBED_MAX_WAIT_SECONDS
@@ -288,6 +291,7 @@ def init(settings: Dict[str, Any]) -> None:
     HD_TOTAL_INVENTORY_MIN_TOTAL = _get_int(settings, "hd_total_inventory_min_total", 0)
     if HD_TOTAL_INVENTORY_MIN_TOTAL < 0:
         HD_TOTAL_INVENTORY_MIN_TOTAL = 0
+    HD_TOTAL_INVENTORY_DELETE_SOURCE_ON_SUCCESS = bool(settings.get("hd_total_inventory_delete_source_on_success", False))
 
     RECENT_TTL_SECONDS = _get_int(settings, "recent_ttl_seconds", 10)
     GLOBAL_DUPLICATE_TTL_SECONDS = _get_int(settings, "global_duplicate_ttl_seconds", 60 * 5)

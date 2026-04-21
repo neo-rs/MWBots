@@ -708,7 +708,7 @@ class MessageForwarder:
         _add("MONITORED_KEYWORD", cfg.SMARTFILTER_MONITORED_KEYWORD_CHANNEL_ID, "Monitored keyword")
         _add("AMAZON", cfg.SMARTFILTER_AMAZON_CHANNEL_ID, "Amazon")
         _add("AMAZON_FALLBACK", cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID, "Amazon (fallback)")
-        _add("AMZ_DEALS", cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID, "Amazon • Deals (conversational)")
+        _add("CONVERSATIONAL_DEALS", cfg.SMARTFILTER_CONVERSATIONAL_DEALS_CHANNEL_ID, "Online • Conversational deals")
 
         # Global-trigger buckets
         _add("PRICE_ERROR", cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID, "Global • Price error/glitched")
@@ -1653,6 +1653,7 @@ class MessageForwarder:
 
         forwarded = 0
         dest_traces: List[Dict[str, Any]] = []
+        hd_deleted_source = False
 
         for dest_channel_id, tag in dispatch_link_types:
             dest_before = int(dest_channel_id or 0)
@@ -1723,6 +1724,35 @@ class MessageForwarder:
                 forwarded += 1
                 dest_trace["decision"] = {"action": "sent"}
                 dest_traces.append(dest_trace)
+
+                # Optional: after a successful HD_TOTAL_INVENTORY forward, delete the source message
+                # so the same monitor embed doesn't remain visible in both channels.
+                if (
+                    (not hd_deleted_source)
+                    and str(tag or "") == "HD_TOTAL_INVENTORY"
+                    and bool(getattr(cfg, "HD_TOTAL_INVENTORY_DELETE_SOURCE_ON_SUCCESS", False))
+                ):
+                    try:
+                        await message.delete(reason="MWDataManagerBot: forwarded HD_TOTAL_INVENTORY (cleanup source)")
+                        hd_deleted_source = True
+                        try:
+                            trace.setdefault("forwarder", {})["hd_total_inventory_deleted_source"] = True
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        try:
+                            trace.setdefault("forwarder", {})["hd_total_inventory_deleted_source"] = False
+                            trace["forwarder"]["hd_total_inventory_delete_error"] = f"{type(e).__name__}: {e}"
+                        except Exception:
+                            pass
+                        if cfg.VERBOSE:
+                            try:
+                                log_warn(
+                                    f"HD_TOTAL_INVENTORY delete source failed msg={getattr(message,'id',0)} ch=<#{int(channel_id or 0)}>"
+                                    f" ({type(e).__name__}: {e})"
+                                )
+                            except Exception:
+                                pass
 
                 if stop_after_first:
                     break
