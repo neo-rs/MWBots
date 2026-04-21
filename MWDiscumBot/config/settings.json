@@ -20,6 +20,7 @@
     "rewrite_role_mentions": true,
     "rewrite_channel_mentions": true,
     "rewrite_user_mentions": false,
+    "d2d_suppress_link_previews": false,
     "short_embed_char_threshold":  50,
     "short_embed_retry_delay_seconds":  5,
     "short_embed_max_wait_seconds":  35,

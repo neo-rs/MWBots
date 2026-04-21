@@ -372,6 +372,14 @@ try:
 except Exception:
     REWRITE_USER_MENTIONS = False
 
+# Link-preview suppression (D2D live forwarder only).
+# When enabled, we wrap URLs in <...> and drop redundant link-unfurl embeds.
+# Default OFF because deal feeds (e.g. FlipFluence) rely on the embed card for context/thumbnail.
+try:
+    D2D_SUPPRESS_LINK_PREVIEWS: bool = _to_bool(_settings.get("d2d_suppress_link_previews"), False)
+except Exception:
+    D2D_SUPPRESS_LINK_PREVIEWS = False
+
 def cfg_get(key: str, fallback: Optional[str] = None) -> Optional[str]:
     """Get config value by key with basic backwards-compat matching."""
     if key in _CONFIG_RAW:
@@ -4130,7 +4138,8 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
     _link_wrap_changed = False
     try:
         if isinstance(msg_text, str) and msg_text.strip():
-            msg_text, _link_wrap_changed = _suppress_discord_link_previews_in_text(msg_text)
+            if D2D_SUPPRESS_LINK_PREVIEWS:
+                msg_text, _link_wrap_changed = _suppress_discord_link_previews_in_text(msg_text)
     except Exception:
         pass
 
@@ -4214,7 +4223,8 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
 
     _emb_ct_before = len(valid_embeds)
     try:
-        valid_embeds = _drop_link_preview_embeds_covered_by_content(valid_embeds, str(msg_text or ""))
+        if D2D_SUPPRESS_LINK_PREVIEWS:
+            valid_embeds = _drop_link_preview_embeds_covered_by_content(valid_embeds, str(msg_text or ""))
     except Exception:
         pass
     _emb_removed = _emb_ct_before - len(valid_embeds)
@@ -4384,13 +4394,24 @@ def _forward_to_webhook(m, channelID, guildID, *, edit_existing: bool = False):
                         pass
                 log_d2d(f"Edited mirror message: Source {src_ctx} -> Destination {dest_ctx}")
                 return
-            # Patch failed → fall back to replace
-            needs_replace = True
+            # Patch failed → do NOT repost on edit sync.
+            #
+            # Rationale: "replace" mode deletes + reposts, which can leave duplicate destination messages if
+            # delete fails (missing perms, race with other updates) — users then see content and embeds as
+            # separate messages. Instead, queue the update and let later MESSAGE_UPDATE / hydration retries
+            # attempt another PATCH when possible.
+            try:
+                _queue_pending_edit_update(m, channelID, guildID)
+            except Exception:
+                pass
+            return
 
         if needs_replace:
-            for did in dest_ids:
-                _webhook_delete_message(webhook_url=webhook, dest_message_id=did)
-            # fall through to POST flow to re-send fresh content
+            try:
+                _queue_pending_edit_update(m, channelID, guildID)
+            except Exception:
+                pass
+            return
     
     # If content > 2000 chars, always chunk (no truncation).
     # First chunk keeps embeds + attachments; remaining chunks are text-only.
