@@ -40,6 +40,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from mirror_world_config import load_config_with_secrets, is_placeholder_secret, mask_secret
 from RSForwarder import affiliate_rewriter
+from retail_product_link_listener import maybe_reply_retail_product_links
 
 
 class ExplainableLog:
@@ -6899,6 +6900,17 @@ class InstorebotForwarder:
         finally:
             self._journal_flow_source_id = None
 
+    async def _maybe_retail_product_links(self, message: discord.Message) -> bool:
+        """
+        Standalone channel helper: reply with canonical retailer URLs from backticked product IDs.
+        Independent of source_channel_ids / forwarding (see retail_product_link_listener.py).
+        """
+        try:
+            return await maybe_reply_retail_product_links(self.bot, message, self.config)
+        except Exception:
+            log.exception("[retail_links] handler error (ignored)")
+            return False
+
     # -----------------------
     # Discord events/commands
     # -----------------------
@@ -6993,6 +7005,11 @@ class InstorebotForwarder:
         async def on_message(message: discord.Message) -> None:
             try:
                 await self.bot.process_commands(message)
+            except Exception:
+                pass
+            try:
+                if await self._maybe_retail_product_links(message):
+                    return
             except Exception:
                 pass
             await self._maybe_forward_message(message)
