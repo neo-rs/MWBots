@@ -25,8 +25,16 @@ _FETCHALL_RUNTIME_PATH = _CONFIG_DIR / "fetchall_mappings.runtime.json"
 _FILE_LOCK = threading.RLock()
 _DISCORD_API_BASE = "https://discord.com/api/v9"
 _CATEGORY_CHANNEL_LIMIT = 50
-# Prune mirror channels that have no message in the last N days (avoids channels piling up).
-_INACTIVE_PRUNE_DAYS = 2
+
+
+def _inactive_prune_days_float() -> float:
+    """Configured in settings.json fetchall_inactive_prune_days (via fetchall_config.init)."""
+    try:
+        d = float(getattr(cfg, "FETCHALL_INACTIVE_PRUNE_DAYS", 2.0) or 2.0)
+    except Exception:
+        d = 2.0
+    return max(0.05, min(365.0, d))
+
 
 # Maintenance coordination:
 # - fetchclear / startup clear will SET the event while deleting channels
@@ -512,6 +520,59 @@ async def _is_mirror_channel_inactive(mirror_ch, *, days: float = 2.0) -> bool:
         return delta_seconds > (days * 86400)
     except Exception:
         return False
+
+
+async def _create_mirror_text_channel_for_source(
+    *,
+    destination_guild,
+    dest_category,
+    source_guild_id: int,
+    src_id: int,
+    src_name: str,
+    source_guild_name: str,
+    reason: str = "MWDiscumBot fetchsync mirror channel",
+):
+    """
+    Create one mirror TextChannel (base or overflow category).
+
+    Canonical path: called from run_fetchsync immediately before syncing that source channel so we do not
+    bulk-create empty mirrors in run_fetchall.
+    """
+    raw_name = str(src_name or "").strip()
+    desired_name = (raw_name[:90] if raw_name else _slugify_channel_name(str(src_name), fallback_prefix="mirror"))
+    topic = _build_mirror_topic(source_guild_id, src_id)
+    full_topic = f"{topic} | source={source_guild_name}#{src_name}"
+    dest_cat = await _pick_category_for_new_channel(destination_guild, base_category=dest_category)
+    final_name = desired_name
+    try:
+        taken = {c.name for c in getattr(dest_cat, "text_channels", []) or []}
+    except Exception:
+        taken = set()
+    if final_name in taken:
+        final_name = (final_name[:80] + f"-{str(src_id)[-4:]}")[:90]
+    try:
+        return await destination_guild.create_text_channel(
+            final_name,
+            category=dest_cat,
+            topic=full_topic,
+            reason=str(reason or "MWDiscumBot mirror channel"),
+        )
+    except Exception as e:
+        err_s = str(e)
+        if "Maximum number of channels in category reached" in err_s or "Maximum number of channels in category" in err_s:
+            try:
+                dest_cat2 = await _pick_category_for_new_channel(destination_guild, base_category=dest_category)
+                if dest_cat2 is not None and dest_cat2 != dest_cat:
+                    return await destination_guild.create_text_channel(
+                        final_name,
+                        category=dest_cat2,
+                        topic=full_topic,
+                        reason=str(reason or "MWDiscumBot mirror channel") + " (overflow retry)",
+                    )
+            except Exception:
+                pass
+        log_warn(f"[FETCHSYNC] failed to create mirror for {source_guild_id}:{src_id}: {e}")
+        return None
 
 
 async def _prune_separators_with_no_mirrors(destination_guild, *, source_guild_id: int) -> int:
@@ -1825,12 +1886,13 @@ async def run_fetchall(
     prune_inactive: bool = True,
 ) -> Dict[str, Any]:
     """
-    Basic fetch-all (standalone):
-      - Ensures a destination category exists (by ID)
+    Fetch-all maintenance (standalone):
+      - Ensures destination category exists (by ID)
       - Ensures a per-guild separator channel
-      - Mirrors source guild channels into destination category
+      - Enumerates mirror candidates and prunes stale/orphan mirrors
 
-    Mirror channels are linked by topic: `MIRROR:<source_guild_id>:<source_channel_id>`.
+    Mirror **creation** is deferred to run_fetchsync (one channel created immediately before syncing it) so we do not
+    bulk-create empty mirrors. Topics: `MIRROR:<source_guild_id>:<source_channel_id>`.
     """
     try:
         import discord
@@ -2130,6 +2192,7 @@ async def run_fetchall(
             existing_by_source[info[1]] = ch
 
     created = 0
+    deferred_mirror_creates = 0
     kept = 0
     attempted = 0
     errors = 0
@@ -2180,27 +2243,12 @@ async def run_fetchall(
                 except Exception:
                     pass
             continue
-        raw_name = str(src_name or "").strip()
-        # Source channel names are already Discord-valid; keep emojis/Unicode as-is.
-        desired_name = (raw_name[:90] if raw_name else _slugify_channel_name(str(src_name), fallback_prefix="mirror"))
-        topic = _build_mirror_topic(source_guild_id, src_id)
-        full_topic = f"{topic} | source={source_guild_name}#{src_name}"
-        # Choose a category with capacity (base or overflow)
-        dest_cat = await _pick_category_for_new_channel(destination_guild, base_category=dest_category)
-        # ensure unique name within chosen category
-        final_name = desired_name
-        try:
-            taken = {c.name for c in getattr(dest_cat, "text_channels", []) or []}
-        except Exception:
-            taken = set()
-        if final_name in taken:
-            final_name = (final_name[:80] + f"-{str(src_id)[-4:]}")[:90]
-        # Emit progress BEFORE the create call, so the user sees activity even if Discord rate-limits creation.
+        deferred_mirror_creates += 1
         if progress_cb is not None:
             try:
                 await progress_cb(
                     {
-                        "stage": "creating",
+                        "stage": "deferred_to_fetchsync",
                         "mode": str(mode),
                         "source_guild_id": int(source_guild_id),
                         "source_guild_name": str(source_guild_name),
@@ -2209,53 +2257,7 @@ async def run_fetchall(
                         "attempted": int(attempted),
                         "created": int(created),
                         "existing": int(kept),
-                        "errors": int(errors),
-                        "current_channel_id": int(src_id or 0),
-                        "current_channel_name": str(src_name or ""),
-                    }
-                )
-            except Exception:
-                pass
-        try:
-            await destination_guild.create_text_channel(
-                final_name,
-                category=dest_cat,
-                topic=full_topic,
-                reason="MWDiscumBot fetchall mirror channel",
-            )
-            created += 1
-        except Exception as e:
-            # If the category filled up between check+create, retry once in a new overflow category.
-            err_s = str(e)
-            if "Maximum number of channels in category reached" in err_s or "Maximum number of channels in category" in err_s:
-                try:
-                    dest_cat2 = await _pick_category_for_new_channel(destination_guild, base_category=dest_category)
-                    if dest_cat2 is not None and dest_cat2 != dest_cat:
-                        await destination_guild.create_text_channel(
-                            final_name,
-                            category=dest_cat2,
-                            topic=full_topic,
-                            reason="MWDiscumBot fetchall mirror channel (overflow retry)",
-                        )
-                        created += 1
-                        continue
-                except Exception:
-                    pass
-            errors += 1
-            log_warn(f"[FETCHALL] failed to create mirror for {source_guild_id}:{src_id}: {e}")
-        if progress_cb is not None:
-            try:
-                await progress_cb(
-                    {
-                        "stage": "mirrors",
-                        "mode": str(mode),
-                        "source_guild_id": int(source_guild_id),
-                        "source_guild_name": str(source_guild_name),
-                        "destination_category_id": int(dest_category_id),
-                        "total_sources": int(total_sources),
-                        "attempted": int(attempted),
-                        "created": int(created),
-                        "existing": int(kept),
+                        "deferred_mirror_creates": int(deferred_mirror_creates),
                         "errors": int(errors),
                         "current_channel_id": int(src_id or 0),
                         "current_channel_name": str(src_name or ""),
@@ -2264,43 +2266,53 @@ async def run_fetchall(
             except Exception:
                 pass
 
-    # Prune stale mirrors: orphaned (source channel gone), date-expired (require_date), or inactive (no message in 2 days)
+    # Prune stale mirrors: orphaned (not in selected set), date-expired (require_date), inactive (empty / old).
+    # Orphan deletes run only when we have a non-empty selected channel list — if enumeration returns empty (transient
+    # failure or aggressive filters), orphan pruning is skipped so we do not delete every mirror by mistake.
     valid_src_ids = {int(sid) for sid, _ in (src_channels_to_mirror or []) if int(sid or 0) > 0}
+    authoritative_sources = len(valid_src_ids) > 0
     require_date = bool(entry.get("require_date", False))
+    inactive_days = _inactive_prune_days_float()
     pruned = 0
-    if valid_src_ids:
-        for src_ch_id, mirror_ch in list(existing_by_source.items()):
-            if not hasattr(mirror_ch, "delete"):
-                continue
-            ch_name = str(getattr(mirror_ch, "name", "") or "")
-            # Never delete separators
-            if ch_name.startswith("📅---") or (getattr(mirror_ch, "topic", "") or "").startswith("separator for"):
-                continue
-            should_delete = False
-            if int(src_ch_id or 0) not in valid_src_ids:
-                should_delete = True
-            elif require_date and _is_channel_date_stale(ch_name):
-                should_delete = True
-            elif prune_inactive and await _is_mirror_channel_inactive(mirror_ch, days=float(_INACTIVE_PRUNE_DAYS)):
-                should_delete = True
-            if should_delete:
-                try:
-                    await mirror_ch.delete(
-                        reason="MWDiscumBot fetchall prune (orphaned, date-expired, or inactive 2d)"
-                    )
-                    pruned += 1
-                    await asyncio.sleep(0.35)
-                except Exception as e:
-                    log_warn(
-                        f"prune failed mirror_channel={fmt_discord_channel(getattr(mirror_ch, 'id', 0) or 0)}: "
-                        f"{type(e).__name__}: {e}"
-                    )
-                    errors += 1
-                continue
-            await asyncio.sleep(0.15)
 
-        if pruned > 0:
-            log_fetchall(f"source={source_guild_id} pruned={pruned} (orphaned, date-expired, or inactive 2d)")
+    for src_ch_id, mirror_ch in list(existing_by_source.items()):
+        if not hasattr(mirror_ch, "delete"):
+            continue
+        ch_name = str(getattr(mirror_ch, "name", "") or "")
+        # Never delete separators
+        if ch_name.startswith("📅---") or (getattr(mirror_ch, "topic", "") or "").startswith("separator for"):
+            continue
+        should_delete = False
+        if authoritative_sources and int(src_ch_id or 0) not in valid_src_ids:
+            should_delete = True
+        if not should_delete and require_date and _is_channel_date_stale(ch_name):
+            should_delete = True
+        if not should_delete and prune_inactive and await _is_mirror_channel_inactive(mirror_ch, days=float(inactive_days)):
+            should_delete = True
+        if should_delete:
+            try:
+                await mirror_ch.delete(
+                    reason=(
+                        "MWDiscumBot fetchall prune "
+                        "(orphaned, date-expired, or inactive)"
+                    )
+                )
+                pruned += 1
+                await asyncio.sleep(0.35)
+            except Exception as e:
+                log_warn(
+                    f"prune failed mirror_channel={fmt_discord_channel(getattr(mirror_ch, 'id', 0) or 0)}: "
+                    f"{type(e).__name__}: {e}"
+                )
+                errors += 1
+            continue
+        await asyncio.sleep(0.15)
+
+    if pruned > 0:
+        log_fetchall(
+            f"source={source_guild_id} pruned={pruned} "
+            f"(orphaned if enumerated, date-expired, or inactive {inactive_days:g}d)"
+        )
 
     # Remove separator(s) for this source guild if no mirror channels remain
     separators_pruned = 0
@@ -2314,7 +2326,8 @@ async def run_fetchall(
 
     log_fetchall(
         f"source={source_guild_id} dest_category={fmt_discord_channel(dest_category_id)} mode={mode} "
-        f"attempted={attempted} created={created} existing={kept} pruned={pruned} separators_pruned={separators_pruned}"
+        f"attempted={attempted} created={created} deferred_to_fetchsync={deferred_mirror_creates} "
+        f"existing={kept} pruned={pruned} separators_pruned={separators_pruned}"
     )
     if progress_cb is not None:
         try:
@@ -2328,6 +2341,7 @@ async def run_fetchall(
                     "total_sources": int(total_sources),
                     "attempted": int(attempted),
                     "created": int(created),
+                    "deferred_mirror_creates": int(deferred_mirror_creates),
                     "existing": int(kept),
                     "errors": int(errors),
                     "pruned": int(pruned),
@@ -2345,6 +2359,7 @@ async def run_fetchall(
             "destination_category_id": dest_category_id,
             "attempted": attempted,
             "created": created,
+            "deferred_mirror_creates": deferred_mirror_creates,
             "existing": kept,
         }
         if mode == "user_token":
@@ -2377,6 +2392,7 @@ async def run_fetchall(
         "destination_category_id": dest_category_id,
         "attempted": attempted,
         "created": created,
+        "deferred_mirror_creates": deferred_mirror_creates,
         "existing": kept,
         "errors": errors,
         "pruned": pruned,
@@ -2395,6 +2411,9 @@ async def run_fetchsync(
 ) -> Dict[str, Any]:
     """
     Fetch messages from source channels using a user token and mirror them into destination channels.
+
+    For each selected source channel (in order): ensure the mirror TextChannel exists (create if missing),
+    then fetch and forward messages into it — so we do not bulk-create empty mirrors ahead of syncing.
 
     - Reads ONLY from source servers using user token.
     - Writes ONLY to destination guild (Mirror World) using bot token.
@@ -2531,63 +2550,6 @@ async def run_fetchsync(
     mirror_by_source: Dict[int, discord.TextChannel] = dict(existing_by_source)
     created_channels = 0
     created_source_channel_ids: Set[int] = set()
-    if not dryrun:
-        # Track taken names per destination category
-        taken_by_cat: Dict[int, Set[str]] = {}
-        try:
-            taken_by_cat[int(dest_category.id)] = {c.name for c in dest_category.text_channels}
-        except Exception:
-            taken_by_cat[int(dest_category.id)] = set()
-        for src_id, src_name in src_channels_to_mirror:
-            sid = int(src_id or 0)
-            if sid <= 0 or sid in mirror_by_source:
-                continue
-            raw_name = str(src_name or "").strip()
-            desired_name = (raw_name[:90] if raw_name else _slugify_channel_name(str(src_name), fallback_prefix="mirror"))
-            topic = _build_mirror_topic(source_guild_id, sid)
-            full_topic = f"{topic} | source={source_guild_name}#{src_name}"
-            # Choose category with capacity (base or overflow)
-            dest_cat = await _pick_category_for_new_channel(destination_guild, base_category=dest_category)
-            try:
-                taken = taken_by_cat.setdefault(int(dest_cat.id), {c.name for c in getattr(dest_cat, "text_channels", []) or []})
-            except Exception:
-                taken = taken_by_cat.setdefault(int(getattr(dest_cat, "id", 0) or 0), set())
-            final_name = desired_name
-            if final_name in taken:
-                final_name = (final_name[:80] + f"-{str(sid)[-4:]}")[:90]
-            try:
-                created = await destination_guild.create_text_channel(
-                    final_name,
-                    category=dest_cat,
-                    topic=full_topic,
-                    reason="MWDiscumBot fetchsync mirror channel",
-                )
-                mirror_by_source[sid] = created
-                created_source_channel_ids.add(int(sid))
-                try:
-                    taken.add(final_name)
-                except Exception:
-                    pass
-                created_channels += 1
-            except Exception as e:
-                err_s = str(e)
-                if "Maximum number of channels in category reached" in err_s or "Maximum number of channels in category" in err_s:
-                    try:
-                        dest_cat2 = await _pick_category_for_new_channel(destination_guild, base_category=dest_category)
-                        if dest_cat2 is not None and dest_cat2 != dest_cat:
-                            created = await destination_guild.create_text_channel(
-                                final_name,
-                                category=dest_cat2,
-                                topic=full_topic,
-                                reason="MWDiscumBot fetchsync mirror channel (overflow retry)",
-                            )
-                            mirror_by_source[sid] = created
-                            created_source_channel_ids.add(int(sid))
-                            created_channels += 1
-                            continue
-                    except Exception:
-                        pass
-                log_warn(f"[FETCHSYNC] failed to create mirror for {source_guild_id}:{sid}: {e}")
 
     channels_processed = 0
     would_send = 0
@@ -2606,6 +2568,7 @@ async def run_fetchsync(
 
     log_fetchall(
         f"FETCHSYNC plan source_guild={source_guild_id} channels_selected={channels_total} "
+        f"mirror_create_order=per_channel_before_sync "
         f"REST_backfill_limit={per_channel_limit} max_msgs_per_ch_per_run={max_per_channel} "
         f"send_spacing_s={send_min_interval} min_content_chars={min_chars} "
         f"cursors=read/write in fetchall_mappings.json (not an in-memory Discord cache)",
@@ -2887,8 +2850,22 @@ async def run_fetchsync(
             continue
         channels_processed += 1
 
+        if not dryrun and mirror_by_source.get(sid) is None:
+            new_ch = await _create_mirror_text_channel_for_source(
+                destination_guild=destination_guild,
+                dest_category=dest_category,
+                source_guild_id=int(source_guild_id),
+                src_id=int(sid),
+                src_name=str(src_name or ""),
+                source_guild_name=str(source_guild_name or ""),
+            )
+            if new_ch is not None:
+                mirror_by_source[sid] = new_ch
+                created_source_channel_ids.add(int(sid))
+                created_channels += 1
+
         dest_channel = mirror_by_source.get(sid)
-        if dest_channel is None and not dryrun:
+        if dest_channel is None:
             log_info(
                 f"FETCHSYNC skip channel={fmt_discord_channel(sid)} ({src_name!r}) — no mirror TextChannel in destination "
                 f"(create failed or dryrun)",
@@ -3047,12 +3024,12 @@ async def run_fetch_auto_sequence_for_entry(
     entry: Dict[str, Any],
     destination_guild,
     source_user_token: str,
-    prune_inactive: bool = False,
+    prune_inactive: bool = True,
     progress_cb: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
 ) -> Dict[str, Any]:
     """
     Same order as the auto-poller: run_fetchall then pause then run_fetchsync.
-    Use prune_inactive=False to match the background poller (no inactive mirror deletion this pass).
+    Pass prune_inactive=False to skip deleting empty/stale mirrors this pass (default True).
     """
     gap = float(getattr(cfg, "FETCH_AUTO_SEQUENCE_SLEEP_SECONDS", 1.0) or 0.0)
     sgid = int(entry.get("source_guild_id", 0) or 0)
@@ -3099,7 +3076,7 @@ async def run_fetch_auto_sequence_all_entries(
     entries: List[Dict[str, Any]],
     destination_guild,
     source_user_token: str,
-    prune_inactive: bool = False,
+    prune_inactive: bool = True,
     progress_cb: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
 ) -> Dict[str, Any]:
     """Run auto sequence for each mapping; sleeps FETCH_AUTO_SEQUENCE_SLEEP_SECONDS between entries (after each full pair)."""

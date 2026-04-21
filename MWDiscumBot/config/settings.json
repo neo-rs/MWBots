@@ -47,6 +47,9 @@
     "fetchmirror_require_status_emoji_prefix": true,
     "fetch_auto_sequence_sleep_seconds": 1,
 
+    "fetchall_auto_prune_inactive": true,
+    "fetchall_inactive_prune_days": 2,
+
     "fetchsync_only_recent_message_days": 1,
     "fetchall_only_channels_with_recent_activity_days": 1,
     "MIRROR_CHANNEL_MAP_AUTOPOST_DELAY_SECONDS": 180

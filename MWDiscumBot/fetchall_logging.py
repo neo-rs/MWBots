@@ -175,5 +175,7 @@ def log_fetchall_settings_snapshot() -> None:
         f"  fetchall_only_channels_with_recent_activity_days: {int(getattr(fc, 'FETCHALL_ONLY_CHANNELS_WITH_RECENT_ACTIVITY_DAYS', 0) or 0)}",
         f"  fetchmirror_require_status_emoji_prefix: {_yn(bool(getattr(fc, 'FETCHMIRROR_REQUIRE_STATUS_EMOJI_PREFIX', False)))}",
         f"  fetch_auto_sequence_sleep_seconds: {float(getattr(fc, 'FETCH_AUTO_SEQUENCE_SLEEP_SECONDS', 1.0) or 1.0)}",
+        f"  fetchall_auto_prune_inactive: {_yn(bool(getattr(fc, 'FETCHALL_AUTO_PRUNE_INACTIVE', True)))}",
+        f"  fetchall_inactive_prune_days: {float(getattr(fc, 'FETCHALL_INACTIVE_PRUNE_DAYS', 2.0) or 2.0)}",
     ]
     log_fetchall("\n".join(lines), event="settings_snapshot")

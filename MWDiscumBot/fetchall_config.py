@@ -52,6 +52,11 @@ FETCHMIRROR_REQUIRE_STATUS_EMOJI_PREFIX: bool = False
 # Pause between fetchall→fetchsync in auto sequence (matches manual !fetchcycle and auto-poller).
 FETCH_AUTO_SEQUENCE_SLEEP_SECONDS: float = 1.0
 
+# Auto-poller / !fetchcycle: run fetchall with prune_inactive so empty/stale mirrors are removed each pass.
+FETCHALL_AUTO_PRUNE_INACTIVE: bool = True
+# Mirrors with no messages, or whose last message is older than this many days, are eligible for inactive prune.
+FETCHALL_INACTIVE_PRUNE_DAYS: float = 2.0
+
 
 def _parse_int_set(values: Any) -> Set[int]:
     out: Set[int] = set()
@@ -123,6 +128,7 @@ def init(settings: Dict[str, Any]) -> None:
     global FETCHALL_STARTUP_CLEAR_ONLY_MIRROR_CHANNELS, FETCHALL_STARTUP_CLEAR_ALL_CHANNELS, FETCHALL_STARTUP_CLEAR_DELAY_SECONDS
     global FETCHSYNC_ONLY_RECENT_MESSAGE_DAYS, FETCHALL_ONLY_CHANNELS_WITH_RECENT_ACTIVITY_DAYS
     global FETCHMIRROR_REQUIRE_STATUS_EMOJI_PREFIX, FETCH_AUTO_SEQUENCE_SLEEP_SECONDS
+    global FETCHALL_AUTO_PRUNE_INACTIVE, FETCHALL_INACTIVE_PRUNE_DAYS
 
     DESTINATION_GUILD_IDS = _parse_int_set(settings.get("destination_guild_ids"))
     FETCHALL_DEFAULT_DEST_CATEGORY_ID = _get_int(settings, "fetchall_default_destination_category_id", 0)
@@ -167,3 +173,12 @@ def init(settings: Dict[str, Any]) -> None:
             FETCH_AUTO_SEQUENCE_SLEEP_SECONDS = 30.0
     except Exception:
         FETCH_AUTO_SEQUENCE_SLEEP_SECONDS = 1.0
+    FETCHALL_AUTO_PRUNE_INACTIVE = bool(settings.get("fetchall_auto_prune_inactive", True))
+    try:
+        FETCHALL_INACTIVE_PRUNE_DAYS = float(settings.get("fetchall_inactive_prune_days", 2.0) or 2.0)
+    except Exception:
+        FETCHALL_INACTIVE_PRUNE_DAYS = 2.0
+    if FETCHALL_INACTIVE_PRUNE_DAYS < 0.05:
+        FETCHALL_INACTIVE_PRUNE_DAYS = 0.05
+    if FETCHALL_INACTIVE_PRUNE_DAYS > 365.0:
+        FETCHALL_INACTIVE_PRUNE_DAYS = 365.0

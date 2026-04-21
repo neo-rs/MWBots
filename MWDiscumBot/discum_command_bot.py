@@ -60,6 +60,18 @@ except Exception as _e:
     run_fetch_auto_sequence_for_entry = None  # type: ignore
     run_fetch_auto_sequence_all_entries = None  # type: ignore
 
+
+def _fetchall_auto_prune_inactive_enabled() -> bool:
+    """settings.json fetchall_auto_prune_inactive — delete empty/stale mirrors on auto-poller / !fetchcycle."""
+    try:
+        fc = globals().get("_fetchall_cfg")
+        if fc is None:
+            return True
+        return bool(getattr(fc, "FETCHALL_AUTO_PRUNE_INACTIVE", True))
+    except Exception:
+        return True
+
+
 # Cache from source_channels.json (written by discumbot) for guild name only. Channel display is always <#channel_id>.
 _SOURCE_CHANNEL_FULL: Dict[int, Tuple[int, str]] = {}  # channel_id -> (guild_id, guild_name)
 _SOURCE_GUILD_NAMES: Dict[int, str] = {}  # guild_id -> guild_name
@@ -1923,7 +1935,7 @@ class DiscumCommandBot(commands.Bot):
                                     entry=entry,
                                     destination_guild=dest_guild,
                                     source_user_token=effective_user_token,
-                                    prune_inactive=False,
+                                    prune_inactive=_fetchall_auto_prune_inactive_enabled(),
                                     progress_cb=None,
                                 )
                             else:
@@ -1933,7 +1945,7 @@ class DiscumCommandBot(commands.Bot):
                                     destination_guild=dest_guild,
                                     source_user_token=effective_user_token,
                                     progress_cb=None,
-                                    prune_inactive=False,
+                                    prune_inactive=_fetchall_auto_prune_inactive_enabled(),
                                 )
                                 await asyncio.sleep(1.0)
                                 await run_fetchsync(
@@ -2035,7 +2047,7 @@ async def _cmd_fetchsync(ctx: commands.Context, source_guild_id: int = 0) -> Non
 @bot.command(name="fetchall")
 @commands.has_permissions(manage_channels=True)
 async def _cmd_fetchall(ctx: commands.Context, source_guild_id: int = 0) -> None:
-    """Create/update mirror channels from fetchall mappings. Usage: !fetchall [source_guild_id] (0 = all)."""
+    """Prune/enumerate mirrors from fetchall mappings (does not create channels — creation runs in !fetchsync / !fetchcycle). Usage: !fetchall [source_guild_id] (0 = all)."""
     if not run_fetchall or not iter_fetchall_entries:
         await ctx.send("[FETCHALL] Fetchall not loaded. Check logs and restart (or run /mwupdate then restart).")
         return
@@ -2061,7 +2073,10 @@ async def _cmd_fetchall(ctx: commands.Context, source_guild_id: int = 0) -> None
                 stage = str(payload.get("stage", "init"))
                 created = int(payload.get("created", 0) or 0)
                 existing = int(payload.get("existing", 0) or 0)
-                await msg.edit(content=f"Fetchall: {stage} | created={created} existing={existing}")
+                deferred = int(payload.get("deferred_mirror_creates", 0) or 0)
+                await msg.edit(
+                    content=f"Fetchall: {stage} | created={created} deferred→fetchsync={deferred} existing={existing}"
+                )
             except Exception:
                 pass
         ok = 0
@@ -2075,7 +2090,12 @@ async def _cmd_fetchall(ctx: commands.Context, source_guild_id: int = 0) -> None
             )
             if result.get("ok"):
                 ok += 1
-        await msg.edit(content=f"Fetchall done: {ok}/{len(entries)} mapping(s) ok.")
+        await msg.edit(
+            content=(
+                f"Fetchall done: {ok}/{len(entries)} mapping(s) ok. "
+                f"New mirrors + messages: run `!fetchsync` or `!fetchcycle` (creates each channel immediately before syncing it)."
+            )
+        )
     except Exception as e:
         await msg.edit(content=f"Fetchall error: {e}")
         raise
@@ -2084,7 +2104,7 @@ async def _cmd_fetchall(ctx: commands.Context, source_guild_id: int = 0) -> None
 @bot.command(name="fetchcycle")
 @commands.has_permissions(manage_channels=True)
 async def _cmd_fetchcycle(ctx: commands.Context, source_guild_id: int = 0) -> None:
-    """Auto-poller equivalent for one pass: fetchall (prune_inactive=false) then fetchsync per mapping."""
+    """Auto-poller equivalent for one pass: fetchall then fetchsync per mapping (prune mirrors per fetchall_auto_prune_inactive)."""
     if not run_fetch_auto_sequence_all_entries or not iter_fetchall_entries:
         await ctx.send(
             "[FETCHALL] fetchcycle not loaded. Restart the bot or run from MWDiscumBot with fetchall.py present."
@@ -2124,7 +2144,7 @@ async def _cmd_fetchcycle(ctx: commands.Context, source_guild_id: int = 0) -> No
             entries=entries,
             destination_guild=ctx.guild,
             source_user_token=user_tok,
-            prune_inactive=False,
+            prune_inactive=_fetchall_auto_prune_inactive_enabled(),
             progress_cb=_progress_async,
         )
         ts = int(batch.get("total_sent", 0) or 0)
