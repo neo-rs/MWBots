@@ -1189,23 +1189,22 @@ class MessageForwarder:
                     formatted_content = (formatted_content + "\n\n" + "\n".join(non_image_urls[:10])).strip()
             except Exception:
                 pass
-        # If the source content is *only* a URL (common for monitor bots), and the embed already contains
-        # that same URL, don't forward the duplicate top-line link. The embed remains intact.
-        try:
-            if _content_is_only_urls(formatted_content) and embeds:
-                embed_blob = " ".join(collect_embed_strings(embeds) or [])
-                embed_urls = set(extract_urls_from_text(embed_blob) or [])
-                content_urls = set(extract_urls_from_text(formatted_content or "") or [])
-                content_urls = {u for u in content_urls if u}
-                if content_urls and embed_urls and content_urls.issubset(embed_urls):
+        # Monitor bots often put a bare link in `content` and repeat it inside the embed. When content is
+        # URL-only and we are forwarding embeds, drop content entirely (embed carries the link). No
+        # "embed must contain the same URL" fallback — one rule, config-gated.
+        if bool(getattr(cfg, "STRIP_URL_ONLY_CONTENT_WHEN_EMBEDS", True)):
+            try:
+                if _content_is_only_urls(formatted_content) and bool(embeds_out):
                     formatted_content = ""
                     if trace is not None:
                         try:
-                            trace.setdefault("classifier", {}).setdefault("matches", {})["forward_drop_duplicate_url_only_content"] = True
+                            trace.setdefault("classifier", {}).setdefault("matches", {})[
+                                "forward_strip_url_only_content"
+                            ] = True
                         except Exception:
                             pass
-        except Exception:
-            pass
+            except Exception:
+                pass
 
         # Route maps apply to *destinations* (legacy MirrorWorld routing maps).
         source_group = "unknown"

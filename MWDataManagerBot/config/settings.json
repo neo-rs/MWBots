@@ -45,6 +45,7 @@
   "enable_default_fallback": true,
   "enable_raw_link_unwrap": true,
   "affiliate_skip_link_only_messages": true,
+  "strip_url_only_message_content_when_embeds": true,
   "mirrorworld_route_online": {
     "1438969997178306661": 1438969997178306661,
     "1435985494356918333": 1435985494356918333

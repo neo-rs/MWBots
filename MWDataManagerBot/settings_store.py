@@ -43,10 +43,13 @@ ENABLE_RAW_LINK_UNWRAP: bool = True
 # Affiliate: skip routing bare URL-only posts (no embeds, no attachments) to AFFILIATED_LINKS.
 AFFILIATE_SKIP_LINK_ONLY_MESSAGES: bool = True
 
+# Forwarding: if message content is URL-only and we are sending embeds, drop content (no duplicate top line).
+STRIP_URL_ONLY_CONTENT_WHEN_EMBEDS: bool = True
+
 # Local destinations
 SMARTFILTER_AMAZON_CHANNEL_ID: int = 0
 SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID: int = 0
-# Canonical "conversational deals" destination. Backward compatible with legacy AMZ_DEALS key.
+# Canonical "conversational deals" destination (`smartfilter_destinations.CONVERSATIONAL_DEALS`).
 SMARTFILTER_CONVERSATIONAL_DEALS_CHANNEL_ID: int = 0
 SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID: int = 0
 SMARTFILTER_UPCOMING_CHANNEL_ID: int = 0
@@ -170,6 +173,7 @@ def init(settings: Dict[str, Any]) -> None:
     global ENABLE_DEFAULT_FALLBACK
     global ENABLE_RAW_LINK_UNWRAP
     global AFFILIATE_SKIP_LINK_ONLY_MESSAGES
+    global STRIP_URL_ONLY_CONTENT_WHEN_EMBEDS
     global SMARTFILTER_AMAZON_CHANNEL_ID, SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID, SMARTFILTER_CONVERSATIONAL_DEALS_CHANNEL_ID, SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID
     global SMARTFILTER_UPCOMING_CHANNEL_ID, SMARTFILTER_INSTORE_LEADS_CHANNEL_ID, SMARTFILTER_MAJOR_STORES_CHANNEL_ID
     global SMARTFILTER_DISCOUNTED_STORES_CHANNEL_ID, SMARTFILTER_INSTORE_SEASONAL_CHANNEL_ID, SMARTFILTER_INSTORE_SNEAKERS_CHANNEL_ID
@@ -260,6 +264,7 @@ def init(settings: Dict[str, Any]) -> None:
 
     ENABLE_RAW_LINK_UNWRAP = bool(settings.get("enable_raw_link_unwrap", True))
     AFFILIATE_SKIP_LINK_ONLY_MESSAGES = bool(settings.get("affiliate_skip_link_only_messages", True))
+    STRIP_URL_ONLY_CONTENT_WHEN_EMBEDS = bool(settings.get("strip_url_only_message_content_when_embeds", True))
 
     dests = settings.get("smartfilter_destinations") if isinstance(settings.get("smartfilter_destinations"), dict) else {}
     SMARTFILTER_AMAZON_CHANNEL_ID = _get_int(dests, "AMAZON", 0)
