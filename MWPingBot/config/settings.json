@@ -1,8 +1,8 @@
 {
   "verbose": true,
   "mirrorworld_server_id": "1431314516364230689",
-  "cooldown_seconds": 30,
-  "dedupe_ttl_seconds": 30,
+  "cooldown_seconds": 180,
+  "dedupe_ttl_seconds": 180,
   "ping_channel_ids": [
     1434971502817706035,
     1434967990406873169,
