@@ -1694,21 +1694,9 @@ class MessageForwarder:
                 dest_traces.append(dest_trace)
                 continue
             try:
-                # PRICE_ERROR can be embed-only; if content is empty, append a real URL so the forward
-                # isn't "cut" / missing the product link.
-                content_to_send = formatted_content
-                if str(tag or "") == "PRICE_ERROR" and not (content_to_send or "").strip():
-                    try:
-                        embed_blob = " ".join(collect_embed_strings(embeds) or [])
-                        urls = extract_urls_from_text(embed_blob)
-                        picked = _first_non_discord_url(urls)
-                        if picked:
-                            content_to_send = picked
-                    except Exception:
-                        content_to_send = formatted_content
                 await self._send_to_destination(
                     dest_channel_id=dest_channel_id,
-                    content=content_to_send,
+                    content=formatted_content,
                     embeds=embeds_out,
                     attachments=attachments if use_files else None,
                     webhook_username=wh_username,
