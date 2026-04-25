@@ -682,6 +682,16 @@ def _looks_like_conversational_amazon_deal(
     ):
         return _skip("instore_style_retail_resell_where")
 
+    # Online flip-template cards: When / Retail / Resell / Quick Links (eBay...) — not CONVERSATIONAL_DEALS.
+    # These are structured arbitrage recommendations, not a "conversational deal" post.
+    if (
+        re.search(r"(?im)^\s*when\b", text_blob)
+        and re.search(r"(?im)^\s*retail\b", text_blob)
+        and re.search(r"(?im)^\s*resell\b", text_blob)
+        and (re.search(r"(?im)^\s*quick\s+links?\b", text_blob) or re.search(r"\bebay\b", text_blob, re.IGNORECASE))
+    ):
+        return _skip("flip_template_when_retail_resell")
+
     # Pointer posts (Discord jump link + tiny body) or AMZ Price Errors style snippets.
     if re.search(
         r"https?://(?:(?:www|ptb|canary)\.)?discord(?:app)?\.com/channels/\d+/\d+/\d+",
