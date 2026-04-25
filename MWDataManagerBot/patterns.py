@@ -400,6 +400,57 @@ PRICE_ERROR_PATTERN = re.compile(
     r"mispriced|glitched\s+price|stack(?:ed|ing)\s+glitch|glitch(?:ed)?)\b",
     re.IGNORECASE,
 )
+
+# URL / money / %-off signals so we do not route (or treat as "complete") monitor stubs that only
+# carry a glitch headline + "…" + footer before MESSAGE_UPDATE fills the body.
+_DEAL_SUBSTANCE_SIGNAL_PATTERN = re.compile(
+    r"(https?://|\bwww\.|\bamzn\.to\b|\ba\.co/|\bamazon\.(com|ca|co\.uk|de|fr|es|it|in|com\.mx|com\.au|co\.jp)\b|"
+    r"/dp/|\bb0[a-z0-9]{8}\b|"
+    r"[$£€]\s*\d|\d+\s*[$£€]|"
+    r"\d{1,3}(?:,\d{3})+(?:\.\d{2})?\b|\d+\.\d{2}\b|"
+    r"\d+%\s*(?:off|discount)|\b\d{2,}%\b)",
+    re.IGNORECASE,
+)
+_DEAL_SUBSTANCE_STRIP_TRAILING_MONITOR_BOILERPLATE = re.compile(r"(?is)\n\s*---+\s*\n[\s\S]*$")
+_DEAL_SUBSTANCE_STRIP_TRAILING_FROM_LINE = re.compile(r"(?i)\s*\n+\s*from\s*:[^\n]*$")
+
+
+def deal_substance_core_text(blob: str) -> str:
+    """Strip common monitor trailer (--- / From: …) for length checks only."""
+    s = (blob or "").strip()
+    if not s:
+        return ""
+    s = _DEAL_SUBSTANCE_STRIP_TRAILING_MONITOR_BOILERPLATE.sub("", s)
+    s = _DEAL_SUBSTANCE_STRIP_TRAILING_FROM_LINE.sub("", s)
+    return s.strip()
+
+
+def deal_substance_core_len(blob: str) -> int:
+    return len(re.sub(r"\s+", " ", deal_substance_core_text(blob)).strip())
+
+
+def blob_has_deal_substance_signals(blob: str) -> bool:
+    return bool(_DEAL_SUBSTANCE_SIGNAL_PATTERN.search(blob or ""))
+
+
+def passes_deal_substance_gate(blob: str, *, min_core_chars: int) -> bool:
+    """
+    True when the flattened body looks like a real lead (link / money / %-off) or is long enough
+    that a text-only glitch write-up is plausible. Used for PRICE_ERROR routing and short-embed hydration.
+    """
+    if not (blob or "").strip():
+        return False
+    if blob_has_deal_substance_signals(blob):
+        return True
+    try:
+        mc = int(min_core_chars)
+    except Exception:
+        mc = 52
+    if mc < 12:
+        mc = 12
+    return deal_substance_core_len(blob) >= mc
+
+
 CLEARANCE_PATTERN = re.compile(
     r"\b(clearance|markdown|70%\s*off|80%\s*off|90%\s*off|penny\s*deal|shelf\s*pull)\b",
     re.IGNORECASE,

@@ -99,6 +99,29 @@ def collect_embed_strings(
     return collected
 
 
+def merge_text_and_embed_strings_for_classifier(
+    text_to_check: str, embeds: Optional[List[Dict[str, Any]]]
+) -> str:
+    """
+    Single flattened blob for routing (PRICE_ERROR, clearance probes, etc.).
+
+    Callers often pre-merge `message.content` + embed strings into `text_to_check`; when that is
+    already true, do not append embed text again (avoids duplicated tokens and inflated lengths).
+    """
+    base = (text_to_check or "").strip()
+    if not embeds:
+        return base
+    try:
+        embed_j = " ".join(collect_embed_strings(embeds)).strip()
+    except Exception:
+        return base
+    if not embed_j:
+        return base
+    if embed_j in base:
+        return base
+    return (base + "\n" + embed_j).strip()
+
+
 def chunk_text(text: str, limit: int = 2000) -> List[str]:
     """Split text into Discord-safe message chunks."""
     if not text:

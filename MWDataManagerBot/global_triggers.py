@@ -8,6 +8,7 @@ from logging_utils import log_smartfilter
 from patterns import (
     AMAZON_LINK_PATTERN,
     PRICE_ERROR_PATTERN,
+    passes_deal_substance_gate,
     PROFITABLE_FLIP_PATTERN,
     is_amazon_deal_complicated_monitor_blob,
     is_amz_price_errors_monitor_blob,
@@ -15,7 +16,12 @@ from patterns import (
     should_skip_amazon_profitable_leads_monitor_blob,
     is_simple_amazon_profitable_lead_blob,
 )
-from utils import collect_embed_strings, has_product_and_marketplace_links, normalize_message
+from utils import (
+    collect_embed_strings,
+    has_product_and_marketplace_links,
+    merge_text_and_embed_strings_for_classifier,
+    normalize_message,
+)
 
 
 _GF_DYOR_PATTERN = re.compile(r"\bdyor\b", re.IGNORECASE)
@@ -205,7 +211,7 @@ def detect_global_triggers(
     Returns a list of (destination_channel_id, tag) pairs.
     """
     results: List[Tuple[int, str]] = []
-    if not text_to_check:
+    if not merge_text_and_embed_strings_for_classifier(text_to_check or "", embeds):
         return results
 
     normalized_text = normalize_message(text_to_check)
@@ -232,13 +238,15 @@ def detect_global_triggers(
     }
     # PRICE_ERROR (online-only intent; exclude instore channels)
     # Exclude rigid AMZ Price Errors monitor templates (Amazon Sold / eBay Avg / flip lines).
-    price_error_blob = ((text_to_check or "") + "\n" + (embed_text or "")).strip()
+    price_error_blob = merge_text_and_embed_strings_for_classifier(text_to_check or "", embeds)
+    _pe_min_g = int(getattr(cfg, "PRICE_ERROR_MIN_SUBSTANCE_CHARS", 52) or 52)
     if (
         cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID
         and source_is_online
         and not source_is_instore
-        and PRICE_ERROR_PATTERN.search(normalized_text)
+        and PRICE_ERROR_PATTERN.search(normalize_message(price_error_blob))
         and not is_amz_price_errors_monitor_blob(price_error_blob)
+        and passes_deal_substance_gate(price_error_blob, min_core_chars=_pe_min_g)
     ):
         results.append((cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID, "PRICE_ERROR"))
 

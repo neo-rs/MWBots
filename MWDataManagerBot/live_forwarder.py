@@ -5,6 +5,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from patterns import passes_deal_substance_gate
 from classifier import (
     detect_all_link_types,
     is_definitive_major_clearance_embed,
@@ -300,10 +301,21 @@ class MessageForwarder:
             threshold = int(getattr(cfg, "SHORT_EMBED_CHAR_THRESHOLD", 50) or 50)
             if len(content) >= max(0, threshold):
                 return False
+            try:
+                _min_body = int(getattr(cfg, "PRICE_ERROR_MIN_SUBSTANCE_CHARS", 52) or 52)
+            except Exception:
+                _min_body = 52
             for raw in embeds:
                 if not isinstance(raw, dict):
                     continue
-                if str(raw.get("description", "") or "").strip():
+                u = str(raw.get("url") or "").strip().lower()
+                if u.startswith(("http://", "https://")):
+                    return False
+                title = str(raw.get("title", "") or "").strip()
+                if title and passes_deal_substance_gate(title, min_core_chars=_min_body):
+                    return False
+                desc = str(raw.get("description", "") or "").strip()
+                if desc and passes_deal_substance_gate(desc, min_core_chars=_min_body):
                     return False
                 fields = raw.get("fields") or []
                 if isinstance(fields, list):

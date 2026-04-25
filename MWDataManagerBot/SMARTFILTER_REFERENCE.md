@@ -93,6 +93,7 @@ From `config/settings.json`:
 ## 4. Pattern reference (patterns.py)
 
 - **PRICE_ERROR_PATTERN**: `bugged|wrong price|accidental drop|underpriced|checkout working|error price|price error|price/checkout/cart/listing messed up OR messed up price/checkout/cart/listing|mispriced|glitched price|stacked glitch|glitch(ed)` (standalone “messed up” does not match).
+- **PRICE_ERROR substance gate** (`passes_deal_substance_gate` in `patterns.py`): even when `PRICE_ERROR_PATTERN` matches, routing requires either **deal signals** (http(s) URL, `/dp/`, Amazon-ish host, `B0…` ASIN, `$`/`£`/`€` + digits, `% off`, etc.) **or** enough **core** characters after stripping a trailing `---` / `From:` monitor footer. Default minimum core length: **`price_error_min_substance_chars`** in settings (module default **52**). Trace key when blocked: `price_error_substance_gate` = `blocked_thin_placeholder`.
 - **PROFITABLE_FLIP_PATTERN**: `200%|300%|400%|500%|\d{3,}%|3x|4x|5x|\d+x retail|high roi|exceptional margin|great flip|easy money|quick flip`.
 - **AMAZON_PROFITABLE_INDICATOR_PATTERN**: `avg 30|average 30|avg 365|\d+% drop|\d+% off|amazon sold|flip alert`.
 - **INSTORE**: Requires lines matching Retail:…, Resell:…, Where:… (or Location:…). SEASONAL, SNEAKERS, CARDS, THEATRE, MAJOR_STORES, DISCOUNTED_STORES use their respective pattern lists; INSTORE_LEADS is the catch-all instore.
