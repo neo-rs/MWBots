@@ -9,9 +9,10 @@ from logging_utils import log_smartfilter
 from patterns import (
     ALL_STORE_PATTERN,
     AMAZON_ASIN_PATTERN,
-    AMAZON_CONVERSATIONAL_DEAL_PATTERN,
+    CONVERSATIONAL_DEALS_AMAZON_PHRASE_PATTERN,
+    CONVERSATIONAL_DEALS_STRICT_SIGNAL_PATTERN,
     AMAZON_LINK_PATTERN,
-    RETAIL_CONVERSATIONAL_DEAL_PATTERN,
+    CONVERSATIONAL_DEALS_RETAIL_PATTERN,
     AMAZON_PROFITABLE_INDICATOR_PATTERN,
     is_amazon_deal_complicated_monitor_blob,
     is_amz_price_errors_monitor_blob,
@@ -695,8 +696,8 @@ def _looks_like_conversational_amazon_deal(
     if is_ringinthedeals_flipfluence_deal_blob(text_blob):
         return _skip("ringinthedeals_flipfluence_template")
 
-    amazon_conv = bool(AMAZON_CONVERSATIONAL_DEAL_PATTERN.search(text_blob))
-    retail_conv = bool(RETAIL_CONVERSATIONAL_DEAL_PATTERN.search(text_blob))
+    amazon_conv = bool(CONVERSATIONAL_DEALS_AMAZON_PHRASE_PATTERN.search(text_blob))
+    retail_conv = bool(CONVERSATIONAL_DEALS_RETAIL_PATTERN.search(text_blob))
     if not amazon_conv and not retail_conv:
         return _skip("no_conversational_phrase")
 
@@ -717,6 +718,9 @@ def _looks_like_conversational_amazon_deal(
 
     # Amazon conversational phrases: avoid Woot / “comps” where another store is primary.
     if amazon_conv:
+        # Require a strict deal signal; weak phrases like "shipped and sold by amazon" are too noisy.
+        if not CONVERSATIONAL_DEALS_STRICT_SIGNAL_PATTERN.search(text_blob or ""):
+            return _skip("missing_strict_conversational_signal")
         if not _is_amazon_primary(text_blob):
             return _skip("amazon_not_primary_store")
         return True

@@ -394,7 +394,10 @@ THEATRE_CONTEXT_PATTERN = re.compile(
 # Global triggers (FULL_SEND removed; PRICE_ERROR is the canonical glitch/price-error trigger)
 PRICE_ERROR_PATTERN = re.compile(
     r"\b(bugged|wrong\s+price|accidental\s+drop|underpriced|checkout\s+working|error\s+price|"
-    r"price\s+error|messed\s+up|mispriced|glitched\s+price|stack(?:ed|ing)\s+glitch|glitch(?:ed)?)\b",
+    r"price\s+error|"
+    # "messed up" alone is too noisy (process/signup/admin text). Require a commerce/price adjacency.
+    r"(?:price|checkout|cart|listing|sku)\s+messed\s+up|messed\s+up\s+(?:price|checkout|cart|listing)|"
+    r"mispriced|glitched\s+price|stack(?:ed|ing)\s+glitch|glitch(?:ed)?)\b",
     re.IGNORECASE,
 )
 CLEARANCE_PATTERN = re.compile(
@@ -578,16 +581,16 @@ def is_amz_deals_affiliate_bridge_blob(text: str) -> bool:
         or re.search(r"\bB0[A-Z0-9]{8}\b", raw, re.IGNORECASE)
     )
     if "flipfluence" in sl and (has_amazonish or _AMZ_COMPLICATED_NEW_DEAL_FOUND_PATTERN.search(sl)):
-        return True
+        return bool(CONVERSATIONAL_DEALS_STRICT_SIGNAL_PATTERN.search(raw))
     if "pricedoffers.com" in sl and (
         "$" in raw
         or has_amazonish
         or "deal soldier" in sl
         or re.search(r"\bclip\b", sl)
     ):
-        return True
+        return bool(CONVERSATIONAL_DEALS_STRICT_SIGNAL_PATTERN.search(raw))
     if re.search(r"miablogs\.us/[^\s]*paid-ad", sl, re.IGNORECASE) and re.search(r"\bB0[A-Z0-9]{8}\b", raw, re.IGNORECASE):
-        return True
+        return bool(CONVERSATIONAL_DEALS_STRICT_SIGNAL_PATTERN.search(raw))
     # RingInTheDeals / FLIPFLUENCE templated deal blasts are high-volume feed posts; they should NOT
     # force routing into the conversational deals bucket.
     return False
@@ -671,13 +674,9 @@ def is_simple_amazon_profitable_lead_blob(text: str) -> bool:
     return any(re.search(p, sl) for p in simple_signals)
 
 
-# Conversational Amazon deal templates (often missing explicit amazon.com/amzn.to links).
-# Based on your historical `logs/Datalogs/Amazon.json`, common phrases include:
-# - "Use Promo Code"
-# - "Free at checkout. Clip the coupon."
-# - "Buy on Amazon"
-# - "shipped and sold by amazon"
-AMAZON_CONVERSATIONAL_DEAL_PATTERN = re.compile(
+# Conversational deal templates (Amazon-focused phrases).
+# NOTE: The bucket is `CONVERSATIONAL_DEALS` (not Amazon-only), but these phrases are Amazon-centric.
+CONVERSATIONAL_DEALS_AMAZON_PHRASE_PATTERN = re.compile(
     r"\b("
     r"use\s+code\s+at\s+checkout"
     r"|use\s+promo\s+code"
@@ -701,9 +700,28 @@ AMAZON_CONVERSATIONAL_DEAL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Chatty grocery / delivery / in-app price glitches (AMZ_DEALS bucket in settings — legacy name).
+# Strict subset used to keep CONVERSATIONAL_DEALS tight.
+# Excludes weak phrases that appear in product-page embeds and monitor cards (e.g. shipped/sold, buy on Amazon).
+CONVERSATIONAL_DEALS_STRICT_SIGNAL_PATTERN = re.compile(
+    r"\b("
+    r"use\s+code\s+at\s+checkout"
+    r"|use\s+promo\s+code"
+    r"|apply\s+promo\s*code"
+    r"|promo\s+stack"
+    r"|with\s+code\b"
+    r"|subscribe\s*&\s*save"
+    r"|must\s+subscribe\s*&\s*save"
+    r"|clip\s+(?:the\s+)?\d+\s*%\s*off\s+coupon"
+    r"|clip\s+(?:the\s+)?coupon"
+    r"|clip\s+\$\s*[\d,]+(?:\.\d{2})?\s+coupon"
+    r"|free\s+at\s+checkout"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Chatty grocery / delivery / in-app price glitches (CONVERSATIONAL_DEALS bucket).
 # Matches templates that often have no product URL in the embed body.
-RETAIL_CONVERSATIONAL_DEAL_PATTERN = re.compile(
+CONVERSATIONAL_DEALS_RETAIL_PATTERN = re.compile(
     r"\b("
     r"glitch(?:ing|ed)?\s+on\s+instacart"
     r"|ringing\s+up\s+for"

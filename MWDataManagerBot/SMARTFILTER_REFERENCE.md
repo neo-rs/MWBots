@@ -92,7 +92,7 @@ From `config/settings.json`:
 
 ## 4. Pattern reference (patterns.py)
 
-- **PRICE_ERROR_PATTERN**: `bugged|wrong price|accidental drop|underpriced|checkout working|error price|price error|messed up|mispriced|glitched price|stacked glitch|glitch(ed)`.
+- **PRICE_ERROR_PATTERN**: `bugged|wrong price|accidental drop|underpriced|checkout working|error price|price error|price/checkout/cart/listing messed up OR messed up price/checkout/cart/listing|mispriced|glitched price|stacked glitch|glitch(ed)` (standalone “messed up” does not match).
 - **PROFITABLE_FLIP_PATTERN**: `200%|300%|400%|500%|\d{3,}%|3x|4x|5x|\d+x retail|high roi|exceptional margin|great flip|easy money|quick flip`.
 - **AMAZON_PROFITABLE_INDICATOR_PATTERN**: `avg 30|average 30|avg 365|\d+% drop|\d+% off|amazon sold|flip alert`.
 - **INSTORE**: Requires lines matching Retail:…, Resell:…, Where:… (or Location:…). SEASONAL, SNEAKERS, CARDS, THEATRE, MAJOR_STORES, DISCOUNTED_STORES use their respective pattern lists; INSTORE_LEADS is the catch-all instore.
