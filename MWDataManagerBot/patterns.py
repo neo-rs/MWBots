@@ -412,7 +412,14 @@ _DEAL_SUBSTANCE_SIGNAL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _DEAL_SUBSTANCE_STRIP_TRAILING_MONITOR_BOILERPLATE = re.compile(r"(?is)\n\s*---+\s*\n[\s\S]*$")
-_DEAL_SUBSTANCE_STRIP_TRAILING_FROM_LINE = re.compile(r"(?i)\s*\n+\s*from\s*:[^\n]*$")
+# Footer line is often "... From: Bot | By: Bot" (ellipsis before From) — not "\nfrom:" flush.
+_DEAL_SUBSTANCE_STRIP_TRAILING_BYLINE = re.compile(
+    r"(?is)\n[^\n]*\bfrom\s*:\s*.+\|\s*by\s*:[^\n]*\s*$",
+)
+# Same footer squeezed onto the headline line: "Title ... From: x | By: y"
+_DEAL_SUBSTANCE_STRIP_INLINE_BYLINE = re.compile(
+    r"(?i)\s+\.{1,}\s*from\s*:\s*.+\|\s*by\s*:.+$",
+)
 
 
 def deal_substance_core_text(blob: str) -> str:
@@ -421,7 +428,8 @@ def deal_substance_core_text(blob: str) -> str:
     if not s:
         return ""
     s = _DEAL_SUBSTANCE_STRIP_TRAILING_MONITOR_BOILERPLATE.sub("", s)
-    s = _DEAL_SUBSTANCE_STRIP_TRAILING_FROM_LINE.sub("", s)
+    s = _DEAL_SUBSTANCE_STRIP_TRAILING_BYLINE.sub("", s)
+    s = _DEAL_SUBSTANCE_STRIP_INLINE_BYLINE.sub("", s)
     return s.strip()
 
 
@@ -515,6 +523,10 @@ _RINGINTHEDEALS_HOST_PATTERN = re.compile(r"ringinthedeals\.com", re.IGNORECASE)
 # FLIPFLUENCE-style: "Take 67% Off Product Name!"
 _TAKE_PCT_OFF_HEADLINE_PATTERN = re.compile(r"take\s+\d{1,3}\s*%\s*off\b", re.IGNORECASE)
 _REG_PAREN_PRICE_PATTERN = re.compile(r"\(\s*Reg\s*\$", re.IGNORECASE)
+_FLIPFLUENCE_REROUTER_BYLINE_PATTERN = re.compile(
+    r"from:\s*flipfluence\s*\|\s*by:\s*rerouter\s*\|\s*flipfluence\b",
+    re.IGNORECASE,
+)
 
 
 def is_ringinthedeals_flipfluence_deal_blob(text: str) -> bool:
@@ -535,6 +547,27 @@ def is_ringinthedeals_flipfluence_deal_blob(text: str) -> bool:
     if "/deal/" in sl and (_REG_PAREN_PRICE_PATTERN.search(raw) or re.search(r"\$\d", raw)):
         return True
     return False
+
+
+def is_flipfluence_rerouter_product_card_blob(text: str) -> bool:
+    """
+    FlipFluence "product card" posts (often Amazon DP links + long product description + rerouter byline).
+    These are high-volume informational cards and should not qualify as CONVERSATIONAL_DEALS.
+    """
+    if not text or not str(text).strip():
+        return False
+    raw = str(text)
+    sl = raw.lower()
+    if "flipfluence" not in sl:
+        return False
+    if not _FLIPFLUENCE_REROUTER_BYLINE_PATTERN.search(sl):
+        return False
+    # Typical shape includes at least one direct product URL (often Amazon) + long description.
+    if "http" not in sl:
+        return True
+    if "/dp/" in sl or "amazon." in sl or "amzn.to" in sl or "a.co/" in sl:
+        return True
+    return True
 
 
 def is_divine_helper_price_monitor_blob(text: str) -> bool:

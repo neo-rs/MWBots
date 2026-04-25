@@ -20,6 +20,7 @@ _WEBHOOK_MAP_PATH = _CONFIG_DIR / "channel_map.json"
 
 _LOCK = threading.RLock()
 _CACHE: Dict[int, str] = {}
+_WEBHOOK_TARGET_CHANNEL_CACHE: Dict[str, int] = {}
 
 def _invalidate_webhook_for_channel(channel_id: int) -> None:
     """Remove a cached/stored webhook URL for a destination channel (e.g. if Discord says Unknown Webhook)."""
@@ -80,6 +81,61 @@ def _save_webhook_map(m: Dict[int, str]) -> None:
 def _is_webhook_url(url: str) -> bool:
     u = str(url or "").strip()
     return "/webhooks/" in u and len(u) > 20
+
+
+def _parse_webhook_id(url: str) -> int:
+    """
+    Extract webhook id from a Discord webhook URL.
+    Returns 0 on failure.
+    """
+    raw = str(url or "").strip()
+    if not raw:
+        return 0
+    try:
+        p = urlparse(raw)
+        parts = [x for x in (p.path or "").split("/") if x]
+        # /api/webhooks/{id}/{token}
+        if len(parts) >= 3 and parts[-3] == "webhooks":
+            return int(parts[-2])
+        # sometimes /webhooks/{id}/{token}
+        if len(parts) >= 2 and parts[-2].isdigit():
+            return int(parts[-2])
+    except Exception:
+        return 0
+    return 0
+
+
+async def _get_webhook_target_channel_id(*, session, url: str) -> int:
+    """
+    Resolve webhook -> channel_id by calling the webhook URL (no bot token required).
+    Cached to avoid per-message API calls.
+    """
+    u = str(url or "").strip()
+    if not _is_webhook_url(u):
+        return 0
+    try:
+        cached = _WEBHOOK_TARGET_CHANNEL_CACHE.get(u, 0)
+    except Exception:
+        cached = 0
+    if int(cached or 0) > 0:
+        return int(cached)
+    try:
+        async with session.get(u, timeout=12) as resp:
+            if int(getattr(resp, "status", 0) or 0) != 200:
+                return 0
+            data = await resp.json()
+    except Exception:
+        return 0
+    try:
+        ch = int(data.get("channel_id") or 0)
+    except Exception:
+        ch = 0
+    if ch > 0:
+        try:
+            _WEBHOOK_TARGET_CHANNEL_CACHE[u] = ch
+        except Exception:
+            pass
+    return ch
 
 
 async def _get_or_create_webhook_url(*, dest_channel, reason: str, force: bool = False, webhook_name: str = "MWDataManagerBot") -> str:
@@ -208,49 +264,67 @@ async def send_via_webhook_or_bot(
         import aiohttp  # type: ignore
 
         async with aiohttp.ClientSession() as session:
-            wh = discord.Webhook.from_url(url, session=session)  # type: ignore[arg-type]
-            files: List[Any] = []
-            skipped: List[str] = []
-            if use_files and attachments and max_files > 0 and max_bytes > 0:
-                files, skipped = await _download_attachment_files(
-                    session=session, attachments=attachments, max_files=max_files, max_bytes=max_bytes
-                )
-            final_content = str(content or "")
-            if skipped and len(final_content) < 1900:
-                extra = "\n".join(skipped[:5]).strip()
-                if extra:
-                    final_content = (final_content + ("\n" if final_content else "") + extra)[:1950]
-
-            kwargs: Dict[str, Any] = {
-                "content": final_content,
-                "embeds": list(embeds or [])[:10],
-                "allowed_mentions": allowed_mentions,
-            }
-            if uname:
-                kwargs["username"] = uname
-            if av:
-                kwargs["avatar_url"] = av
-            if files:
-                kwargs["files"] = files
-            # wait=False keeps it fast (no message id needed).
+            # Safety: ensure the webhook URL actually belongs to the destination channel id.
+            # If the channel_map is miswired, a "send to AMAZON" can silently land in CONVERSATIONAL_DEALS.
             try:
-                await wh.send(wait=False, **kwargs)
-                return
-            except discord.NotFound as e:
-                # 10015: Unknown Webhook (deleted/invalid). Self-heal by recreating once.
-                code = getattr(e, "code", None)
-                if int(code or 0) == 10015 or "Unknown Webhook" in str(e):
-                    if cid > 0:
-                        _invalidate_webhook_for_channel(cid)
-                    url2 = await _get_or_create_webhook_url(dest_channel=dest_channel, reason=reason or "recreate webhook")
-                    if url2:
-                        try:
-                            wh2 = discord.Webhook.from_url(url2, session=session)  # type: ignore[arg-type]
-                            await wh2.send(wait=False, **kwargs)
-                            return
-                        except Exception:
-                            pass
-                raise
+                actual_target = await _get_webhook_target_channel_id(session=session, url=url)
+            except Exception:
+                actual_target = 0
+            if cid > 0 and actual_target > 0 and int(actual_target) != int(cid):
+                try:
+                    wh_id = _parse_webhook_id(url)
+                    log_warn(
+                        f"[WEBHOOK] channel mismatch: intended_channel_id={cid} actual_channel_id={actual_target} webhook_id={wh_id or 'unknown'}; falling back to bot send"
+                    )
+                except Exception:
+                    pass
+                url = ""
+            if url:
+                wh = discord.Webhook.from_url(url, session=session)  # type: ignore[arg-type]
+                files: List[Any] = []
+                skipped: List[str] = []
+                if use_files and attachments and max_files > 0 and max_bytes > 0:
+                    files, skipped = await _download_attachment_files(
+                        session=session, attachments=attachments, max_files=max_files, max_bytes=max_bytes
+                    )
+                final_content = str(content or "")
+                if skipped and len(final_content) < 1900:
+                    extra = "\n".join(skipped[:5]).strip()
+                    if extra:
+                        final_content = (final_content + ("\n" if final_content else "") + extra)[:1950]
+
+                kwargs: Dict[str, Any] = {
+                    "content": final_content,
+                    "embeds": list(embeds or [])[:10],
+                    "allowed_mentions": allowed_mentions,
+                }
+                if uname:
+                    kwargs["username"] = uname
+                if av:
+                    kwargs["avatar_url"] = av
+                if files:
+                    kwargs["files"] = files
+                # wait=False keeps it fast (no message id needed).
+                try:
+                    await wh.send(wait=False, **kwargs)
+                    return
+                except discord.NotFound as e:
+                    # 10015: Unknown Webhook (deleted/invalid). Self-heal by recreating once.
+                    code = getattr(e, "code", None)
+                    if int(code or 0) == 10015 or "Unknown Webhook" in str(e):
+                        if cid > 0:
+                            _invalidate_webhook_for_channel(cid)
+                        url2 = await _get_or_create_webhook_url(
+                            dest_channel=dest_channel, reason=reason or "recreate webhook"
+                        )
+                        if url2:
+                            try:
+                                wh2 = discord.Webhook.from_url(url2, session=session)  # type: ignore[arg-type]
+                                await wh2.send(wait=False, **kwargs)
+                                return
+                            except Exception:
+                                pass
+                    raise
 
     # Fallback: normal bot send
     files2: List[Any] = []

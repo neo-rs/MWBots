@@ -19,6 +19,7 @@ from patterns import (
     is_divine_helper_price_monitor_blob,
     is_flipflip_restock_monitor_blob,
     is_ringinthedeals_flipfluence_deal_blob,
+    is_flipfluence_rerouter_product_card_blob,
     is_mention_format_noise_blob,
     is_amz_deals_affiliate_bridge_blob,
     allow_amz_deals_despite_complicated_monitor,
@@ -657,6 +658,10 @@ def _looks_like_conversational_amazon_deal(
         return _skip("grab_it_here_template")
     if _NEW_DEAL_FOUND_PATTERN.search(text_blob) and not allow_amz_deals_despite_complicated_monitor(text_blob):
         return _skip("new_deal_found_banner")
+    # FlipFluence rerouter product cards are high-volume embeds that look like "normal product copy",
+    # not a conversational deal post.
+    if is_flipfluence_rerouter_product_card_blob(text_blob):
+        return _skip("flipfluence_rerouter_product_card")
     # These templates almost always include at least one explicit price token.
     if "$" not in text_blob:
         return _skip("no_dollar_sign")
