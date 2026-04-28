@@ -72,6 +72,7 @@ async def minimal_rephrase_keep_urls(
         "Rules:\n"
         "- Rewrite the message so it reads cleaner, sharper, and easier to post.\n"
         "- You may restructure the message for better flow; do not only swap words.\n"
+        "- Do NOT return the input unchanged. If the input is already good, still improve formatting and clarity (tighter wording, better line breaks).\n"
         "- Keep all product names, brands, prices, codes, discounts, warranty details, and store comparisons accurate.\n"
         "- Keep every URL exactly the same: same characters, same order.\n"
         "- If the same URL appears more than once, remove duplicate copies when it is clearly the same link repeated.\n"
