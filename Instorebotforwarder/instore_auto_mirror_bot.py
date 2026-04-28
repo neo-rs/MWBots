@@ -2605,10 +2605,24 @@ class InstorebotForwarder:
                 from MWBots.Instorebotforwarder.automatedParaphrase.gemini_paraphraser import (  # type: ignore
                     minimal_rephrase_keep_urls,
                 )
+                _import_path = "MWBots.Instorebotforwarder.automatedParaphrase.gemini_paraphraser"
             except Exception:
                 from automatedParaphrase.gemini_paraphraser import (  # type: ignore
                     minimal_rephrase_keep_urls,
                 )
+                _import_path = "automatedParaphrase.gemini_paraphraser"
+
+            # One-time, high-signal proof in journal that runtime imported the paraphraser module.
+            try:
+                if not getattr(self, "_gemini_import_proof_logged", False):
+                    import importlib
+
+                    m = importlib.import_module(str(getattr(minimal_rephrase_keep_urls, "__module__", "") or ""))
+                    m_file = str(getattr(m, "__file__", "") or "")
+                    log.info("[GEMINI_IMPORT] import_path=%s paraphraser_file=%s", _import_path, m_file)
+                    setattr(self, "_gemini_import_proof_logged", True)
+            except Exception:
+                pass
 
             _log_flow("GEMINI", kind=kind, model=self._gemini_model(), temperature=f"{temp:.4f}", override=("1" if temperature_override is not None else "0"))
             out = await minimal_rephrase_keep_urls(
@@ -2623,6 +2637,14 @@ class InstorebotForwarder:
             out = str(out or "").strip()
             if not out:
                 out = raw
+
+            # One-time, high-signal proof that the Gemini API call returned usable output.
+            try:
+                if not getattr(self, "_gemini_api_ok_logged", False):
+                    log.info("[GEMINI_OK] kind=%s model=%s temperature=%s", str(kind), str(self._gemini_model()), f"{temp:.4f}")
+                    setattr(self, "_gemini_api_ok_logged", True)
+            except Exception:
+                pass
             self._openai_cache[cache_key] = out
             return out
         except Exception:
