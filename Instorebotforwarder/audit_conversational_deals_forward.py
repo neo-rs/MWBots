@@ -14,12 +14,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Tuple
 
-import json
 from urllib.request import Request, urlopen
 
 from conversational_deals_forwarder import (  # type: ignore
@@ -102,16 +102,61 @@ def _discord_rest_post_json(url: str, *, headers: Dict[str, str], payload: Dict[
     return data if isinstance(data, dict) else {}
 
 
+def _probe_cache_path() -> Path:
+    return Path(__file__).resolve().parent / ".gemini_probe_cache.json"
+
+
+def _load_probe_cache() -> Dict[str, Any]:
+    p = _probe_cache_path()
+    try:
+        o = json.loads(p.read_text(encoding="utf-8"))
+        return o if isinstance(o, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_probe_cache(o: Dict[str, Any]) -> None:
+    try:
+        _probe_cache_path().write_text(json.dumps(o, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _probe_gemini_api(cfg: Dict[str, Any]) -> Dict[str, str]:
+    """
+    Direct Gemini API probe (one real request).
+    Returns: {status, detail}
+    """
+    key = str((cfg or {}).get("gemini_api_key") or "").strip()
+    model = str((cfg or {}).get("gemini_model") or "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
+    if not key:
+        return {"status": "no_key", "detail": "missing gemini_api_key"}
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": "Reply with exactly: OK"}]}],
+        "generationConfig": {"temperature": 0.0, "maxOutputTokens": 16, "topP": 1.0},
+    }
+    body = json.dumps(payload).encode("utf-8")
+    req = Request(url, data=body, method="POST", headers={"Content-Type": "application/json", "User-Agent": "mirror-world-instoreaudit/1.0"})
+    try:
+        with urlopen(req, timeout=20) as resp:
+            status = str(getattr(resp, "status", 200))
+            txt = resp.read().decode("utf-8", errors="replace")
+        return {"status": status, "detail": (txt.strip()[:140] if txt else "")}
+    except Exception as e:
+        # urllib's HTTPError has .code; keep it concise.
+        code = getattr(e, "code", None)
+        status = str(code) if code is not None else "error"
+        return {"status": status, "detail": f"{type(e).__name__}: {str(e)[:140]}"}
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     _configure_stdout()
     ap = argparse.ArgumentParser()
     ap.add_argument("--link", default="", help="Discord message link")
     ap.add_argument("--no-gemini", action="store_true", help="Skip Gemini rewrite")
-    ap.add_argument(
-        "--gemini-check",
-        action="store_true",
-        help="Run Gemini API health check (can trigger rate limits).",
-    )
+    ap.add_argument("--probe-api", action="store_true", help="Probe Gemini API now (one real request; uses cooldown cache).")
     ap.add_argument("--send-preview", action="store_true", help="Offer to send preview to destination")
     ap.add_argument("--send-now", action="store_true", help="Send preview without prompt (dangerous)")
     args = ap.parse_args(argv)
@@ -135,12 +180,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     _print_safe("=" * 78)
 
     gs = gemini_status(cfg)
-    _print_safe("0) GEMINI STATUS")
+    _print_safe("0) GEMINI CONFIG (not an API OK)")
     _print_safe(
         f"   enabled={gs.get('enabled')} api_key={gs.get('api_key')} model={gs.get('model')} temp={gs.get('temperature')}"
     )
-    _print_safe("   Note: --gemini-check does a real API call (can rate limit).")
+    _print_safe("   Tip: use --probe-api to do one real API request (cooldown cached).")
     _print_safe("")
+
+    if args.probe_api:
+        cache = _load_probe_cache()
+        now_s = int(__import__("time").time())
+        cooldown_s = 120
+        last_ts = int(cache.get("ts") or 0) if isinstance(cache.get("ts"), (int, float, str)) else 0
+        last_status = str(cache.get("status") or "").strip()
+        last_detail = str(cache.get("detail") or "").strip()
+        use_cache = bool(last_ts and (now_s - last_ts) < cooldown_s and last_status)
+        if use_cache:
+            st = {"status": last_status, "detail": last_detail}
+            src = "cache"
+        else:
+            st = _probe_gemini_api(cfg)
+            src = "live"
+            _save_probe_cache({"ts": now_s, "status": st.get("status"), "detail": st.get("detail")})
+        _print_safe("0.1) GEMINI API PROBE")
+        _print_safe(f"   source={src} status={st.get('status')} detail={st.get('detail')}")
+        _print_safe("")
     _print_safe("1) MESSAGE INFO")
     _print_safe(f"   link={link}")
     _print_safe(f"   guild_id={guild_id or ''}")
