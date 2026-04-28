@@ -34,14 +34,26 @@ from discord import app_commands
 from discord.ext import commands
 
 # Ensure repo root is importable when executed as a script or imported as a module.
-# This file lives at: <repo_root>/MWBots/Instorebotforwarder/instore_auto_mirror_bot.py
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+# This bot runs in two layouts:
+# - MWBots repo: <repo_root>/MWBots/Instorebotforwarder/instore_auto_mirror_bot.py
+# - Oracle live tree: <repo_root>/Instorebotforwarder/instore_auto_mirror_bot.py
+_HERE = Path(__file__).resolve()
+_PARENT = _HERE.parent
+_BOT_DIR = _PARENT
+if str(_BOT_DIR) not in sys.path:
+    sys.path.insert(0, str(_BOT_DIR))
+_REPO_ROOT = _PARENT.parent.parent if _PARENT.parent.name.lower() == "mwbots" else _PARENT.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from mirror_world_config import load_config_with_secrets, is_placeholder_secret, mask_secret
 from RSForwarder import affiliate_rewriter
-from MWBots.Instorebotforwarder.retail_product_link_listener import maybe_reply_retail_product_links
+try:
+    # Oracle live tree (module sits alongside this file).
+    from retail_product_link_listener import maybe_reply_retail_product_links  # type: ignore
+except Exception:
+    # MWBots repo layout / package import.
+    from Instorebotforwarder.retail_product_link_listener import maybe_reply_retail_product_links  # type: ignore
 
 
 class ExplainableLog:
