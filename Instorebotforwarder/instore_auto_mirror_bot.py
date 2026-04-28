@@ -33,14 +33,15 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-# Ensure repo root is importable when executed as a script.
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+# Ensure repo root is importable when executed as a script or imported as a module.
+# This file lives at: <repo_root>/MWBots/Instorebotforwarder/instore_auto_mirror_bot.py
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from mirror_world_config import load_config_with_secrets, is_placeholder_secret, mask_secret
 from RSForwarder import affiliate_rewriter
-from retail_product_link_listener import maybe_reply_retail_product_links
+from MWBots.Instorebotforwarder.retail_product_link_listener import maybe_reply_retail_product_links
 
 
 class ExplainableLog:
