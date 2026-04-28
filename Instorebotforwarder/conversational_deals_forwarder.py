@@ -5,13 +5,20 @@ from typing import Any, Dict, Optional, Tuple
 
 import discord
 
-from automatedParaphrase.gemini_paraphraser import minimal_rephrase_keep_urls  # type: ignore
+# Must work in both layouts:
+# - Imported as a package: `Instorebotforwarder.conversational_deals_forwarder`
+# - Executed/used from the bot folder on Oracle where `Instorebotforwarder/` is on sys.path
+try:
+    from Instorebotforwarder.automatedParaphrase.gemini_paraphraser import minimal_rephrase_keep_urls  # type: ignore
+except Exception:
+    from automatedParaphrase.gemini_paraphraser import minimal_rephrase_keep_urls  # type: ignore
 
 SOURCE_CHANNEL_ID = 1438970053352751215
 DEST_CHANNEL_ID = 1484473267031904287
 
 
 _RE_URL = re.compile(r"(?i)\bhttps?://\S+")
+_RE_DISCORD_CDN_ATTACHMENT = re.compile(r"(?i)\bhttps?://cdn\.discordapp\.com/attachments/\S+")
 
 
 def gemini_status(cfg: Dict[str, Any]) -> Dict[str, str]:
@@ -41,25 +48,27 @@ def simple_message_block_from_discord_message(message: discord.Message) -> str:
     content = (message.content or "").strip()
     if content:
         parts.append(content)
-    try:
-        for e in (message.embeds or []):
-            eparts: list[str] = []
-            t = (getattr(e, "title", None) or "").strip()
-            if t:
-                eparts.append(t)
-            d = (getattr(e, "description", None) or "").strip()
-            if d:
-                eparts.append(d)
-            for f in (getattr(e, "fields", None) or []):
-                fn = (getattr(f, "name", None) or "").strip()
-                fv = (getattr(f, "value", None) or "").strip()
-                row = "\n".join([x for x in (fn, fv) if x]).strip()
-                if row:
-                    eparts.append(row)
-            if eparts:
-                parts.append("\n\n".join(eparts))
-    except Exception:
-        pass
+    # Only use embed text when the message has no plain content.
+    if not content:
+        try:
+            for e in (message.embeds or []):
+                eparts: list[str] = []
+                t = (getattr(e, "title", None) or "").strip()
+                if t:
+                    eparts.append(t)
+                d = (getattr(e, "description", None) or "").strip()
+                if d:
+                    eparts.append(d)
+                for f in (getattr(e, "fields", None) or []):
+                    fn = (getattr(f, "name", None) or "").strip()
+                    fv = (getattr(f, "value", None) or "").strip()
+                    row = "\n".join([x for x in (fn, fv) if x]).strip()
+                    if row:
+                        eparts.append(row)
+                if eparts:
+                    parts.append("\n\n".join(eparts))
+        except Exception:
+            pass
     try:
         for att in (message.attachments or []):
             u = str(getattr(att, "url", "") or "").strip()
@@ -67,7 +76,11 @@ def simple_message_block_from_discord_message(message: discord.Message) -> str:
                 parts.append(u)
     except Exception:
         pass
-    return "\n".join([x for x in parts if str(x).strip()]).strip()
+    block = "\n".join([x for x in parts if str(x).strip()]).strip()
+    # Do not include raw attachment CDN URLs in the text body (image is carried via embed image).
+    block = _RE_DISCORD_CDN_ATTACHMENT.sub("", block)
+    block = re.sub(r"\n{3,}", "\n\n", block).strip()
+    return block
 
 
 def media_url_from_discord_message(message: discord.Message) -> str:
@@ -102,32 +115,37 @@ def simple_message_block_from_rest(rest_msg: Dict[str, Any]) -> str:
     content = str(rest_msg.get("content") or "").strip()
     if content:
         parts.append(content)
-    for e in (rest_msg.get("embeds") or []):
-        if not isinstance(e, dict):
-            continue
-        t = str(e.get("title") or "").strip()
-        d = str(e.get("description") or "").strip()
-        if t:
-            parts.append(t)
-        if d:
-            parts.append(d)
-        fields = e.get("fields") or []
-        if isinstance(fields, list):
-            for f in fields:
-                if not isinstance(f, dict):
-                    continue
-                fn = str(f.get("name") or "").strip()
-                fv = str(f.get("value") or "").strip()
-                row = "\n".join([x for x in (fn, fv) if x]).strip()
-                if row:
-                    parts.append(row)
+    # Only use embed text when the message has no plain content.
+    if not content:
+        for e in (rest_msg.get("embeds") or []):
+            if not isinstance(e, dict):
+                continue
+            t = str(e.get("title") or "").strip()
+            d = str(e.get("description") or "").strip()
+            if t:
+                parts.append(t)
+            if d:
+                parts.append(d)
+            fields = e.get("fields") or []
+            if isinstance(fields, list):
+                for f in fields:
+                    if not isinstance(f, dict):
+                        continue
+                    fn = str(f.get("name") or "").strip()
+                    fv = str(f.get("value") or "").strip()
+                    row = "\n".join([x for x in (fn, fv) if x]).strip()
+                    if row:
+                        parts.append(row)
     for a in (rest_msg.get("attachments") or []):
         if not isinstance(a, dict):
             continue
         u = str(a.get("url") or "").strip()
         if u:
             parts.append(u)
-    return "\n".join([x for x in parts if str(x).strip()]).strip()
+    block = "\n".join([x for x in parts if str(x).strip()]).strip()
+    block = _RE_DISCORD_CDN_ATTACHMENT.sub("", block)
+    block = re.sub(r"\n{3,}", "\n\n", block).strip()
+    return block
 
 
 def media_url_from_rest(rest_msg: Dict[str, Any]) -> str:

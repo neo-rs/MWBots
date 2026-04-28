@@ -155,15 +155,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     desc = src_block
     if not args.no_gemini:
+        before = desc
         desc = asyncio.run(rewrite_description(cfg, desc, no_gemini=False))
         desc = str(desc or "").strip() or src_block
+        changed = ("yes" if (str(desc).strip() != str(before).strip()) else "no")
+        _print_safe("3) GEMINI RESULT")
+        _print_safe(f"   changed={changed}")
+        _print_safe("")
     embed_url = first_url_in_text(desc)
     media_url = media_url_from_rest(data)
 
-    _print_safe("3) OUTBOUND PREVIEW (embed.description)")
+    _print_safe("4) OUTBOUND PREVIEW (embed.description)")
     _print_safe(desc)
     _print_safe("")
-    _print_safe("4) EMBED PREVIEW META")
+    _print_safe("5) EMBED PREVIEW META")
     _print_safe("   send_mode=embed")
     _print_safe(f"   embed_url={embed_url}")
     _print_safe(f"   image_url={media_url}")
@@ -174,7 +179,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         do_send = bool(args.send_now)
         if not do_send:
-            _print_safe("5) SEND PREVIEW (optional)")
+            _print_safe("6) SEND PREVIEW (optional)")
             _print_safe("   Type SEND to confirm, or press Enter to skip.")
             resp = input("Confirm (SEND): ").strip()
             do_send = (resp.upper() == "SEND")
@@ -190,7 +195,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             post_url = f"https://discord.com/api/v10/channels/{int(dest_channel_id)}/messages"
             posted = _discord_rest_post_json(post_url, headers=headers, payload=post_payload)
             mid = str(posted.get("id") or "").strip()
-            _print_safe("5) SEND PREVIEW")
+            _print_safe("6) SEND PREVIEW")
             _print_safe("   status=posted")
             _print_safe(f"   dest_channel_id={dest_channel_id}")
             _print_safe(f"   message_id={mid}")
