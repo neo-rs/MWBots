@@ -2585,8 +2585,8 @@ class InstorebotForwarder:
 
         temp = self._gemini_temperature() if temperature_override is None else max(0.0, min(float(temperature_override), 1.0))
         h = hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()[:16]
-        # v3: prompt + full amz_deals finalize (all hub URLs + boilerplate); bump when contract changes.
-        cache_key = f"gemini:v3:{kind}:t={temp:.4f}:{h}"
+        # v4: bump when prompt/contract changes so runtime doesn't serve stale rewrites from memory cache.
+        cache_key = f"gemini:v4:{kind}:t={temp:.4f}:{h}"
         if cache_key in self._openai_cache:
             self._openai_last_mode[f"gemini:{kind}"] = "cache"
             return self._openai_cache[cache_key]
