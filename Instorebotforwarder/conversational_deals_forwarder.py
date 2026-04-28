@@ -234,6 +234,7 @@ async def forward_runtime_message(inst: Any, message: discord.Message) -> bool:
     try:
         await ch.send(embeds=[embed], allowed_mentions=discord.AllowedMentions.none())
     except Exception:
+        # Even if sending fails, we still claim the message so the Amazon path never runs for this channel.
         return True
     return True
 

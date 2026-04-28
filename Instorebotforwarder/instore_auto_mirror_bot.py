@@ -6027,12 +6027,20 @@ class InstorebotForwarder:
 
             # Standalone conversational-deals forwarder (canonical owner: conversational_deals_forwarder.py)
             try:
-                from InstorebotForwarder.conversational_deals_forwarder import forward_runtime_message  # type: ignore
+                # Must import from the current bot folder (Oracle live tree has no `MWBots` package).
+                from conversational_deals_forwarder import forward_runtime_message  # type: ignore
 
                 if await forward_runtime_message(self, message):
                     return
             except Exception:
-                pass
+                # Hard-stop: this channel must never fall back to Amazon routing.
+                try:
+                    from conversational_deals_forwarder import SOURCE_CHANNEL_ID  # type: ignore
+
+                    if int(message.channel.id) == int(SOURCE_CHANNEL_ID):
+                        return
+                except Exception:
+                    return
 
             try:
                 if self._verbose_flow_logs():
