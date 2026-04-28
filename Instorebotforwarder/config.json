@@ -140,11 +140,6 @@
       "mode": "affiliated_leads",
       "strip_emoji": true,
       "always_embed": true
-    },
-    "1438970053352751215": {
-      "dest_channel_id": 1484473267031904287,
-      "mode": "gemini_rephrase_amz_deals",
-      "dedupe_ttl_s": 21600
     }
   },
   "retail_product_link_listener": {

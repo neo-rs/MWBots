@@ -143,7 +143,7 @@ _EMOJI_RE = re.compile(
     flags=re.UNICODE,
 )
 
-# gemini_rephrase_amz_deals: structured parse (header / body / kept price lines)
+# conversational-deals forward: structured parse helpers (header / body / kept lines)
 _RE_AMZ_DEAL_HEADER_LINE = re.compile(
     r"(?i)^(?:(new\s+)?deal\s+found\b|hot\s+deal\b|deal\s+alert\b|price\s+drop\b|flash\s+deal\b|limited[\s-]time\s+deal\b)",
 )
@@ -252,7 +252,7 @@ def _cfg_float(cfg: dict, key: str, env_key: str = "") -> Optional[float]:
 
 _FLOW_CH_KEYS = frozenset({"dest_id", "channel", "dest_channel_id", "source_channel_id"})
 
-# When `verbose_flow_logs` is false in config, only these [FLOW:*] lines are emitted (plus GEMINI failures; see below).
+# When `verbose_flow_logs` is false in config, only these [FLOW:*] lines are emitted.
 _CALM_FLOW_STAGES = frozenset(
     {
         "SEND_FAIL",
@@ -264,9 +264,6 @@ _CALM_FLOW_STAGES = frozenset(
         "PRICE_ERR_SKIP",
     }
 )
-# Gemini: in calm mode, log only failed/problem outcomes (not every api_request/cache_hit).
-_CALM_GEMINI_SOURCES = frozenset({"api_fallback"})
-
 _log_flow_context: Optional[Any] = None
 
 
@@ -283,11 +280,7 @@ def _log_flow(stage: str, **kv: Any) -> None:
         except Exception:
             verbose = False
         if not verbose:
-            if stage == "GEMINI":
-                src = str(kv.get("source") or "").strip()
-                if src not in _CALM_GEMINI_SOURCES:
-                    return
-            elif stage not in _CALM_FLOW_STAGES:
+            if stage not in _CALM_FLOW_STAGES:
                 return
     stream_prefix = ""
     if ctx is not None:
@@ -477,29 +470,6 @@ class InstorebotForwarder:
         data = json.loads(raw.decode("utf-8", errors="replace")) if raw else {}
         return data if isinstance(data, dict) else {}
 
-    def _gemini_health_check(self) -> Tuple[bool, str]:
-        """
-        Lightweight Gemini API check (no Discord access). Returns (ok, detail).
-        """
-        key = str((self.config or {}).get("gemini_api_key") or "").strip()
-        if not key:
-            return False, "missing_api_key"
-        model = str((self.config or {}).get("gemini_model") or "").strip() or "gemini-1.5-flash"
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
-        payload = {
-            "contents": [{"role": "user", "parts": [{"text": "Reply with exactly: OK"}]}],
-            "generationConfig": {"temperature": 0.0, "maxOutputTokens": 16, "topP": 1.0},
-        }
-        try:
-            out = self._discord_rest_post_json(url, headers={"User-Agent": "mirror-world-instoreaudit/1.0"}, payload=payload, timeout_s=float((self.config or {}).get("gemini_timeout_s") or 12.0))
-            cand = (((out or {}).get("candidates") or [])[0] or {}) if isinstance(out, dict) else {}
-            txt = (((cand.get("content") or {}).get("parts") or [{}])[0] or {}).get("text", "") if isinstance(cand, dict) else ""
-            if str(txt or "").strip().upper().startswith("OK"):
-                return True, "ok"
-            return True, "ok_unexpected_reply"
-        except Exception as e:
-            return False, f"error={type(e).__name__}: {str(e)[:160]}"
-
     @dataclass
     class _AuditChannel:
         id: int
@@ -611,7 +581,7 @@ class InstorebotForwarder:
         return h == "mavelyinfluencer.com" or h.endswith(".mavelyinfluencer.com")
 
     def _strip_mavely_influencer_urls_from_text(self, text: str) -> str:
-        """Remove mavelyinfluencer.com URLs from prose (Gemini or upstream may paste the bridge)."""
+        """Remove mavelyinfluencer.com URLs from prose (upstream may paste the bridge)."""
         raw = (text or "").replace("\r\n", "\n")
         if not raw.strip():
             return ""
@@ -672,15 +642,6 @@ class InstorebotForwarder:
         block = self._strip_mavely_bridge_urls_when_shortlink_present(block)
         block = self._neutralize_mentions(block)
 
-        temp_override = self._gemini_temperature_from_simple_forward_mapping(mapping) if isinstance(mapping, dict) else None
-        try:
-            out2 = await self._gemini_minimal_rephrase("conversational_deals", block, temperature_override=temp_override)
-            out2 = str(out2 or "").strip()
-            if out2:
-                block = out2
-        except Exception:
-            pass
-
         if len(block) > 1950:
             block = block[:1940] + "…"
         return block.strip()
@@ -698,15 +659,6 @@ class InstorebotForwarder:
         block = self._strip_mavely_influencer_urls_from_text(block)
         block = self._strip_mavely_bridge_urls_when_shortlink_present(block)
         block = self._neutralize_mentions(block)
-
-        temp_override = self._gemini_temperature_from_simple_forward_mapping(mapping) if isinstance(mapping, dict) else None
-        try:
-            out2 = await self._gemini_minimal_rephrase("conversational_deals", block, temperature_override=temp_override)
-            out2 = str(out2 or "").strip()
-            if out2:
-                block = out2
-        except Exception:
-            pass
 
         if len(block) > 1950:
             block = block[:1940] + "…"
@@ -2108,39 +2060,6 @@ class InstorebotForwarder:
             self._openai_stats["api_fail"] = int(self._openai_stats.get("api_fail", 0) or 0) + 1
             return raw
 
-    def _gemini_enabled(self) -> bool:
-        v = (self.config or {}).get("gemini_rephrase_enabled", None)
-        if isinstance(v, bool):
-            return v
-        # Default: only enable if a key exists.
-        return bool(self._gemini_api_key())
-
-    def _gemini_api_key(self) -> str:
-        # Canonical: `gemini_api_key` in config.secrets.json (merged into self.config).
-        return str((self.config or {}).get("gemini_api_key") or "").strip()
-
-    def _gemini_model(self) -> str:
-        return str((self.config or {}).get("gemini_model") or "gemini-1.5-flash").strip() or "gemini-1.5-flash"
-
-    def _gemini_temperature(self) -> float:
-        try:
-            v = float((self.config or {}).get("gemini_temperature") or 0.62)
-        except Exception:
-            v = 0.62
-        return max(0.0, min(v, 1.0))
-
-    def _gemini_temperature_from_simple_forward_mapping(self, mapping: Optional[Dict[str, Any]]) -> Optional[float]:
-        """If `simple_forward_mappings[...].gemini_temperature` is set, use it; else None (use global config)."""
-        if not isinstance(mapping, dict):
-            return None
-        raw = mapping.get("gemini_temperature")
-        if raw is None:
-            return None
-        try:
-            return max(0.0, min(float(raw), 1.0))
-        except Exception:
-            return None
-
     def _journal_source_mapping_line(self, source_channel_id: int) -> str:
         """Human-readable routing line for logs: <#src> → <#dest> (Discord clients render mentions)."""
         src = int(source_channel_id)
@@ -2527,15 +2446,6 @@ class InstorebotForwarder:
         except Exception:
             gu = 0
         log.info("[BOOT] Discord: logged in as %s | guilds=%s", self.bot.user, gu)
-        ge = self._gemini_enabled()
-        gk = bool(self._gemini_api_key())
-        log.info(
-            "[BOOT] Gemini: enabled=%s api_key=%s model=%s temp=%.2f",
-            ge,
-            "set" if gk else "missing",
-            self._gemini_model(),
-            self._gemini_temperature(),
-        )
         log.info(
             "[BOOT] Amazon: scrape=%s playwright=%s",
             self._scrape_enabled(),
@@ -2552,103 +2462,6 @@ class InstorebotForwarder:
                 log.info("%s[BOOT]   <#%s>  %s", self._journal_stream_kv(int(sid)), sid, lbl)
                 log.info("%s[BOOT]       %s", self._journal_stream_kv(int(sid)), self._journal_source_mapping_line(sid))
         log.info("[BOOT] ========== ready for messages ==========")
-
-    def _gemini_max_chars(self) -> int:
-        try:
-            v = int((self.config or {}).get("gemini_max_chars") or 1800)
-        except Exception:
-            v = 1800
-        return max(200, min(v, 6000))
-
-    async def _gemini_minimal_rephrase(
-        self,
-        kind: str,
-        text: str,
-        *,
-        temperature_override: Optional[float] = None,
-    ) -> str:
-        """
-        Best-effort Gemini rewrite for lead text.
-        - Never required: always safe-fallback to original text.
-        - Must keep any URLs unchanged.
-        - temperature_override: e.g. from simple_forward_mappings[].gemini_temperature; else global config.
-        """
-        raw = (text or "").strip()
-        if not raw:
-            return ""
-        if not self._gemini_enabled():
-            return raw
-
-        key = self._gemini_api_key()
-        if not key:
-            return raw
-
-        temp = self._gemini_temperature() if temperature_override is None else max(0.0, min(float(temperature_override), 1.0))
-        h = hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()[:16]
-        # v4: bump when prompt/contract changes so runtime doesn't serve stale rewrites from memory cache.
-        cache_key = f"gemini:v4:{kind}:t={temp:.4f}:{h}"
-        if cache_key in self._openai_cache:
-            self._openai_last_mode[f"gemini:{kind}"] = "cache"
-            return self._openai_cache[cache_key]
-
-        clipped = raw
-        max_chars = self._gemini_max_chars()
-        if len(clipped) > max_chars:
-            clipped = clipped[: max_chars - 3] + "..."
-
-        try:
-            self._openai_last_mode[f"gemini:{kind}"] = "api_call"
-            # Must work in both layouts:
-            # - Windows dev repo: `MWBots/Instorebotforwarder/...`
-            # - Oracle live tree: `/home/rsadmin/bots/mirror-world/Instorebotforwarder/...` (no `MWBots` package)
-            try:
-                from MWBots.Instorebotforwarder.automatedParaphrase.gemini_paraphraser import (  # type: ignore
-                    minimal_rephrase_keep_urls,
-                )
-                _import_path = "MWBots.Instorebotforwarder.automatedParaphrase.gemini_paraphraser"
-            except Exception:
-                from automatedParaphrase.gemini_paraphraser import (  # type: ignore
-                    minimal_rephrase_keep_urls,
-                )
-                _import_path = "automatedParaphrase.gemini_paraphraser"
-
-            # One-time, high-signal proof in journal that runtime imported the paraphraser module.
-            try:
-                if not getattr(self, "_gemini_import_proof_logged", False):
-                    import importlib
-
-                    m = importlib.import_module(str(getattr(minimal_rephrase_keep_urls, "__module__", "") or ""))
-                    m_file = str(getattr(m, "__file__", "") or "")
-                    log.info("[GEMINI_IMPORT] import_path=%s paraphraser_file=%s", _import_path, m_file)
-                    setattr(self, "_gemini_import_proof_logged", True)
-            except Exception:
-                pass
-
-            _log_flow("GEMINI", kind=kind, model=self._gemini_model(), temperature=f"{temp:.4f}", override=("1" if temperature_override is not None else "0"))
-            out = await minimal_rephrase_keep_urls(
-                text=clipped,
-                gemini_api_key=key,
-                model=self._gemini_model(),
-                temperature=temp,
-                timeout_s=float((self.config or {}).get("gemini_timeout_s") or 12.0),
-                neutralize_mentions_fn=self._neutralize_mentions,
-                usage_accumulator=getattr(self, "_gemini_usage_accumulator", None),
-            )
-            out = str(out or "").strip()
-            if not out:
-                out = raw
-
-            # One-time, high-signal proof that the Gemini API call returned usable output.
-            try:
-                if not getattr(self, "_gemini_api_ok_logged", False):
-                    log.info("[GEMINI_OK] kind=%s model=%s temperature=%s", str(kind), str(self._gemini_model()), f"{temp:.4f}")
-                    setattr(self, "_gemini_api_ok_logged", True)
-            except Exception:
-                pass
-            self._openai_cache[cache_key] = out
-            return out
-        except Exception:
-            return raw
 
     def _stable_key_slug(self, seed: str, *, length: int = 7) -> str:
         s = (seed or "").encode("utf-8", errors="ignore")
@@ -4743,7 +4556,7 @@ class InstorebotForwarder:
             lines.append(content)
 
         # Webhooks and deal bots often put the full lead in an embed only (empty .content).
-        # Mirror that text here so simple-forward / Gemini / affiliated paths see the same copy as users.
+        # Mirror that text here so simple-forward/affiliated paths see the same copy as users.
         try:
             for e in (message.embeds or []):
                 eparts: List[str] = []
@@ -4759,7 +4572,7 @@ class InstorebotForwarder:
                     row = "\n".join([x for x in (fn, fv) if x])
                     if row:
                         eparts.append(row)
-                # Omit embed footer: often "From: … | By: …" / #ad boilerplate we do not want in Gemini output.
+                # Omit embed footer: often "From: … | By: …" / #ad boilerplate we do not want forwarded.
                 if eparts:
                     lines.append("\n\n".join(eparts))
         except Exception:
@@ -4995,7 +4808,7 @@ class InstorebotForwarder:
     def _amz_deal_line_is_shouty_deal_headline(self, line: str) -> bool:
         """
         Main hook line with a price but not a compare/Was/Originally line (e.g. $35 FOR A 412-PIECE KIT...).
-        Those must go to Gemini as header, not 'kept' verbatim price rows.
+        Those must be treated as the header, not 'kept' verbatim price rows.
         """
         s = line.strip()
         if not re.search(r"\$\s*\d", s):
@@ -5034,11 +4847,11 @@ class InstorebotForwarder:
         return False
 
     def _amz_deal_line_is_compare_body_fodder(self, line: str) -> bool:
-        """Longer compare/context lines → Gemini body; short Now/Reg stubs stay under Product info."""
+        """Longer compare/context lines belong in body; short Now/Reg stubs stay under Product info."""
         s = line.strip()
         if not self._amz_deal_line_is_price_or_compare(s):
             return False
-        # For conversational-deals, preserve compare/context lines verbatim (keep them out of Gemini body).
+        # Preserve compare/context lines verbatim (keep them out of generated body).
         return False
 
     def _amz_deal_line_is_preserved_promo(self, line: str) -> bool:
@@ -5113,18 +4926,6 @@ class InstorebotForwarder:
         except Exception:
             pass
 
-        # Special-case: conversational deals (formerly structured Amazon/Gemini deal cards).
-        # New canonical behavior: plain merged-forward text, optionally Gemini-rephrased, with URLs preserved.
-        mapping = self._simple_forward_mapping_for_channel(buf.src_channel_id)
-        mode = str((mapping or {}).get("mode") or "").strip().lower() if isinstance(mapping, dict) else ""
-        if mode == "gemini_rephrase_amz_deals":
-            try:
-                out2 = await self._conversational_deals_build_description_from_text(out, mapping)
-                if out2:
-                    out = out2
-            except Exception:
-                pass
-
         # Discord message limit: keep under 2000 chars.
         if len(out) > 1950:
             out = out[:1940] + "…"
@@ -5144,40 +4945,6 @@ class InstorebotForwarder:
                     log.debug("StockX enrich failed: %s", str(e)[:120])
 
         try:
-            mapping = self._simple_forward_mapping_for_channel(buf.src_channel_id)
-            mode = str((mapping or {}).get("mode") or "").strip().lower() if isinstance(mapping, dict) else ""
-
-            # Conversational-deals: always send as an embed (consistent formatting + allows image carryover).
-            if mode == "gemini_rephrase_amz_deals":
-                # Use the first URL in the outbound text as the embed click target when present.
-                embed_url = ""
-                try:
-                    spans = affiliate_rewriter.extract_urls_with_spans(out)
-                    if spans:
-                        embed_url = str(spans[0][0] or "").strip()
-                except Exception:
-                    embed_url = ""
-
-                desc = out
-                if len(desc) > 3900:
-                    desc = desc[:3897] + "..."
-                embed = discord.Embed(description=desc, url=(embed_url or None))
-                media_u = str(getattr(buf, "media_url", "") or "").strip()
-                if media_u:
-                    try:
-                        embed.set_image(url=media_u)
-                    except Exception:
-                        pass
-
-                await ch.send(embeds=[embed], allowed_mentions=discord.AllowedMentions.none())
-                self._log_message_forward_summary(
-                    src_channel_id=int(buf.src_channel_id),
-                    dest_channel_id=int(buf.dest_channel_id),
-                    path="conversational_deals_embed",
-                    extra=("image=1" if bool(media_u) else "image=0"),
-                )
-                return
-
             await ch.send(content=out, embeds=embeds if embeds else None, allowed_mentions=discord.AllowedMentions.none())
             self._log_message_forward_summary(
                 src_channel_id=int(buf.src_channel_id),
@@ -6257,6 +6024,15 @@ class InstorebotForwarder:
                         self._source_channel_log_label(sid),
                     )
                 return
+
+            # Standalone conversational-deals forwarder (canonical owner: conversational_deals_forwarder.py)
+            try:
+                from InstorebotForwarder.conversational_deals_forwarder import forward_runtime_message  # type: ignore
+
+                if await forward_runtime_message(self, message):
+                    return
+            except Exception:
+                pass
 
             try:
                 if self._verbose_flow_logs():
