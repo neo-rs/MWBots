@@ -141,6 +141,7 @@ _RE_AMZ_RAW_HTTP_ONLY_LINE = re.compile(r"(?i)^\s*https?://\S+\s*$")
 _RE_AMZ_ANGLE_HTTP_LINE = re.compile(r"(?i)^\s*<https?://[^>\s]+>\s*$")
 # Skip re-forwarding embeds that already open like our RS deal cards (e.g. FLIPFLUENCE output).
 _RE_SKIP_SOURCE_NEW_DEAL_FOUND_TOP = re.compile(r"(?i)^new\s+deal\s+found\b")
+_RE_AMZ_LEADING_CTA_PREFIX = re.compile(r"(?i)^\s*(?:👉|🔗|➡️|→|>>|>|\*|-|•)\s*")
 
 
 def _embed_card_first_line(text: Optional[str]) -> str:
@@ -157,6 +158,26 @@ def _strip_emoji_text(s: str) -> str:
         return _EMOJI_RE.sub("", s or "")
     except Exception:
         return s or ""
+
+
+def _strip_leading_cta_prefixes(line: str) -> str:
+    """
+    Normalize common CTA prefixes like "👉 https://..." so link-only lines can be detected and removed.
+    Keep this conservative: we only strip obvious leading prefixes and whitespace.
+    """
+    s = (line or "").replace("\r\n", "\n").strip()
+    if not s:
+        return ""
+    try:
+        # Strip repeated CTA prefixes (emoji arrows, bullets, markdown markers).
+        for _ in range(3):
+            ns = _RE_AMZ_LEADING_CTA_PREFIX.sub("", s).strip()
+            if ns == s:
+                break
+            s = ns
+    except Exception:
+        pass
+    return s
 
 
 def _setup_logging() -> None:
@@ -432,29 +453,6 @@ class InstorebotForwarder:
             h = h[4:]
         return h == "mavelyinfluencer.com" or h.endswith(".mavelyinfluencer.com")
 
-    def _first_mavely_app_short_link_in_urls(self, urls: Sequence[str]) -> str:
-        for u in urls or []:
-            cand = str(u or "").strip()
-            if cand and affiliate_rewriter.is_mavely_app_short_link(cand):
-                return cand
-        return ""
-
-    def _gemini_route_outbound_url(self, urls: Sequence[str], raw_url: str, block: str) -> str:
-        """
-        Click target for gemini_rephrase_amz_deals: keep Branch short links verbatim.
-        Never use mavelyinfluencer.com (HTTP expand of app.link) as embed.url or trailing link line.
-        """
-        short = self._first_mavely_app_short_link_in_urls(urls)
-        if short:
-            return short.strip()
-        raw = (raw_url or "").strip()
-        if raw and self._host_is_mavely_influencer_bridge(raw):
-            m = re.search(r"(?i)\bhttps?://(?:www\.)?mavely\.app\.link/[^\s)>\]]+", block or "")
-            if m:
-                return m.group(0).strip()
-            return ""
-        return raw
-
     def _strip_mavely_influencer_urls_from_text(self, text: str) -> str:
         """Remove mavelyinfluencer.com URLs from prose (Gemini or upstream may paste the bridge)."""
         raw = (text or "").replace("\r\n", "\n")
@@ -546,14 +544,6 @@ class InstorebotForwarder:
         self._dedupe_inflight: set[str] = set()
         self._dedupe_sent_ts: Dict[str, float] = {}
         self._dedupe_skipped: int = 0
-
-        # Route-specific dedupe for gemini_rephrase_amz_deals
-        self._amz_deals_sig_sent_ts: Dict[str, float] = {}
-        # Same final outbound URL (per dest channel) within TTL — catches different bots / wording, same link.
-        self._amz_deals_outbound_url_sent_ts: Dict[str, float] = {}
-        self._amz_deals_sig_ttl_s: float = 6 * 60 * 60  # 6 hours
-        # Prevent duplicate posts for the exact same source message id.
-        self._amz_deals_src_msg_sent_ts: Dict[int, float] = {}
 
         # price_error_embed_forward: strict per-URL (or body-hash) dedupe per destination channel
         self._price_error_url_sent_ts: Dict[str, float] = {}
@@ -2204,70 +2194,6 @@ class InstorebotForwarder:
         ex.trace({"src_channel_id": str(src_channel_id), "dest_channel_id": str(dest_channel_id), "path": path, "extra": (extra or "").strip()})
         ex.emit()
 
-    def _explain_duplicate_amz_deals_sig(self, *, channel_id: int, message_id: int) -> None:
-        if not self._explainable_enabled():
-            return
-        ex = self._explainable()
-        ex.start(
-            "DUPLICATE SKIP (gemini amz deals)",
-            message_id=str(message_id),
-            source=f"<#{channel_id}>",
-            decision_tag="DUPLICATE SKIP",
-            journal_stream=self._journal_stream_slug(int(channel_id)),
-        )
-        ex.section(
-            3,
-            "ELI5 SUMMARY",
-            [
-                "Bottom line: DUPLICATE SKIP — this cleaned deal text + Amazon URL was already forwarded recently (signature TTL window).",
-                "",
-                "What the bot saw:",
-                f"- Source message {message_id} on <#{channel_id}>",
-                "",
-                "Final decision:",
-                "- Do not post another Gemini rephrase for the same signature within the dedupe window.",
-            ],
-        )
-        ex.section(
-            4,
-            "HUMAN DECISION SUMMARY",
-            [
-                "Winning: first occurrence in the TTL window posts normally.",
-                "Losing: repeat of the same normalized content + same Amazon destination within ~6 hours.",
-            ],
-        )
-        ex.emit()
-
-    def _explain_duplicate_amz_deals_outbound_url(
-        self, *, channel_id: int, message_id: int, dest_channel_id: int, url_key: str
-    ) -> None:
-        if not self._explainable_enabled():
-            return
-        ex = self._explainable()
-        ex.start(
-            "DUPLICATE SKIP (gemini amz deals — same outbound URL)",
-            message_id=str(message_id),
-            source=f"<#{channel_id}>",
-            decision_tag="DUPLICATE SKIP",
-            journal_stream=self._journal_stream_slug(int(channel_id)),
-        )
-        ex.section(
-            3,
-            "ELI5 SUMMARY",
-            [
-                "Bottom line: DUPLICATE SKIP — this destination was already sent the same canonical deal link recently (outbound URL dedupe).",
-                "",
-                "What the bot saw:",
-                f"- Source message {message_id} on <#{channel_id}>",
-                f"- Would post to <#{dest_channel_id}> with the same normalized URL key as a recent forward.",
-                "",
-                "Final decision:",
-                "- Skip so different bots or rephrased copy for the same product URL do not spam the channel.",
-            ],
-        )
-        ex.trace({"url_dedupe_key": (url_key or "")[:200]})
-        ex.emit()
-
     def _source_channel_log_label(self, channel_id: int) -> str:
         raw = (self.config or {}).get("source_channel_log_labels") or {}
         if not isinstance(raw, dict):
@@ -2440,153 +2366,6 @@ class InstorebotForwarder:
             return out
         except Exception:
             return raw
-
-    def _gemini_header_rewrite_is_too_bland(self, ho: str, h0: str) -> bool:
-        """Reject generic catalog-style headlines; caller falls back to parsed header."""
-        ho_s = (ho or "").strip()
-        h0_s = (h0 or "").strip()
-        if not ho_s or not h0_s:
-            return False
-        low = ho_s.lower()
-        banned = (
-            "available for",
-            "currently listed",
-            "is listed on",
-            "is currently",
-            "can be purchased",
-            "can be found",
-            "for sale at",
-            "listed on amazon",
-            "product is",
-            "kit available for",
-            "tool kit available",
-            "we've sourced",
-            "we have sourced",
-            " is listed ",
-            "currently on amazon",
-        )
-        if any(b in low for b in banned):
-            return True
-        if len(h0_s) > 20 and len(ho_s) > int(len(h0_s) * 1.9) + 15:
-            return True
-        if len(ho_s) > 165:
-            return True
-        return False
-
-    async def _gemini_rephrase_amz_deals_structured(
-        self,
-        header: str,
-        body: str,
-        *,
-        temperature_override: Optional[float] = None,
-    ) -> Tuple[str, str, Optional[str]]:
-        """
-        Gemini rewrites header + optional compare/body prose (JSON). Short price rows and promo/coupon
-        lines stay in kept_lines (not sent to the model).
-
-        Third tuple element is None when the API returned usable JSON at least once; otherwise a short
-        reason tag (e.g. 'http_429') so logs are not reported as a successful model completion.
-        """
-        h0 = (header or "").strip()
-        b0 = (body or "").strip()
-        if not h0 and not b0:
-            return "", "", None
-        if not self._gemini_enabled():
-            return h0, b0, "gemini_disabled"
-        key = self._gemini_api_key()
-        if not key:
-            return h0, b0, "no_api_key"
-
-        tester_skip = getattr(self, "_instore_flow_tester_suppress_struct_gemini_reason", None)
-        if isinstance(tester_skip, str) and tester_skip.strip():
-            ts = tester_skip.strip()
-            _log_flow(
-                "GEMINI",
-                kind="amz_deals_struct",
-                source="skipped_duplicate_preflight",
-                reason=ts,
-                header_changed="false",
-                body_changed="false",
-                header_out_chars=len(h0),
-                body_out_chars=len(b0),
-            )
-            return h0, b0, ts
-
-        temp = self._gemini_temperature() if temperature_override is None else max(0.0, min(float(temperature_override), 1.0))
-        payload = f"H:{h0}\nB:{b0}"
-        h = hashlib.sha256(payload.encode("utf-8", errors="ignore")).hexdigest()[:16]
-        cache_key = f"gemini:v11:amz_deals_struct:t={temp:.4f}:{h}"
-        if cache_key in self._openai_cache:
-            self._openai_last_mode["gemini:amz_deals_struct"] = "cache"
-            _log_flow(
-                "GEMINI",
-                kind="amz_deals_struct",
-                source="cache_hit",
-                key_suffix=h,
-            )
-            cached = self._openai_cache[cache_key]
-            if isinstance(cached, (list, tuple)) and len(cached) == 2:
-                return str(cached[0] or ""), str(cached[1] or ""), None
-
-        try:
-            self._openai_last_mode["gemini:amz_deals_struct"] = "api_call"
-            from MWBots.Instorebotforwarder.automatedParaphrase.gemini_paraphraser import (
-                minimal_rephrase_amz_deal_header_body_json,
-            )
-
-            _log_flow(
-                "GEMINI",
-                kind="amz_deals_struct",
-                source="api_request",
-                model=self._gemini_model(),
-                temperature=f"{temp:.4f}",
-                override=("1" if temperature_override is not None else "0"),
-                header_in_chars=len(h0),
-                body_in_chars=len(b0),
-            )
-            ho, bo, api_fail = await minimal_rephrase_amz_deal_header_body_json(
-                header=h0,
-                body=b0,
-                gemini_api_key=key,
-                model=self._gemini_model(),
-                temperature=temp,
-                timeout_s=float((self.config or {}).get("gemini_timeout_s") or 12.0),
-                neutralize_mentions_fn=self._neutralize_mentions,
-                usage_accumulator=getattr(self, "_gemini_usage_accumulator", None),
-            )
-            ho = str(ho or "").strip() or h0
-            bo = str(bo or "").strip()
-            if not api_fail and not bo and b0:
-                bo = b0
-            if not api_fail and self._gemini_header_rewrite_is_too_bland(ho, h0):
-                log.info("[FLOW:GEMINI] amz_deals_struct header_bland_fallback")
-                ho = h0
-            if api_fail:
-                _log_flow(
-                    "GEMINI",
-                    kind="amz_deals_struct",
-                    source="api_fallback",
-                    reason=str(api_fail),
-                    header_changed=str(ho != h0).lower(),
-                    body_changed=str(bo != b0).lower(),
-                    header_out_chars=len(ho),
-                    body_out_chars=len(bo),
-                )
-            else:
-                self._openai_cache[cache_key] = (ho, bo)
-                _log_flow(
-                    "GEMINI",
-                    kind="amz_deals_struct",
-                    source="api_ok",
-                    header_changed=str(ho != h0).lower(),
-                    body_changed=str(bo != b0).lower(),
-                    header_out_chars=len(ho),
-                    body_out_chars=len(bo),
-                )
-            return ho, bo, api_fail
-        except Exception as ex:
-            log.warning("[FLOW:GEMINI] amz_deals_struct api_exception: %s", str(ex)[:200])
-            return h0, b0, "exception"
 
     def _stable_key_slug(self, seed: str, *, length: int = 7) -> str:
         s = (seed or "").encode("utf-8", errors="ignore")
@@ -4994,7 +4773,10 @@ class InstorebotForwarder:
         )
 
     def _amz_deal_line_is_skip_cta(self, line: str) -> bool:
-        s = line.strip()
+        s = (line or "").strip()
+        s2 = _strip_leading_cta_prefixes(s)
+        if s2:
+            s = s2
         if _RE_AMZ_MD_LINK_ONLY_LINE.match(s):
             return True
         if _RE_AMZ_RAW_HTTP_ONLY_LINE.match(s):
@@ -5016,386 +4798,6 @@ class InstorebotForwarder:
         if re.search(r"(?i)\d+\s*%", s) and re.search(r"(?i)\b(off|save|deal|lowest|amazon)\b", s):
             return True
         return False
-
-    def _amz_deals_route_dedupe_ttl_s(self, mapping: Optional[Dict[str, Any]] = None) -> float:
-        """Per-route TTL for conversational deal forwards. Mapping value wins; otherwise keep 6h default."""
-        try:
-            if isinstance(mapping, dict) and mapping.get("dedupe_ttl_s") is not None:
-                v = float(mapping.get("dedupe_ttl_s"))
-            else:
-                v = float((self.config or {}).get("amz_deals_dedupe_ttl_s") or getattr(self, "_amz_deals_sig_ttl_s", 21600.0) or 21600.0)
-        except Exception:
-            v = 21600.0
-        return max(300.0, min(v, 7 * 24 * 3600.0))
-
-    def _amz_deals_dedupe_by_outbound_url(self, mapping: Dict[str, Any]) -> bool:
-        """When True, skip if the same canonical outbound URL was already sent to this dest within TTL."""
-        if isinstance(mapping, dict) and mapping.get("dedupe_by_outbound_url") is not None:
-            return bool(mapping.get("dedupe_by_outbound_url"))
-        try:
-            g = (self.config or {}).get("amz_deals_dedupe_by_outbound_url")
-            if g is None:
-                return True
-            return bool(g)
-        except Exception:
-            return True
-
-    def _amz_deals_outbound_dedupe_key(self, raw_url: str) -> str:
-        """
-        Stable key for the embed link: Amazon → ASIN; otherwise scheme+host+path with tracking query pairs removed.
-        """
-        u = (raw_url or "").strip()
-        if not u:
-            return ""
-        try:
-            if affiliate_rewriter.is_amazon_like_url(u):
-                asin = str(affiliate_rewriter.extract_asin(u) or "").strip().upper()
-                if asin and len(asin) == 10 and asin.isalnum():
-                    return f"amazon:{asin}"
-        except Exception:
-            pass
-        try:
-            p = urlparse(u)
-        except Exception:
-            return ""
-        scheme = (p.scheme or "https").lower()
-        netloc = (p.netloc or "").lower()
-        if netloc.startswith("www."):
-            netloc = netloc[4:]
-        path = (p.path or "").rstrip("/") or "/"
-        skip_q = frozenset(
-            {
-                "utm_source",
-                "utm_medium",
-                "utm_campaign",
-                "utm_content",
-                "utm_term",
-                "gclid",
-                "fbclid",
-                "mc_cid",
-                "mc_eid",
-                "ref",
-            }
-        )
-        q_clean = ""
-        if p.query:
-            pairs = [(k, v) for k, v in parse_qsl(p.query, keep_blank_values=True) if k.lower() not in skip_q]
-            pairs.sort(key=lambda kv: (kv[0].lower(), kv[1]))
-            q_clean = urlencode(pairs)
-        base = f"{scheme}://{netloc}{path}"
-        return f"url:{base}?{q_clean}" if q_clean else f"url:{base}"
-
-    def _amz_deals_outbound_store_key(self, dest_channel_id: int, url_key: str) -> str:
-        return f"{int(dest_channel_id)}:{url_key}"
-
-    def _amz_deals_outbound_url_seen(self, dest_channel_id: int, url_key: str) -> bool:
-        if not url_key:
-            return False
-        self._amz_deals_sig_prune()
-        sk = self._amz_deals_outbound_store_key(dest_channel_id, url_key)
-        return sk in self._amz_deals_outbound_url_sent_ts
-
-    def _amz_deals_outbound_url_commit(self, dest_channel_id: int, url_key: str) -> None:
-        if not url_key:
-            return
-        self._amz_deals_sig_prune()
-        sk = self._amz_deals_outbound_store_key(dest_channel_id, url_key)
-        self._amz_deals_outbound_url_sent_ts[sk] = time.time()
-
-    def _amz_deals_message_looks_already_forwarded(self, message: discord.Message, block: str) -> bool:
-        """
-        Prevent loops / double-formatting when the source message already looks like a finished deal card.
-        """
-        first = ""
-        try:
-            first = (block or "").replace("\r\n", "\n").strip().split("\n", 1)[0].strip()
-        except Exception:
-            first = ""
-        first_clean = first.replace("**", "").replace("__", "").strip().lower()
-        if _RE_SKIP_SOURCE_NEW_DEAL_FOUND_TOP.search(first_clean):
-            return True
-        if first_clean.startswith("product info"):
-            return True
-        try:
-            for e in (message.embeds or []):
-                t = _embed_card_first_line(getattr(e, "title", None))
-                d = _embed_card_first_line(getattr(e, "description", None))
-                for cand in (t, d):
-                    c = (cand or "").replace("**", "").replace("__", "").strip().lower()
-                    if not c:
-                        continue
-                    if _RE_SKIP_SOURCE_NEW_DEAL_FOUND_TOP.search(c):
-                        return True
-                    if c.startswith("product info"):
-                        return True
-        except Exception:
-            pass
-        return False
-
-    def _amz_deals_has_enough_signal(self, cleaned_block: str) -> bool:
-        """
-        Require at least one non-trivial text line after cleaning so naked URL/coupon spam does not forward.
-        """
-        raw = (cleaned_block or "").replace("\r\n", "\n")
-        useful = 0
-        for ln in raw.split("\n"):
-            s = (ln or "").strip()
-            if not s:
-                continue
-            if self._amz_deal_line_is_skip_cta(s):
-                continue
-            if self._is_public_http_url_for_amz_deals(s):
-                continue
-            if len(re.sub(r"[^A-Za-z0-9$% ]+", "", s).strip()) < 8:
-                continue
-            useful += 1
-        return useful > 0
-
-    def _amz_deals_route_clean_line(self, line: str) -> Optional[str]:
-        s = (line or "").strip()
-        if not s:
-            return None
-
-        # Normalize markdown-ish wrappers first.
-        s = re.sub(r"^[-•\*#>\s]+", "", s).strip()
-
-        # Remove trailing #ad
-        s = re.sub(r"(?i)\s+#ad\s*$", "", s).strip()
-        s = re.sub(r"\s*\|\s*(?:#ad|ad)\s*$", "", s, flags=re.I).strip()
-        if not s:
-            return None
-
-        # Strip obvious field-label prefixes but keep the payload when useful.
-        s = re.sub(r"(?i)^title\s*:\s*", "", s).strip()
-        s = re.sub(r"(?i)^description\s*:\s*", "", s).strip()
-
-        # Hard-skip junk lines for Mirror World conversational deals only
-        if re.match(r"(?i)^product\s+info\s*$", s):
-            return None
-        if re.match(r"(?i)^new\s+deal\s+found!?\s*$", s):
-            return None
-        if re.match(r"(?i)^grab\s+it\s+here(?:\s+#ad)?\s*$", s):
-            return None
-        if re.match(r"(?i)^30[- ]day\s+prime\s+free\s+trial\s*$", s):
-            return None
-        if re.match(r"(?i)^prime\s+trial\s*$", s):
-            return None
-        if re.match(r"(?i)^from:\s*", s):
-            return None
-        if re.match(r"(?i)^by:\s*", s):
-            return None
-        if re.match(r"(?i)^from:.*\|\s*by:.*$", s):
-            return None
-        if re.match(r"(?i)^posted\s+by\s*:", s):
-            return None
-        if re.match(r"(?i)^shared\s+by\s*:", s):
-            return None
-        if re.match(r"(?i)^use\s+our\s+link\b.*$", s):
-            return None
-        if re.match(r"(?i)^tap\s+to\s+shop\b.*$", s):
-            return None
-        if re.match(r"(?i)^shop\s*->.*$", s):
-            return None
-        if re.match(r"(?i)^mirror\s+world\b.*$", s):
-            return None
-        if re.match(r"(?i)^paid\s*ad\s*$", s):
-            return None
-        if re.match(r"(?i)^paidad\s*$", s):
-            return None
-
-        # Keep promo/coupon/code lines — parser will preserve them verbatim in kept_lines.
-        if re.match(r"(?i)^only\s*\$\s*\d", s):
-            return None
-        if re.match(r"(?i)^now\s*\$\s*\d", s):
-            return None
-        if re.match(r"(?i)^was\s*\$\s*\d", s):
-            return None
-        if re.match(r"(?i).*\breg\.?\s*\$+\s*\d", s):
-            return None
-
-        # Drop pure CTA/link-only lines
-        if self._amz_deal_line_is_skip_cta(s):
-            return None
-
-        plain = re.sub(r"[^A-Za-z0-9$% ]+", "", s).strip()
-        if len(plain) < 3:
-            return None
-
-        return s
-
-    def _clean_amz_deals_block_for_gemini_route(self, text: str) -> str:
-        raw = (text or "").replace("\r\n", "\n")
-        out: List[str] = []
-        seen: set[str] = set()
-
-        for ln in raw.split("\n"):
-            cleaned = self._amz_deals_route_clean_line(ln)
-            if not cleaned:
-                continue
-            key = re.sub(r"\s+", " ", cleaned).strip().lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(cleaned)
-
-        while out and (
-            self._amz_deal_line_is_preserved_promo(out[0])
-            or self._is_public_http_url_for_amz_deals(out[0])
-            or self._amz_deal_line_is_skip_cta(out[0])
-        ):
-            out.pop(0)
-
-        return "\n".join(out).strip()
-
-    def _amz_deals_signature(self, text: str, amazon_url: str) -> str:
-        raw = ((text or "") + "\n" + (amazon_url or "")).strip().lower()
-        raw = re.sub(r"https?://(?:www\.)?amazon\.[^/\s]+/dp/([a-z0-9]{10}).*", r"asin:\1", raw, flags=re.I)
-        raw = re.sub(r"\s+", " ", raw)
-        return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
-
-    def _amz_deals_sig_prune(self) -> None:
-        now = time.time()
-        ttl = float(getattr(self, "_amz_deals_sig_ttl_s", 21600.0) or 21600.0)
-        for sig, ts in list(self._amz_deals_sig_sent_ts.items()):
-            if (now - float(ts)) > ttl:
-                self._amz_deals_sig_sent_ts.pop(sig, None)
-        for sk, ts in list(self._amz_deals_outbound_url_sent_ts.items()):
-            if (now - float(ts)) > ttl:
-                self._amz_deals_outbound_url_sent_ts.pop(sk, None)
-        for mid, ts in list(self._amz_deals_src_msg_sent_ts.items()):
-            if (now - float(ts)) > ttl:
-                self._amz_deals_src_msg_sent_ts.pop(mid, None)
-
-    def _amz_deals_sig_seen(self, sig: str) -> bool:
-        if not sig:
-            return False
-        self._amz_deals_sig_prune()
-        return sig in self._amz_deals_sig_sent_ts
-
-    def _amz_deals_sig_commit(self, sig: str) -> None:
-        if not sig:
-            return
-        self._amz_deals_sig_prune()
-        self._amz_deals_sig_sent_ts[sig] = time.time()
-
-    def _amz_deals_src_msg_seen(self, message_id: int) -> bool:
-        try:
-            mid = int(message_id)
-        except Exception:
-            return False
-        if mid <= 0:
-            return False
-        self._amz_deals_sig_prune()
-        return mid in self._amz_deals_src_msg_sent_ts
-
-    def _amz_deals_src_msg_commit(self, message_id: int) -> None:
-        try:
-            mid = int(message_id)
-        except Exception:
-            return
-        if mid <= 0:
-            return
-        self._amz_deals_sig_prune()
-        self._amz_deals_src_msg_sent_ts[mid] = time.time()
-
-    def _strip_url_only_paragraphs_from_body(self, body: str) -> str:
-        """Remove paragraphs that are only outbound links (after parse)."""
-        raw = (body or "").strip()
-        if not raw:
-            return ""
-        paras = [p.strip() for p in re.split(r"\n\s*\n", raw) if p.strip()]
-        kept: List[str] = []
-        for p in paras:
-            lines = [ln.strip() for ln in p.split("\n") if ln.strip()]
-            if not lines:
-                continue
-            if all(self._amz_deal_line_is_skip_cta(ln) for ln in lines):
-                continue
-            kept.append(p)
-        return "\n\n".join(kept).strip()
-
-    def _parse_amz_deals_block_for_structured_gemini(self, text: str) -> Dict[str, Any]:
-        """
-        Split conversational deal copy into:
-        - header: one best headline for Gemini
-        - body: context / compare prose for Gemini
-        - kept_lines: exact promo rows (currently not rendered by this route)
-        """
-        raw = (text or "").replace("\r\n", "\n")
-        lines: List[str] = []
-        for ln in raw.split("\n"):
-            line = re.sub(r"(?i)\s+#ad\s*$", "", ln).strip()
-            if not line:
-                continue
-            if self._amz_deal_line_is_prime_junk(line):
-                continue
-            if self._amz_deal_line_is_skip_cta(line):
-                continue
-            lines.append(line)
-
-        header = ""
-        body_lines: List[str] = []
-        kept_lines: List[str] = []
-
-        header_candidates: List[str] = []
-        for line in lines[:6]:
-            if self._amz_deal_line_is_branded_header(line) or self._amz_deal_line_is_shouty_deal_headline(line):
-                header_candidates.append(line)
-            elif self._amz_deal_line_looks_like_embed_headline(line):
-                header_candidates.append(line)
-
-        if header_candidates:
-            header = max(header_candidates, key=lambda s: (1 if re.search(r"\$\s*\d", s) else 0, len(s)))
-
-        for line in lines:
-            if line == header:
-                continue
-            if self._amz_deal_line_is_preserved_promo(line):
-                kept_lines.append(line)
-                continue
-            if self._amz_deal_line_is_price_or_compare(line):
-                if self._amz_deal_line_is_compare_body_fodder(line):
-                    body_lines.append(line)
-                else:
-                    kept_lines.append(line)
-                continue
-            body_lines.append(line)
-
-        body_joined = "\n\n".join(body_lines).strip()
-        body_joined = self._strip_url_only_paragraphs_from_body(body_joined)
-        return {"header": header, "body": body_joined, "kept_lines": kept_lines}
-
-    def _discord_bold_embed_headline(self, header: str) -> str:
-        """First line of embed description: Discord **bold**; avoid duplicating existing wrap."""
-        t = (header or "").strip()
-        if not t:
-            return t
-        if len(t) >= 4 and t.startswith("**") and t.endswith("**"):
-            return t
-        inner = t.replace("**", "")
-        return f"**{inner}**"
-
-    def _rebuild_amz_deals_embed_description(self, header: str, body: str, kept_lines: List[str], amazon_url: str) -> str:
-        amz = (amazon_url or "").strip()
-        parts: List[str] = []
-        h = (header or "").strip()
-        b = (body or "").strip()
-
-        if h:
-            parts.append(self._discord_bold_embed_headline(h))
-        if b:
-            parts.append(b)
-
-        # Preserve exact coupon/code/promo lines (factual, verbatim).
-        kept_clean = [str(x or "").strip() for x in (kept_lines or []) if str(x or "").strip()]
-        if kept_clean:
-            parts.append(" ".join(kept_clean))
-
-        if amz:
-            parts.append(amz)
-
-        out = "\n\n".join(p for p in parts if p)
-        return re.sub(r"\n{3,}", "\n\n", out).strip()
 
     async def _simple_flush_buffer(self, buf: _SimpleForwardBuffer) -> None:
         if not buf or not buf.dest_channel_id:
@@ -5427,6 +4829,44 @@ class InstorebotForwarder:
             out = self._strip_mavely_bridge_urls_when_shortlink_present(out)
         except Exception:
             pass
+
+        # Special-case: conversational deals (formerly structured Amazon/Gemini deal cards).
+        # New canonical behavior: plain merged-forward text, optionally Gemini-rephrased, with URLs preserved.
+        mapping = self._simple_forward_mapping_for_channel(buf.src_channel_id)
+        mode = str((mapping or {}).get("mode") or "").strip().lower() if isinstance(mapping, dict) else ""
+        if mode == "gemini_rephrase_amz_deals":
+            # Normalize CTA-style link lines (e.g. "👉 https://...") so we don't keep duplicate link paragraphs.
+            try:
+                lines = [ln.rstrip() for ln in out.replace("\r\n", "\n").split("\n")]
+                cleaned: List[str] = []
+                for ln in lines:
+                    s = _strip_leading_cta_prefixes(ln).strip()
+                    cleaned.append(s if s else "")
+                out = "\n".join(cleaned).strip()
+            except Exception:
+                pass
+
+            # Remove influencer bridge URLs if Gemini (or upstream) pasted them.
+            try:
+                out = self._strip_mavely_influencer_urls_from_text(out)
+            except Exception:
+                pass
+
+            # Ensure only the shortlink is kept when both shortlink + bridge exist.
+            try:
+                out = self._strip_mavely_bridge_urls_when_shortlink_present(out)
+            except Exception:
+                pass
+
+            # Best-effort Gemini rephrase of the whole merged message (URLs must stay unchanged).
+            try:
+                temp_override = self._gemini_temperature_from_simple_forward_mapping(mapping)
+                out2 = await self._gemini_minimal_rephrase("conversational_deals", out, temperature_override=temp_override)
+                out2 = str(out2 or "").strip()
+                if out2:
+                    out = out2
+            except Exception:
+                pass
 
         # Discord message limit: keep under 2000 chars.
         if len(out) > 1950:
@@ -5513,9 +4953,6 @@ class InstorebotForwarder:
         mode = str(mapping.get("mode") or "").strip().lower()
         if mode == "affiliated_leads":
             await self._maybe_affiliated_leads_forward(message, int(dest_channel_id), mapping)
-            return True
-        if mode == "gemini_rephrase_amz_deals":
-            await self._maybe_gemini_rephrase_amz_deals_forward(message, int(dest_channel_id), mapping)
             return True
         if mode == "price_error_embed_forward":
             await self._maybe_price_error_embed_forward(message, int(dest_channel_id), mapping)
@@ -5821,322 +5258,6 @@ class InstorebotForwarder:
                 dest_channel_id=int(dest_channel_id),
                 path="affiliated_leads",
                 extra="",
-                message_id=str(message.id),
-            )
-        except Exception:
-            return
-
-    async def _maybe_gemini_rephrase_amz_deals_forward(self, message: discord.Message, dest_channel_id: int, mapping: Dict[str, Any]) -> None:
-        """
-        Mirror World conversational deals route:
-        - prefer resolved canonical Amazon URL when possible
-        - otherwise allow forwarding deal-hub URLs (pricedoffers/dmflip/etc) when Amazon resolution fails
-        - reject already-formatted / looped deal cards
-        - aggressively clean source text
-        - parse into header + body
-        - Gemini rewrites only the structured fields
-        - send one concise embed with one final URL
-        """
-        if not message.guild:
-            return
-
-        ch = self.bot.get_channel(int(dest_channel_id))
-        if ch is None:
-            try:
-                ch = await self.bot.fetch_channel(int(dest_channel_id))
-            except Exception:
-                return
-
-        if not isinstance(ch, (discord.TextChannel, discord.Thread, discord.DMChannel)):
-            return
-
-        block = self._simple_message_block(message).strip()
-        if not block:
-            return
-
-        # If upstream mirrored both Mavely shortlink + expanded bridge link, keep only the shortlink.
-        try:
-            block = self._strip_mavely_bridge_urls_when_shortlink_present(block)
-        except Exception:
-            pass
-
-        # Hard guard: never post twice for the same source message id.
-        if self._amz_deals_src_msg_seen(int(message.id)):
-            _log_flow("FILTER_SKIP", reason="amz_deals_duplicate_source_message", channel_id=str(message.channel.id), message_id=str(message.id))
-            return
-
-        if self._amz_deals_message_looks_already_forwarded(message, block):
-            _log_flow(
-                "FILTER_SKIP",
-                reason="amz_deals_already_formatted_source",
-                channel_id=str(message.channel.id),
-                message_id=str(message.id),
-                guild_id=str(getattr(message.guild, "id", "")),
-            )
-            return
-
-        urls = self._collect_message_urls(message)
-        if not urls:
-            _log_flow("FILTER_SKIP", reason="amz_deals_no_urls", channel_id=str(message.channel.id), message_id=str(message.id))
-            return
-
-        det = None
-        try:
-            det = await self._detect_amazon(urls)
-        except Exception:
-            det = None
-        asin_ex = ""
-        raw_url = ""
-        url_kind = ""
-        if det and getattr(det, "final_url", ""):
-            raw_url = str(getattr(det, "final_url", "") or "").strip()
-            asin_ex = str(getattr(det, "asin", "") or "").strip().upper()
-            if raw_url and affiliate_rewriter.is_amazon_like_url(raw_url):
-                url_kind = "amazon"
-        if not raw_url:
-            # Allow non-Amazon deal hubs: pick a best-effort expanded HTTP url from the message.
-            try:
-                import aiohttp
-
-                timeout_s = float((mapping.get("expand_timeout_s") or _cfg_float(self.config, "amazon_expand_timeout_s", "AMAZON_EXPAND_TIMEOUT_S") or 8.0))
-                max_redirects = int(mapping.get("expand_max_redirects") or _cfg_int(self.config, "amazon_expand_max_redirects", "AMAZON_EXPAND_MAX_REDIRECTS") or 8)
-                hub_url = ""
-                async with aiohttp.ClientSession() as session:
-                    for u in urls:
-                        cand = str(u or "").strip()
-                        if not cand or not self._is_public_http_url_for_amz_deals(cand):
-                            continue
-                        # Never HTTP-expand mavely.app.link — expansion lands on mavelyinfluencer.com (bridge).
-                        if affiliate_rewriter.is_mavely_app_short_link(cand):
-                            raw_url = cand
-                            url_kind = "mavely_short"
-                            break
-                        expanded = await self._expand_url_best_effort(session, cand, timeout_s=timeout_s, max_redirects=max_redirects)
-                        expanded = affiliate_rewriter.unwrap_known_query_redirects(expanded) or expanded
-                        if not expanded:
-                            continue
-                        # If the expanded url is Amazon, use it.
-                        if affiliate_rewriter.is_amazon_like_url(expanded):
-                            raw_url = expanded
-                            url_kind = "amazon"
-                            asin_ex = affiliate_rewriter.extract_asin(raw_url) or ""
-                            asin_ex = str(asin_ex or "").strip().upper()
-                            break
-                        # Try known deal hub scrapers to extract an embedded Amazon url or ASIN.
-                        try:
-                            hub, hub_err = await self._scrape_deal_hub_for_amazon_assets(expanded)
-                        except Exception:
-                            hub, hub_err = None, None
-                        if hub and not hub_err:
-                            hub_amz = str(hub.get("amazon_url") or "").strip()
-                            if hub_amz and affiliate_rewriter.is_amazon_like_url(hub_amz):
-                                raw_url = hub_amz
-                                url_kind = "amazon"
-                                asin_ex = affiliate_rewriter.extract_asin(raw_url) or ""
-                                asin_ex = str(asin_ex or "").strip().upper()
-                                break
-                            hub_asin = str(hub.get("asin") or "").strip().upper()
-                            if hub_asin:
-                                mp = _cfg_str(self.config, "amazon_api_marketplace", "AMAZON_API_MARKETPLACE").rstrip("/")
-                                raw_url = f"{mp}/dp/{hub_asin}" if mp else f"https://www.amazon.com/dp/{hub_asin}"
-                                url_kind = "amazon"
-                                asin_ex = hub_asin
-                                break
-                        # Otherwise, keep the deal hub itself as the outbound URL.
-                        hub_url = expanded
-                        break
-                if (not raw_url) and hub_url:
-                    raw_url = hub_url
-                    url_kind = "hub"
-            except Exception:
-                raw_url = ""
-                url_kind = ""
-
-        if not raw_url:
-            _log_flow("FILTER_SKIP", reason="amz_deals_no_resolvable_url", channel_id=str(message.channel.id), message_id=str(message.id))
-            return
-
-        # Canonicalize Amazon URLs to /dp/ASIN (strip tracking/query).
-        # If affiliate mode is enabled, re-apply *only* the canonical tag format (no campaign/ref/linkId noise).
-        asin_can = (asin_ex or affiliate_rewriter.extract_asin(raw_url) or "").strip().upper()
-        if asin_can and affiliate_rewriter.is_amazon_like_url(raw_url):
-            mp = _cfg_str(self.config, "amazon_api_marketplace", "AMAZON_API_MARKETPLACE").rstrip("/")
-            clean = f"{mp}/dp/{asin_can}" if mp else f"https://www.amazon.com/dp/{asin_can}"
-            raw_url = clean
-            if self._amazon_affiliate_enabled():
-                try:
-                    aff = affiliate_rewriter.build_amazon_affiliate_url(self.config or {}, clean)
-                except Exception:
-                    aff = None
-                if aff:
-                    raw_url = str(aff)
-            asin_ex = asin_can
-
-        # Walmart (non-Amazon hub): never use help-center URLs as the embed link when a product URL exists.
-        if raw_url and url_kind != "amazon":
-            try:
-                host_l = (urlparse((raw_url or "").strip()).netloc or "").lower()
-            except Exception:
-                host_l = ""
-            if "walmart.com" in host_l:
-                try:
-                    import aiohttp
-
-                    w_timeout = float(
-                        (mapping.get("expand_timeout_s") or _cfg_float(self.config, "amazon_expand_timeout_s", "AMAZON_EXPAND_TIMEOUT_S") or 8.0)
-                    )
-                    w_redirects = int(
-                        mapping.get("expand_max_redirects") or _cfg_int(self.config, "amazon_expand_max_redirects", "AMAZON_EXPAND_MAX_REDIRECTS") or 8
-                    )
-                    async with aiohttp.ClientSession() as w_session:
-                        raw_url = await self._resolve_preferred_walmart_deal_embed_url(
-                            w_session,
-                            urls,
-                            timeout_s=w_timeout,
-                            max_redirects=w_redirects,
-                            current=raw_url,
-                        )
-                except Exception:
-                    pass
-
-        # Click target + trailing link line: keep mavely.app.link as in source; never mavelyinfluencer.com.
-        outbound_url = self._gemini_route_outbound_url(urls, raw_url, block).strip()
-        embed_href = outbound_url
-        if not embed_href and not self._host_is_mavely_influencer_bridge(raw_url):
-            embed_href = (raw_url or "").strip()
-        dedupe_link = embed_href or ("" if self._host_is_mavely_influencer_bridge(raw_url) else (raw_url or "").strip())
-
-        # Apply route TTL before outbound-URL dedupe (prune uses _amz_deals_sig_ttl_s).
-        self._amz_deals_sig_ttl_s = self._amz_deals_route_dedupe_ttl_s(mapping)
-        outbound_url_key = ""
-        if self._amz_deals_dedupe_by_outbound_url(mapping) and dedupe_link:
-            outbound_url_key = self._amz_deals_outbound_dedupe_key(dedupe_link)
-            if outbound_url_key and self._amz_deals_outbound_url_seen(int(dest_channel_id), outbound_url_key):
-                _log_flow(
-                    "FILTER_SKIP",
-                    reason="amz_deals_duplicate_outbound_url",
-                    channel_id=str(message.channel.id),
-                    message_id=str(message.id),
-                )
-                self._explain_duplicate_amz_deals_outbound_url(
-                    channel_id=int(message.channel.id),
-                    message_id=int(message.id),
-                    dest_channel_id=int(dest_channel_id),
-                    url_key=outbound_url_key,
-                )
-                return
-
-        # Route-specific cleaning
-        cleaned_block = self._clean_amz_deals_block_for_gemini_route(block)
-        cleaned_block = self._strip_mavely_influencer_urls_from_text(cleaned_block)
-        if not cleaned_block:
-            _log_flow("FILTER_SKIP", reason="amz_deals_clean_empty", channel_id=str(message.channel.id), message_id=str(message.id))
-            return
-        if not self._amz_deals_has_enough_signal(cleaned_block):
-            _log_flow("FILTER_SKIP", reason="amz_deals_low_signal", channel_id=str(message.channel.id), message_id=str(message.id))
-            return
-
-        # Route-specific duplicate guard (text + URL signature; outbound URL dedupe already ran above)
-        sig = self._amz_deals_signature(cleaned_block, (dedupe_link or raw_url).strip())
-        if self._amz_deals_sig_seen(sig):
-            _log_flow("FILTER_SKIP", reason="amz_deals_duplicate_sig", channel_id=str(message.channel.id), message_id=str(message.id))
-            self._explain_duplicate_amz_deals_sig(channel_id=int(message.channel.id), message_id=int(message.id))
-            return
-
-        desc_in = self._neutralize_mentions(cleaned_block)
-        max_chars = int(mapping.get("gemini_max_chars") or _cfg_int(self.config, "openai_max_chars", "OPENAI_MAX_CHARS") or 1800)
-        if len(desc_in) > max_chars:
-            desc_in = desc_in[: max_chars - 3] + "..."
-
-        parsed = self._parse_amz_deals_block_for_structured_gemini(desc_in)
-        h0 = str(parsed.get("header") or "").strip()
-        b0 = str(parsed.get("body") or "").strip()
-        kept = [self._strip_mavely_influencer_urls_from_text(str(x or "")).strip() for x in (parsed.get("kept_lines") or [])]
-        kept = [k for k in kept if k]
-
-        # Safety: if parser gives no header, use first non-empty cleaned line as fallback
-        if not h0:
-            first_line = cleaned_block.split("\n", 1)[0].strip()
-            if first_line:
-                h0 = first_line
-
-        temp_override = self._gemini_temperature_from_simple_forward_mapping(mapping)
-        gem_used = False
-        gem_fail: Optional[str] = None
-        try:
-            h1, b1, gem_fail = await self._gemini_rephrase_amz_deals_structured(
-                h0,
-                b0,
-                temperature_override=temp_override,
-            )
-            gem_used = not bool(gem_fail)
-        except Exception:
-            h1, b1, gem_fail = h0, b0, "gemini_exception"
-
-        # Final cleanup after Gemini just in case
-        h1 = re.sub(r"(?i)\bnew\s+deal\s+found!?\b", "", str(h1 or "")).strip(" :-|")
-        h1 = re.sub(r"(?i)\bsharp\s+price\b", "price", str(h1 or "")).strip()
-        b1 = re.sub(r"(?im)^product\s+info\s*$", "", str(b1 or ""))
-        b1 = re.sub(r"(?im)^clip\s+coupon.*$", "", b1)
-        b1 = re.sub(r"(?im)^only\s*\$\s*\d.*$", "", b1)
-        b1 = re.sub(r"(?im)^now\s*\$\s*\d.*$", "", b1)
-        b1 = re.sub(r"(?im)^was\s*\$\s*\d.*$", "", b1)
-        b1 = re.sub(r"(?im)^30[- ]day\s+prime\s+free\s+trial.*$", "", b1)
-        b1 = re.sub(r"(?i)\bsharp\s+price\b", "price", b1)
-        b1 = re.sub(r"\n{3,}", "\n\n", b1).strip()
-        h1 = self._strip_mavely_influencer_urls_from_text(h1 or "")
-        b1 = self._strip_mavely_influencer_urls_from_text(b1 or "")
-
-        # Guard against duplicate headline being echoed as the first body line.
-        try:
-            h_norm = re.sub(r"\s+", " ", (h1 or "")).strip().lower()
-            if h_norm and b1:
-                b_lines = [ln.rstrip() for ln in str(b1).split("\n")]
-                while b_lines and not b_lines[0].strip():
-                    b_lines.pop(0)
-                if b_lines:
-                    first_norm = re.sub(r"\s+", " ", b_lines[0]).strip().lower()
-                    if first_norm == h_norm:
-                        b_lines.pop(0)
-                        b1 = "\n".join(b_lines).strip()
-        except Exception:
-            pass
-
-        desc_out = self._rebuild_amz_deals_embed_description(h1, b1, kept, embed_href)
-        desc_out = self._strip_mavely_influencer_urls_from_text(desc_out)
-        if not desc_out:
-            _log_flow("FILTER_SKIP", reason="amz_deals_empty_final_description", channel_id=str(message.channel.id), message_id=str(message.id))
-            return
-
-        if len(desc_out) > 3900:
-            desc_out = desc_out[:3897] + "..."
-
-        embed = discord.Embed(description=desc_out, url=(embed_href or None))
-        media_u = self._first_source_embed_media_url(message) or self._first_attachment_image_url(message)
-        if media_u:
-            try:
-                embed.set_image(url=media_u)
-            except Exception:
-                pass
-
-        try:
-            await ch.send(embeds=[embed], allowed_mentions=discord.AllowedMentions.none())
-            self._amz_deals_sig_commit(sig)
-            if self._amz_deals_dedupe_by_outbound_url(mapping) and dedupe_link:
-                _dk = self._amz_deals_outbound_dedupe_key(dedupe_link)
-                if _dk:
-                    self._amz_deals_outbound_url_commit(int(dest_channel_id), _dk)
-            self._amz_deals_src_msg_commit(int(message.id))
-
-            self._log_message_forward_summary(
-                src_channel_id=int(message.channel.id),
-                dest_channel_id=int(dest_channel_id),
-                path="gemini_rephrase_amz_deals",
-                extra=(
-                    f"asin={asin_ex} gemini={'1' if gem_used else '0'} url_kind={url_kind}"
-                    if asin_ex
-                    else f"gemini={'1' if gem_used else '0'} url_kind={url_kind}"
-                ),
                 message_id=str(message.id),
             )
         except Exception:
