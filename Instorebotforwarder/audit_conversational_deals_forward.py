@@ -157,11 +157,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not args.no_gemini:
         before = desc
         desc = asyncio.run(rewrite_description(cfg, desc, no_gemini=False))
-        desc = str(desc or "").strip() or src_block
-        changed = ("yes" if (str(desc).strip() != str(before).strip()) else "no")
+        desc = str(desc or "").strip()
+        changed = ("yes" if (desc and (str(desc).strip() != str(before).strip())) else "no")
+        ok = ("yes" if bool(desc) else "no")
         _print_safe("3) GEMINI RESULT")
-        _print_safe(f"   changed={changed}")
+        _print_safe(f"   ok={ok} changed={changed}")
         _print_safe("")
+        if not desc:
+            _print_safe("4) OUTBOUND PREVIEW")
+            _print_safe("SKIPPED (Gemini failed or returned unchanged)")
+            return 0
     embed_url = first_url_in_text(desc)
     media_url = media_url_from_rest(data)
 

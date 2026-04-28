@@ -178,10 +178,10 @@ async def rewrite_description(cfg: Dict[str, Any], text: str, *, no_gemini: bool
     if not raw:
         return ""
     if no_gemini:
-        return raw
+        return ""
     key = str((cfg or {}).get("gemini_api_key") or "").strip()
     if not key:
-        return raw
+        return ""
     model = str((cfg or {}).get("gemini_model") or "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
     try:
         temp = float((cfg or {}).get("gemini_temperature") or 0.65)
@@ -202,7 +202,12 @@ async def rewrite_description(cfg: Dict[str, Any], text: str, *, no_gemini: bool
         usage_accumulator=None,
     )
     out = str(out or "").strip()
-    return out or raw
+    if not out:
+        return ""
+    # Strict: treat "unchanged" as failure.
+    if out.strip() == raw.strip():
+        return ""
+    return out
 
 
 def build_embed(description: str, *, media_url: str = "") -> discord.Embed:
@@ -247,6 +252,9 @@ async def forward_runtime_message(inst: Any, message: discord.Message) -> bool:
 
     src_block = simple_message_block_from_discord_message(message)
     desc = await rewrite_description(cfg, src_block, no_gemini=False)
+    if not str(desc or "").strip():
+        # Gemini failed/unchanged -> send nothing.
+        return True
     media = media_url_from_discord_message(message)
     embed = build_embed(desc, media_url=media)
     try:
