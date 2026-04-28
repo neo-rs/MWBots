@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
+from urllib.request import Request, urlopen
 
 import discord
 from discord import app_commands
@@ -458,6 +459,148 @@ class InstorebotForwarder:
         out = re.sub(r"\n{3,}", "\n\n", out).strip()
         return out if (out or not removed_any) else raw.strip()
 
+    # -----------------------
+    # Discord REST (audit helper)
+    # -----------------------
+    def _discord_rest_get_json(self, url: str, *, headers: Dict[str, str], timeout_s: float = 30.0) -> Dict[str, Any]:
+        req = Request(url, headers=headers, method="GET")
+        with urlopen(req, timeout=max(5.0, float(timeout_s))) as resp:
+            raw = resp.read()
+        data = json.loads(raw.decode("utf-8", errors="replace")) if raw else {}
+        return data if isinstance(data, dict) else {}
+
+    def _discord_rest_post_json(self, url: str, *, headers: Dict[str, str], payload: Dict[str, Any], timeout_s: float = 30.0) -> Dict[str, Any]:
+        body = json.dumps(payload).encode("utf-8")
+        req = Request(url, data=body, method="POST", headers={**headers, "Content-Type": "application/json"})
+        with urlopen(req, timeout=max(5.0, float(timeout_s))) as resp:
+            raw = resp.read()
+        data = json.loads(raw.decode("utf-8", errors="replace")) if raw else {}
+        return data if isinstance(data, dict) else {}
+
+    def _gemini_health_check(self) -> Tuple[bool, str]:
+        """
+        Lightweight Gemini API check (no Discord access). Returns (ok, detail).
+        """
+        key = str((self.config or {}).get("gemini_api_key") or "").strip()
+        if not key:
+            return False, "missing_api_key"
+        model = str((self.config or {}).get("gemini_model") or "").strip() or "gemini-1.5-flash"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": "Reply with exactly: OK"}]}],
+            "generationConfig": {"temperature": 0.0, "maxOutputTokens": 16, "topP": 1.0},
+        }
+        try:
+            out = self._discord_rest_post_json(url, headers={"User-Agent": "mirror-world-instoreaudit/1.0"}, payload=payload, timeout_s=float((self.config or {}).get("gemini_timeout_s") or 12.0))
+            cand = (((out or {}).get("candidates") or [])[0] or {}) if isinstance(out, dict) else {}
+            txt = (((cand.get("content") or {}).get("parts") or [{}])[0] or {}).get("text", "") if isinstance(cand, dict) else ""
+            if str(txt or "").strip().upper().startswith("OK"):
+                return True, "ok"
+            return True, "ok_unexpected_reply"
+        except Exception as e:
+            return False, f"error={type(e).__name__}: {str(e)[:160]}"
+
+    @dataclass
+    class _AuditChannel:
+        id: int
+
+    @dataclass
+    class _AuditGuild:
+        id: int
+
+    @dataclass
+    class _AuditAuthor:
+        id: int
+
+    @dataclass
+    class _AuditEmbedField:
+        name: str
+        value: str
+
+    @dataclass
+    class _AuditEmbedMedia:
+        url: str
+
+    @dataclass
+    class _AuditEmbed:
+        title: str = ""
+        description: str = ""
+        fields: List["InstorebotForwarder._AuditEmbedField"] = None  # type: ignore[assignment]
+        image: Optional["InstorebotForwarder._AuditEmbedMedia"] = None
+        thumbnail: Optional["InstorebotForwarder._AuditEmbedMedia"] = None
+
+    @dataclass
+    class _AuditAttachment:
+        url: str
+        filename: str = ""
+        content_type: str = ""
+
+    @dataclass
+    class _AuditMessage:
+        id: int
+        channel: "InstorebotForwarder._AuditChannel"
+        guild: Optional["InstorebotForwarder._AuditGuild"]
+        author: "InstorebotForwarder._AuditAuthor"
+        content: str
+        embeds: List["InstorebotForwarder._AuditEmbed"]
+        attachments: List["InstorebotForwarder._AuditAttachment"]
+
+    def _audit_message_from_discord_rest(self, data: Dict[str, Any], *, guild_id: Optional[int], channel_id: int) -> "InstorebotForwarder._AuditMessage":
+        msg_id = int(data.get("id") or 0)
+        author_id = int(((data.get("author") or {}) if isinstance(data.get("author"), dict) else {}).get("id") or 0)
+        content = str(data.get("content") or "")
+
+        embeds: List[InstorebotForwarder._AuditEmbed] = []
+        embeds_raw = data.get("embeds") or []
+        if isinstance(embeds_raw, list):
+            for e in embeds_raw:
+                if not isinstance(e, dict):
+                    continue
+                fields_in = e.get("fields") or []
+                fields: List[InstorebotForwarder._AuditEmbedField] = []
+                if isinstance(fields_in, list):
+                    for f in fields_in:
+                        if isinstance(f, dict):
+                            fields.append(self._AuditEmbedField(name=str(f.get("name") or ""), value=str(f.get("value") or "")))
+                image = None
+                thumbnail = None
+                if isinstance(e.get("image"), dict) and e["image"].get("url"):
+                    image = self._AuditEmbedMedia(url=str(e["image"]["url"]))
+                if isinstance(e.get("thumbnail"), dict) and e["thumbnail"].get("url"):
+                    thumbnail = self._AuditEmbedMedia(url=str(e["thumbnail"]["url"]))
+                embeds.append(
+                    self._AuditEmbed(
+                        title=str(e.get("title") or ""),
+                        description=str(e.get("description") or ""),
+                        fields=fields,
+                        image=image,
+                        thumbnail=thumbnail,
+                    )
+                )
+
+        attachments: List[InstorebotForwarder._AuditAttachment] = []
+        atts_raw = data.get("attachments") or []
+        if isinstance(atts_raw, list):
+            for a in atts_raw:
+                if isinstance(a, dict):
+                    attachments.append(
+                        self._AuditAttachment(
+                            url=str(a.get("url") or ""),
+                            filename=str(a.get("filename") or ""),
+                            content_type=str(a.get("content_type") or ""),
+                        )
+                    )
+
+        return self._AuditMessage(
+            id=msg_id,
+            channel=self._AuditChannel(id=int(channel_id)),
+            guild=self._AuditGuild(id=int(guild_id)) if guild_id else None,
+            author=self._AuditAuthor(id=author_id),
+            content=content,
+            embeds=embeds,
+            attachments=attachments,
+        )
+
     def _host_is_mavely_influencer_bridge(self, url: str) -> bool:
         try:
             h = (urlparse((url or "").strip()).netloc or "").lower()
@@ -481,6 +624,102 @@ class InstorebotForwarder:
         out = "\n".join(out_lines)
         out = influencer_re.sub("", out)
         return re.sub(r"\n{3,}", "\n\n", out).strip()
+
+    def _conversational_deals_strip_attachment_cdn_urls(self, text: str) -> str:
+        """
+        `_simple_message_block()` appends attachment CDN URLs as raw lines. For conversational-deals we
+        carry media via embed.set_image, so these URLs must not remain in the outbound description.
+        """
+        raw = (text or "").replace("\r\n", "\n")
+        if not raw.strip():
+            return ""
+        kept: List[str] = []
+        for ln in raw.split("\n"):
+            s = (ln or "").strip()
+            if not s:
+                kept.append("")
+                continue
+            low = s.lower()
+            if low.startswith("https://cdn.discordapp.com/attachments/") or low.startswith("http://cdn.discordapp.com/attachments/"):
+                continue
+            kept.append(ln)
+        out = "\n".join(kept)
+        return re.sub(r"\n{3,}", "\n\n", out).strip()
+
+    def _conversational_deals_normalize_cta_prefixes(self, text: str) -> str:
+        raw = (text or "").replace("\r\n", "\n")
+        if not raw.strip():
+            return ""
+        lines = [ln.rstrip() for ln in raw.split("\n")]
+        cleaned: List[str] = []
+        for ln in lines:
+            s = _strip_leading_cta_prefixes(ln).strip()
+            cleaned.append(s if s else "")
+        out = "\n".join(cleaned)
+        return re.sub(r"\n{3,}", "\n\n", out).strip()
+
+    async def _conversational_deals_build_description(self, message_like: Any, mapping: Dict[str, Any]) -> str:
+        """
+        Canonical conversational-deals description builder (shared by runtime + audit).
+        """
+        block = str(self._simple_message_block(message_like) or "").strip()
+        if not block:
+            return ""
+        # Cleanups (order matters).
+        block = self._conversational_deals_normalize_cta_prefixes(block)
+        block = self._conversational_deals_strip_attachment_cdn_urls(block)
+        block = self._strip_mavely_influencer_urls_from_text(block)
+        block = self._strip_mavely_bridge_urls_when_shortlink_present(block)
+        block = self._neutralize_mentions(block)
+
+        temp_override = self._gemini_temperature_from_simple_forward_mapping(mapping) if isinstance(mapping, dict) else None
+        try:
+            out2 = await self._gemini_minimal_rephrase("conversational_deals", block, temperature_override=temp_override)
+            out2 = str(out2 or "").strip()
+            if out2:
+                block = out2
+        except Exception:
+            pass
+
+        if len(block) > 1950:
+            block = block[:1940] + "…"
+        return block.strip()
+
+    async def _conversational_deals_build_description_from_text(self, text: str, mapping: Dict[str, Any]) -> str:
+        """
+        Canonical conversational-deals description builder for already-merged plain text.
+        (Used by runtime merge-forward flush; audit uses the message-like version.)
+        """
+        block = str(text or "").strip()
+        if not block:
+            return ""
+        block = self._conversational_deals_normalize_cta_prefixes(block)
+        block = self._conversational_deals_strip_attachment_cdn_urls(block)
+        block = self._strip_mavely_influencer_urls_from_text(block)
+        block = self._strip_mavely_bridge_urls_when_shortlink_present(block)
+        block = self._neutralize_mentions(block)
+
+        temp_override = self._gemini_temperature_from_simple_forward_mapping(mapping) if isinstance(mapping, dict) else None
+        try:
+            out2 = await self._gemini_minimal_rephrase("conversational_deals", block, temperature_override=temp_override)
+            out2 = str(out2 or "").strip()
+            if out2:
+                block = out2
+        except Exception:
+            pass
+
+        if len(block) > 1950:
+            block = block[:1940] + "…"
+        return block.strip()
+
+    def _conversational_deals_pick_embed_url(self, description: str) -> str:
+        try:
+            spans = affiliate_rewriter.extract_urls_with_spans(description or "")
+            if spans:
+                return str(spans[0][0] or "").strip().rstrip(").,]>]")
+        except Exception:
+            pass
+        return ""
 
     def _single_instance_lock_enabled(self) -> bool:
         v = (self.config or {}).get("single_instance_lock_enabled", None)
@@ -4849,34 +5088,8 @@ class InstorebotForwarder:
         mapping = self._simple_forward_mapping_for_channel(buf.src_channel_id)
         mode = str((mapping or {}).get("mode") or "").strip().lower() if isinstance(mapping, dict) else ""
         if mode == "gemini_rephrase_amz_deals":
-            # Normalize CTA-style link lines (e.g. "👉 https://...") so we don't keep duplicate link paragraphs.
             try:
-                lines = [ln.rstrip() for ln in out.replace("\r\n", "\n").split("\n")]
-                cleaned: List[str] = []
-                for ln in lines:
-                    s = _strip_leading_cta_prefixes(ln).strip()
-                    cleaned.append(s if s else "")
-                out = "\n".join(cleaned).strip()
-            except Exception:
-                pass
-
-            # Remove influencer bridge URLs if Gemini (or upstream) pasted them.
-            try:
-                out = self._strip_mavely_influencer_urls_from_text(out)
-            except Exception:
-                pass
-
-            # Ensure only the shortlink is kept when both shortlink + bridge exist.
-            try:
-                out = self._strip_mavely_bridge_urls_when_shortlink_present(out)
-            except Exception:
-                pass
-
-            # Best-effort Gemini rephrase of the whole merged message (URLs must stay unchanged).
-            try:
-                temp_override = self._gemini_temperature_from_simple_forward_mapping(mapping)
-                out2 = await self._gemini_minimal_rephrase("conversational_deals", out, temperature_override=temp_override)
-                out2 = str(out2 or "").strip()
+                out2 = await self._conversational_deals_build_description_from_text(out, mapping)
                 if out2:
                     out = out2
             except Exception:
