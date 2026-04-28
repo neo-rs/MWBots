@@ -2598,9 +2598,17 @@ class InstorebotForwarder:
 
         try:
             self._openai_last_mode[f"gemini:{kind}"] = "api_call"
-            from MWBots.Instorebotforwarder.automatedParaphrase.gemini_paraphraser import (
-                minimal_rephrase_keep_urls,
-            )
+            # Must work in both layouts:
+            # - Windows dev repo: `MWBots/Instorebotforwarder/...`
+            # - Oracle live tree: `/home/rsadmin/bots/mirror-world/Instorebotforwarder/...` (no `MWBots` package)
+            try:
+                from MWBots.Instorebotforwarder.automatedParaphrase.gemini_paraphraser import (  # type: ignore
+                    minimal_rephrase_keep_urls,
+                )
+            except Exception:
+                from automatedParaphrase.gemini_paraphraser import (  # type: ignore
+                    minimal_rephrase_keep_urls,
+                )
 
             _log_flow("GEMINI", kind=kind, model=self._gemini_model(), temperature=f"{temp:.4f}", override=("1" if temperature_override is not None else "0"))
             out = await minimal_rephrase_keep_urls(
