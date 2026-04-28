@@ -413,6 +413,7 @@ class _SimpleForwardBuffer:
     parts: List[str]
     shop_url_original: str
     shop_url_expanded: str
+    media_url: str
     last_ts: float
     seq: int
 
@@ -4888,6 +4889,40 @@ class InstorebotForwarder:
                     log.debug("StockX enrich failed: %s", str(e)[:120])
 
         try:
+            mapping = self._simple_forward_mapping_for_channel(buf.src_channel_id)
+            mode = str((mapping or {}).get("mode") or "").strip().lower() if isinstance(mapping, dict) else ""
+
+            # Conversational-deals: always send as an embed (consistent formatting + allows image carryover).
+            if mode == "gemini_rephrase_amz_deals":
+                # Use the first URL in the outbound text as the embed click target when present.
+                embed_url = ""
+                try:
+                    spans = affiliate_rewriter.extract_urls_with_spans(out)
+                    if spans:
+                        embed_url = str(spans[0][0] or "").strip()
+                except Exception:
+                    embed_url = ""
+
+                desc = out
+                if len(desc) > 3900:
+                    desc = desc[:3897] + "..."
+                embed = discord.Embed(description=desc, url=(embed_url or None))
+                media_u = str(getattr(buf, "media_url", "") or "").strip()
+                if media_u:
+                    try:
+                        embed.set_image(url=media_u)
+                    except Exception:
+                        pass
+
+                await ch.send(embeds=[embed], allowed_mentions=discord.AllowedMentions.none())
+                self._log_message_forward_summary(
+                    src_channel_id=int(buf.src_channel_id),
+                    dest_channel_id=int(buf.dest_channel_id),
+                    path="conversational_deals_embed",
+                    extra=("image=1" if bool(media_u) else "image=0"),
+                )
+                return
+
             await ch.send(content=out, embeds=embeds if embeds else None, allowed_mentions=discord.AllowedMentions.none())
             self._log_message_forward_summary(
                 src_channel_id=int(buf.src_channel_id),
@@ -5013,6 +5048,13 @@ class InstorebotForwarder:
             # Still keep buffering for attachments-only messages; _simple_message_block already handles.
             return True
 
+        # Best-effort media for "always embed" routes: prefer source embed image/thumbnail, else attachment image.
+        media_u = ""
+        try:
+            media_u = self._first_source_embed_media_url(message) or self._first_attachment_image_url(message)
+        except Exception:
+            media_u = ""
+
         # Extract shop URL candidate (first seen wins)
         shop_url = self._simple_extract_shop_link(message.content or "")
 
@@ -5040,6 +5082,8 @@ class InstorebotForwarder:
                     cur.shop_url_original = shop_url
                 if (not cur.shop_url_expanded) and expanded_shop_url:
                     cur.shop_url_expanded = expanded_shop_url
+                if (not getattr(cur, "media_url", "")) and media_u:
+                    cur.media_url = media_u
                 self._simple_schedule_flush(src_channel_id=src_channel_id, merge_window_s=merge_window_s, expected_seq=cur.seq)
                 return True
 
@@ -5056,6 +5100,7 @@ class InstorebotForwarder:
                 parts=[block],
                 shop_url_original=shop_url or "",
                 shop_url_expanded=expanded_shop_url or "",
+                media_url=media_u or "",
                 last_ts=now,
                 seq=1,
             )
