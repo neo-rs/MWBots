@@ -29,6 +29,7 @@ from patterns import (
     should_skip_amazon_profitable_leads_monitor_blob,
     is_simple_amazon_profitable_lead_blob,
     passes_deal_substance_gate,
+    affiliate_should_suppress_affiliated_links,
     CARDS_PATTERN,
     DISCOUNTED_STORE_PATTERN,
     INSTORE_KEYWORDS,
@@ -1121,47 +1122,44 @@ def select_target_channel_id(
     if (source_group == "online") and cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID:
         att_text = " ".join([str(a.get("url", "")) for a in (attachments or []) if isinstance(a, dict)])
         blob = (text_to_check or "") + " " + att_text
-        if trace is not None:
-            try:
-                m = _STORE_DOMAIN_PATTERN.search(blob) if ("http" in blob) else None
-                dom = m.group(1).lower() if m else ""
-                mavely = "mavely.app" in blob.lower()
-                trace.setdefault("classifier", {}).setdefault("matches", {}).update(
-                    {
-                        "affiliate_http": bool("http" in blob),
-                        "affiliate_domain": dom,
-                        "affiliate_mavely": bool(mavely),
-                    }
-                )
-            except Exception:
-                pass
-        if _AFFILIATE_GRAB_TEMPLATE.search(blob or ""):
+        # Hard suppressions: keep AFFILIATED_LINKS focused (exclude flip templates / pokemon / comics / stubs).
+        try:
+            sup = affiliate_should_suppress_affiliated_links(blob, min_core_chars=int(getattr(cfg, "AFFILIATED_LINKS_MIN_SUBSTANCE_CHARS", 80) or 80))
+        except Exception:
+            sup = affiliate_should_suppress_affiliated_links(blob, min_core_chars=80)
+        if sup:
             if trace is not None:
                 try:
-                    trace.setdefault("classifier", {}).setdefault("matches", {})["affiliate_skip"] = "grab_it_here_template"
+                    trace.setdefault("classifier", {}).setdefault("matches", {})["affiliate_skip"] = sup
                 except Exception:
                     pass
-        elif "http" in blob and (_STORE_DOMAIN_PATTERN.search(blob) or "mavely.app" in blob.lower()):
+        if not sup:
             if trace is not None:
                 try:
-                    trace.setdefault("classifier", {}).setdefault("matches", {})["affiliate_reason"] = "store_domain_or_mavely"
+                    m = _STORE_DOMAIN_PATTERN.search(blob) if ("http" in blob) else None
+                    dom = m.group(1).lower() if m else ""
+                    mavely = "mavely.app" in blob.lower()
+                    trace.setdefault("classifier", {}).setdefault("matches", {}).update(
+                        {
+                            "affiliate_http": bool("http" in blob),
+                            "affiliate_domain": dom,
+                            "affiliate_mavely": bool(mavely),
+                        }
+                    )
                 except Exception:
                     pass
-            if not _affiliate_skip_link_only_route(
-                message_content=message_content or "",
-                embeds=embeds,
-                attachments=attachments,
-                trace=trace,
-            ):
-                return cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID, "AFFILIATED_LINKS"
-        if "http" in blob:
-            if trace is not None:
-                try:
-                    trace.setdefault("classifier", {}).setdefault("matches", {})["affiliate_reason"] = "http_present"
-                except Exception:
-                    pass
-            # Avoid routing image-only posts (Discord CDN) into affiliate bucket.
-            if _affiliate_has_non_discord_url(blob):
+            if _AFFILIATE_GRAB_TEMPLATE.search(blob or ""):
+                if trace is not None:
+                    try:
+                        trace.setdefault("classifier", {}).setdefault("matches", {})["affiliate_skip"] = "grab_it_here_template"
+                    except Exception:
+                        pass
+            elif "http" in blob and (_STORE_DOMAIN_PATTERN.search(blob) or "mavely.app" in blob.lower()):
+                if trace is not None:
+                    try:
+                        trace.setdefault("classifier", {}).setdefault("matches", {})["affiliate_reason"] = "store_domain_or_mavely"
+                    except Exception:
+                        pass
                 if not _affiliate_skip_link_only_route(
                     message_content=message_content or "",
                     embeds=embeds,
@@ -1169,11 +1167,26 @@ def select_target_channel_id(
                     trace=trace,
                 ):
                     return cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID, "AFFILIATED_LINKS"
-            if trace is not None:
-                try:
-                    trace.setdefault("classifier", {}).setdefault("matches", {})["affiliate_skip"] = "discord_media_only"
-                except Exception:
-                    pass
+            if "http" in blob:
+                if trace is not None:
+                    try:
+                        trace.setdefault("classifier", {}).setdefault("matches", {})["affiliate_reason"] = "http_present"
+                    except Exception:
+                        pass
+                # Avoid routing image-only posts (Discord CDN) into affiliate bucket.
+                if _affiliate_has_non_discord_url(blob):
+                    if not _affiliate_skip_link_only_route(
+                        message_content=message_content or "",
+                        embeds=embeds,
+                        attachments=attachments,
+                        trace=trace,
+                    ):
+                        return cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID, "AFFILIATED_LINKS"
+                if trace is not None:
+                    try:
+                        trace.setdefault("classifier", {}).setdefault("matches", {})["affiliate_skip"] = "discord_media_only"
+                    except Exception:
+                        pass
 
     # 11) DEFAULT fallback
     if (not skip_amazon) and AMAZON_ASIN_PATTERN.search(text_to_check or "") and cfg.SMARTFILTER_AMAZON_CHANNEL_ID and _is_amazon_primary(text_blob):

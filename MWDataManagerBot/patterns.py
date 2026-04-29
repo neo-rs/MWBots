@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 # NOTE: These are vendored from `neonxt/core/global_filters.py` so MWDataManagerBot
 # can be standalone (no `neonxt.*` imports).
@@ -457,6 +458,101 @@ def passes_deal_substance_gate(blob: str, *, min_core_chars: int) -> bool:
     if mc < 12:
         mc = 12
     return deal_substance_core_len(blob) >= mc
+
+
+# AFFILIATED_LINKS suppressions (channel is noisy if it accepts flip templates / fandom drops / stub edits).
+_AFFILIATE_FLIP_FIELDS_PATTERN = re.compile(
+    r"(?im)^\s*(when|where|retail|resell)\b",
+    re.IGNORECASE,
+)
+_AFFILIATE_QUICK_LINKS_PATTERN = re.compile(r"(?im)^\s*quick\s+links?\b", re.IGNORECASE)
+_AFFILIATE_POKEMON_PATTERN = re.compile(r"\bpok[eé]mon\b", re.IGNORECASE)
+_AFFILIATE_POKEMON_MENTION_PATTERN = re.compile(r"@pokemon\b", re.IGNORECASE)
+_AFFILIATE_COMICS_PATTERN = re.compile(
+    r"\b(marvel|capcom|dc|dcu|mcu|x-?men|avengers|spider-?man|batman|superman|wolverine|daredevil|punisher|"
+    r"joker|harley\s+quinn|deadpool|iron\s+man|captain\s+america|thor|hulk)\b",
+    re.IGNORECASE,
+)
+_AFFILIATE_COMICS_CONTEXT_PATTERN = re.compile(
+    r"\b(variant|cover|foc|ratio|print(?:ing)?|issue\s*#?\s*\d+|#\s*\d{1,4})\b",
+    re.IGNORECASE,
+)
+
+
+def affiliate_should_suppress_affiliated_links(blob: str, *, min_core_chars: int = 80) -> str:
+    """
+    Return a non-empty suppression reason when the message should NOT route to AFFILIATED_LINKS.
+    This keeps AFFILIATED_LINKS focused on simple non-Amazon product leads, not flip-templates or fandom drops.
+    """
+    raw = str(blob or "").strip()
+    if not raw:
+        return "empty"
+    core_len = deal_substance_core_len(raw)
+    # Very short stubs are usually incomplete edits / placeholder embeds.
+    if core_len < 25:
+        return "thin_stub_message"
+    # Only apply the configurable length gate when the message *looks* truncated (ellipsis / monitor bylines),
+    # otherwise short "link + one sentence" leads are allowed.
+    try:
+        mc = int(min_core_chars or 0)
+    except Exception:
+        mc = 0
+    if mc > 0 and core_len < mc:
+        if ("..." in raw) or re.search(r"(?i)\bfrom\s*:", raw) or re.search(r"(?i)\bby\s*:", raw):
+            return "thin_truncated_message"
+    # Monitor footer stubs (From/By) without any pricing context are usually incomplete/low-signal.
+    has_footer = bool(re.search(r"(?i)\bfrom\s*:", raw) and re.search(r"(?i)\bby\s*:", raw))
+    has_price_token = bool(re.search(r"[$£€]\s*\d|\d+\s*[$£€]|\b\d+%\b", raw))
+    if has_footer and (not has_price_token) and core_len < 140:
+        return "footer_stub_no_price"
+
+    # Truncated / placeholder URLs are not "affiliate links" (e.g. https://www/...).
+    # Also: Discord message jump links by themselves should not route to AFFILIATED_LINKS.
+    try:
+        urls = re.findall(r"https?://[^\s<>\"]+", raw, flags=re.IGNORECASE)
+    except Exception:
+        urls = []
+    if urls:
+        non_discord_urls: List[str] = []
+        for u in urls:
+            ul = str(u or "").strip()
+            if not ul:
+                continue
+            if "..." in ul or ul.endswith("/") and "www/..." in ul.lower():
+                return "truncated_url"
+            try:
+                p = urlparse(ul)
+                host = (p.netloc or "").strip().lower()
+            except Exception:
+                host = ""
+            # bad placeholders like https://www/... or host with no dot
+            if host in ("www", "www.") or (host and "." not in host):
+                return "truncated_url"
+            if "discord.com" in host or "discordapp.com" in host:
+                continue
+            non_discord_urls.append(ul)
+        if (not non_discord_urls) and re.search(r"(?i)discord(?:app)?\.com/channels/\d+/\d+/\d+", raw):
+            return "discord_message_link_only"
+
+    # Flip template fields: When/Where/Retail/Resell (+ quick links or ebay) => not AFFILIATED_LINKS.
+    has_when = bool(re.search(r"(?im)^\s*when\b", raw))
+    has_where = bool(re.search(r"(?im)^\s*where\b", raw))
+    has_retail = bool(re.search(r"(?im)^\s*retail\b", raw))
+    has_resell = bool(re.search(r"(?im)^\s*resell\b", raw))
+    if has_when and has_where and has_retail and has_resell:
+        return "flip_template_fields"
+    if has_retail and has_resell and (bool(_AFFILIATE_QUICK_LINKS_PATTERN.search(raw)) or "ebay" in raw.lower()):
+        return "flip_template_retail_resell"
+
+    # Pokemon: product feeds + role pings are not AFFILIATED_LINKS.
+    if _AFFILIATE_POKEMON_PATTERN.search(raw) or _AFFILIATE_POKEMON_MENTION_PATTERN.search(raw):
+        return "pokemon_content"
+
+    # Comics / hero-villain fandom posts: only suppress when comic-like context exists, to avoid blocking "Washington DC".
+    if _AFFILIATE_COMICS_PATTERN.search(raw) and _AFFILIATE_COMICS_CONTEXT_PATTERN.search(raw):
+        return "comics_fandom_content"
+
+    return ""
 
 
 CLEARANCE_PATTERN = re.compile(
