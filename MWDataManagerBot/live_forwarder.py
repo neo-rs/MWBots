@@ -43,7 +43,7 @@ from utils import (
     generate_content_signature,
     is_image_attachment,
     is_discord_media_url,
-    rewrite_affiliate_links_in_message,
+    record_link_host_samples_from_text,
 )
 
 def _first_non_discord_url(urls: List[str]) -> str:
@@ -1053,6 +1053,12 @@ class MessageForwarder:
         text_to_check = (content + " " + " ".join(embed_texts)).strip()
         original_text_for_raw = (content + " " + " ".join(embed_texts)).strip()
 
+        # Runtime: record one sample URL per host (last-seen wins). Excludes Discord links.
+        try:
+            record_link_host_samples_from_text(original_text_for_raw)
+        except Exception:
+            pass
+
         raw_links: List[str] = []
         if cfg.ENABLE_RAW_LINK_UNWRAP:
             try:
@@ -1159,23 +1165,10 @@ class MessageForwarder:
                 deduped.append((cid, tag))
             dispatch_link_types, stop_after_first = order_link_types(deduped)
 
-        # Format output (also used for UNCLASSIFIED fallback)
+        # Format output (also used for UNCLASSIFIED fallback). Visible message text matches source:
+        # unwrap/affiliate expansion applies only to text_to_check above (classification), not outbound content.
         formatted_content = content
         replaced = False
-        if cfg.ENABLE_RAW_LINK_UNWRAP:
-            try:
-                formatted_content, inline_raw, did_inline = await rewrite_affiliate_links_in_message(
-                    formatted_content, raw_links
-                )
-                if inline_raw:
-                    seen = set(raw_links or [])
-                    for u in inline_raw:
-                        if u and u not in seen:
-                            seen.add(u)
-                            raw_links.append(u)
-                replaced = bool(did_inline)
-            except Exception:
-                replaced = False
 
         embeds_out = format_embeds_for_forwarding(embeds)
         # Discum-style output: when reuploading attachments as real files, do NOT convert them into embed images.

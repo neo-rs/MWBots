@@ -40,6 +40,11 @@ ENABLE_DEFAULT_FALLBACK: bool = False
 # Raw-link behavior (ported from legacy)
 ENABLE_RAW_LINK_UNWRAP: bool = True
 
+# Runtime data capture: record one sample URL per host (last-seen wins).
+LINK_HOST_SAMPLES_ENABLED: bool = False
+LINK_HOST_SAMPLES_PATH: str = ""
+LINK_HOST_SAMPLES_MAX_HOSTS: int = 2000
+
 # Affiliate: skip routing bare URL-only posts (no embeds, no attachments) to AFFILIATED_LINKS.
 AFFILIATE_SKIP_LINK_ONLY_MESSAGES: bool = True
 AFFILIATED_LINKS_MIN_SUBSTANCE_CHARS: int = 80
@@ -268,6 +273,16 @@ def init(settings: Dict[str, Any]) -> None:
     MIRRORWORLD_ROUTE_INSTORE = _parse_route_map(settings.get("mirrorworld_route_instore"))
 
     ENABLE_RAW_LINK_UNWRAP = bool(settings.get("enable_raw_link_unwrap", True))
+
+    # Runtime link host samples (JSON map; one sample per host, last-seen wins).
+    LINK_HOST_SAMPLES_ENABLED = bool(settings.get("link_host_samples_enabled", False))
+    LINK_HOST_SAMPLES_PATH = str(settings.get("link_host_samples_path", "") or "").strip()
+    LINK_HOST_SAMPLES_MAX_HOSTS = _get_int(settings, "link_host_samples_max_hosts", 2000)
+    if LINK_HOST_SAMPLES_MAX_HOSTS < 50:
+        LINK_HOST_SAMPLES_MAX_HOSTS = 50
+    if LINK_HOST_SAMPLES_MAX_HOSTS > 20000:
+        LINK_HOST_SAMPLES_MAX_HOSTS = 20000
+
     AFFILIATE_SKIP_LINK_ONLY_MESSAGES = bool(settings.get("affiliate_skip_link_only_messages", True))
     AFFILIATED_LINKS_MIN_SUBSTANCE_CHARS = _get_int(settings, "affiliated_links_min_substance_chars", 80)
     if AFFILIATED_LINKS_MIN_SUBSTANCE_CHARS < 12:

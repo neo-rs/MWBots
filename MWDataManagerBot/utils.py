@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import re
+import threading
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
+from pathlib import Path
 
 from patterns import THEATRE_CONTEXT_PATTERN, THEATRE_MERCH_PATTERN, THEATRE_STORE_PATTERN
 
@@ -415,6 +418,187 @@ _DISCORD_MEDIA_HOSTS = {
     "cdn.discordapp.net",
 }
 
+_DISCORD_LINK_HOSTS = {
+    "discord.com",
+    "discord.gg",
+    "discordapp.com",
+    "discord.me",
+}
+
+
+def _is_discord_link_url(url: str) -> bool:
+    try:
+        host = (urlparse(url).netloc or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if not host:
+            return False
+        if host in _DISCORD_MEDIA_HOSTS:
+            return True
+        if host in _DISCORD_LINK_HOSTS:
+            return True
+        # Covers subdomains like ptb.discord.com, canary.discord.com
+        if host.endswith(".discord.com"):
+            return True
+        return False
+    except Exception:
+        return False
+
+
+_LINK_HOST_SAMPLES_LOCK = threading.RLock()
+_LINK_HOST_SAMPLES_CACHE: Optional[Dict[str, Any]] = None
+_LINK_HOST_SAMPLES_CACHE_PATH: Optional[str] = None
+
+
+def record_link_host_samples_from_text(text: str) -> None:
+    """
+    Persist one sample URL per host to a runtime JSON file (last-seen wins).
+    Excludes Discord links/media URLs.
+
+    Config (settings_store):
+      - link_host_samples_enabled (bool)
+      - link_host_samples_path (str) optional; default: logs/link_host_samples.json
+      - link_host_samples_max_hosts (int)
+    """
+    try:
+        import settings_store as cfg
+    except Exception:
+        return
+
+    if not bool(getattr(cfg, "LINK_HOST_SAMPLES_ENABLED", False)):
+        return
+
+    raw_text = str(text or "")
+    if not raw_text.strip():
+        return
+
+    # Extract raw URLs as they appear (keep query/path; don't normalize away what you want to inspect later).
+    try:
+        urls = RAW_URL_REGEX.findall(raw_text)[:60]
+    except Exception:
+        urls = []
+    if not urls:
+        return
+
+    # Resolve storage path.
+    try:
+        path_cfg = str(getattr(cfg, "LINK_HOST_SAMPLES_PATH", "") or "").strip()
+    except Exception:
+        path_cfg = ""
+
+    try:
+        max_hosts = int(getattr(cfg, "LINK_HOST_SAMPLES_MAX_HOSTS", 2000) or 2000)
+    except Exception:
+        max_hosts = 2000
+    max_hosts = max(50, min(20000, max_hosts))
+
+    bot_dir = Path(__file__).resolve().parent
+    if path_cfg:
+        p = Path(path_cfg)
+        if not p.is_absolute():
+            p = bot_dir / p
+        store_path = p
+    else:
+        store_path = bot_dir / "logs" / "link_host_samples.json"
+
+    now_iso = time.strftime("%Y-%m-%dT%H:%M:%S")
+
+    with _LINK_HOST_SAMPLES_LOCK:
+        global _LINK_HOST_SAMPLES_CACHE, _LINK_HOST_SAMPLES_CACHE_PATH
+
+        cache_path_str = str(store_path)
+        if _LINK_HOST_SAMPLES_CACHE is None or _LINK_HOST_SAMPLES_CACHE_PATH != cache_path_str:
+            _LINK_HOST_SAMPLES_CACHE_PATH = cache_path_str
+            _LINK_HOST_SAMPLES_CACHE = {"hosts": {}, "updated_at": now_iso}
+            try:
+                if store_path.exists():
+                    loaded = json.loads(store_path.read_text(encoding="utf-8") or "{}")
+                    if isinstance(loaded, dict) and isinstance(loaded.get("hosts"), dict):
+                        _LINK_HOST_SAMPLES_CACHE = loaded
+            except Exception:
+                _LINK_HOST_SAMPLES_CACHE = {"hosts": {}, "updated_at": now_iso}
+
+        data = _LINK_HOST_SAMPLES_CACHE if isinstance(_LINK_HOST_SAMPLES_CACHE, dict) else {"hosts": {}}
+        hosts = data.get("hosts")
+        if not isinstance(hosts, dict):
+            hosts = {}
+            data["hosts"] = hosts
+
+        changed = False
+
+        for u in urls:
+            url = str(u or "").strip()
+            if not url:
+                continue
+            if _is_discord_link_url(url):
+                continue
+            try:
+                parsed = urlparse(url)
+                host = (parsed.netloc or "").lower()
+                if host.startswith("www."):
+                    host = host[4:]
+            except Exception:
+                host = ""
+            if not host:
+                continue
+            key = f"https://{host}"
+
+            prev = hosts.get(key)
+            if not isinstance(prev, dict):
+                prev = None
+
+            if prev is None:
+                hosts[key] = {
+                    "first_seen_at": now_iso,
+                    "last_seen_at": now_iso,
+                    "seen_count": 1,
+                    "last_url": url,
+                }
+                changed = True
+                continue
+
+            # Update only when needed (avoid per-message writes when no new info).
+            try:
+                prev_url = str(prev.get("last_url") or "").strip()
+            except Exception:
+                prev_url = ""
+            if prev_url != url:
+                prev["last_url"] = url
+                changed = True
+            try:
+                prev["seen_count"] = int(prev.get("seen_count") or 0) + 1
+            except Exception:
+                prev["seen_count"] = 1
+            prev["last_seen_at"] = now_iso
+
+        # Enforce cap: if we exceeded max_hosts, evict oldest by first_seen_at.
+        try:
+            if len(hosts) > max_hosts:
+                items: List[Tuple[str, Any]] = list(hosts.items())
+                items.sort(key=lambda kv: str((kv[1] or {}).get("first_seen_at") or ""))
+                drop = max(0, len(items) - max_hosts)
+                for i in range(drop):
+                    try:
+                        hosts.pop(items[i][0], None)
+                        changed = True
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        if not changed:
+            return
+
+        data["updated_at"] = now_iso
+        try:
+            store_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = Path(str(store_path) + ".tmp")
+            tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(store_path)
+        except Exception:
+            # Best-effort; avoid impacting routing/forwarding.
+            return
+
 
 def _is_affiliate_domain(url: str) -> bool:
     try:
@@ -437,20 +621,6 @@ def _is_discord_media_url(url: str) -> bool:
 def is_discord_media_url(url: str) -> bool:
     """Public wrapper for internal Discord CDN/media URL detection."""
     return _is_discord_media_url(url)
-
-
-def is_mavely_wrapper_url(url: str) -> bool:
-    """
-    True for Mavely/Branch-style wrapper URLs that we should NOT rewrite inline.
-    These links are intentionally "the share link" and should be forwarded as-is.
-    """
-    try:
-        host = (urlparse(url).netloc or "").lower()
-        if host.startswith("www."):
-            host = host[4:]
-        return host in {"mavely.app.link", "mavelylife.com"}
-    except Exception:
-        return False
 
 
 def canonicalize_amazon_url(url: str) -> str:
@@ -1006,153 +1176,4 @@ async def augment_text_with_affiliate_redirects(text: str) -> Tuple[str, List[st
     if extracted:
         text = (text + " " + " ".join(extracted)).strip()
     return text, extracted
-
-
-def _pick_best_raw_url(raw_urls: List[str]) -> Optional[str]:
-    candidates = [u for u in (raw_urls or []) if isinstance(u, str) and u.startswith("http")]
-    if not candidates:
-        return None
-    # Prefer non-affiliate destination URLs
-    for u in candidates:
-        if not _is_affiliate_domain(u):
-            # Prefer canonical amazon for amazon hosts
-            host = (urlparse(u).netloc or "").lower()
-            if _AMAZON_HOST_RE.search(host):
-                return canonicalize_amazon_url_keep_tag(u)
-            if _AMZN_SHORT_RE.match(u):
-                return normalize_url(u)
-            return u
-    return candidates[0]
-
-
-def _split_trailing_url_punct(token: str) -> Tuple[str, str]:
-    """
-    Split "url-like token" from trailing punctuation that often follows links in chat.
-    Example: "https://x.y/z)." -> ("https://x.y/z", ").")
-    """
-    s = (token or "").strip()
-    if not s:
-        return "", ""
-    tail = ""
-    while s and s[-1] in ".,);]}>":
-        tail = s[-1] + tail
-        s = s[:-1]
-    return s, tail
-
-
-async def rewrite_affiliate_links_in_message(content: str, raw_urls: Optional[List[str]] = None) -> Tuple[str, List[str], bool]:
-    """
-    Rewrite wrapper links in-place so the forwarded message contains the destination link(s),
-    and remove any existing "Raw links:" blocks that older logic may have appended.
-
-    Returns:
-      (new_content, extracted_urls, did_replace_any)
-    """
-    if not isinstance(content, str) or not content.strip():
-        return content, [], False
-
-    did_replace = False
-    extracted: List[str] = []
-
-    # Remove any existing "Raw links:" block from older logic.
-    cleaned = re.sub(
-        r"\n+Raw links:\s*\n(?:<?https?://\S+>?\s*)+",
-        "",
-        content,
-        flags=re.IGNORECASE,
-    )
-    if cleaned != content:
-        did_replace = True
-        content = cleaned
-
-    dmflip_re = re.compile(r'https?://(?:www\.)?dmflip\.com/[^\s<>"\']+', re.IGNORECASE)
-    ring_re = re.compile(
-        r"(?:https?://(?:www\.)?)?ringinthedeals\.com/deal/[^\s<>'\"\)\]]+",
-        re.IGNORECASE,
-    )
-
-    # dmflip -> amazon
-    dmflip_matches = dmflip_re.findall(content)
-    if dmflip_matches:
-        uniques: List[str] = []
-        seen: Set[str] = set()
-        for token in dmflip_matches:
-            clean, _tail = _split_trailing_url_punct(token)
-            if clean and clean not in seen:
-                seen.add(clean)
-                uniques.append(clean)
-        tasks = [extract_amazon_link_from_dmflip(u) for u in uniques[:5]]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        resolved: Dict[str, str] = {}
-        for src, res in zip(uniques[:5], results):
-            if isinstance(res, str) and res:
-                resolved[src] = canonicalize_amazon_url_keep_tag(res)
-        for token in dmflip_matches:
-            clean, tail = _split_trailing_url_punct(token)
-            raw = resolved.get(clean or "")
-            if raw:
-                extracted.append(raw)
-                rep = f"<{raw}>{tail}"
-                if token in content and rep not in content:
-                    content = content.replace(token, rep)
-                    did_replace = True
-
-    # ringinthedeals -> amazon
-    ring_matches = ring_re.findall(content)
-    if ring_matches:
-        uniques = []
-        seen = set()
-        for token in ring_matches:
-            clean, _tail = _split_trailing_url_punct(token)
-            if clean and clean not in seen:
-                seen.add(clean)
-                uniques.append(clean)
-        tasks = [extract_amazon_link_from_ringinthedeals(u) for u in uniques[:5]]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        resolved = {}
-        for src, res in zip(uniques[:5], results):
-            if isinstance(res, str) and res:
-                resolved[src] = canonicalize_amazon_url_keep_tag(res)
-        for token in ring_matches:
-            clean, tail = _split_trailing_url_punct(token)
-            raw = resolved.get(clean or "")
-            if raw:
-                extracted.append(raw)
-                rep = f"<{raw}>{tail}"
-                if token in content and rep not in content:
-                    content = content.replace(token, rep)
-                    did_replace = True
-
-    # Legacy behavior: if message has exactly one *affiliate wrapper* URL, rewrite it inline.
-    if not did_replace and raw_urls:
-        target = _pick_best_raw_url(list(raw_urls or []))
-        if target:
-            urls = RAW_URL_REGEX.findall(content)
-            if len(urls) == 1:
-                src_token = urls[0]
-                src, tail = _split_trailing_url_punct(src_token)
-                try:
-                    # Do NOT rewrite Mavely share links (mavely.app.link / mavelylife.com).
-                    if (
-                        src
-                        and _is_affiliate_domain(src)
-                        and (not is_mavely_wrapper_url(src))
-                        and target != src
-                        and target not in content
-                    ):
-                        content = content.replace(src_token, f"<{target}>{tail}")
-                        did_replace = True
-                except Exception:
-                    pass
-
-    # Dedupe extracted while preserving order
-    seen_out: Set[str] = set()
-    deduped: List[str] = []
-    for u in extracted:
-        if not u or u in seen_out:
-            continue
-        seen_out.add(u)
-        deduped.append(u)
-
-    return content, deduped, did_replace
 

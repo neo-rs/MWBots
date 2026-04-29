@@ -1512,7 +1512,21 @@ def detect_all_link_types(
         if cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID and (source_group == "online"):
             att_text = " ".join([str(a.get("url", "")) for a in (attachments or []) if isinstance(a, dict)])
             blob = (text_to_check or "") + " " + att_text
-            if _AFFILIATE_GRAB_TEMPLATE.search(blob or ""):
+            # Same hard suppressions as single-target classifier (flip templates / pokemon / comics / stubs / discord links).
+            try:
+                sup2 = affiliate_should_suppress_affiliated_links(
+                    blob, min_core_chars=int(getattr(cfg, "AFFILIATED_LINKS_MIN_SUBSTANCE_CHARS", 80) or 80)
+                )
+            except Exception:
+                sup2 = affiliate_should_suppress_affiliated_links(blob, min_core_chars=80)
+            if sup2:
+                if trace is not None:
+                    try:
+                        trace.setdefault("classifier", {}).setdefault("matches", {})["affiliate_skip"] = sup2
+                    except Exception:
+                        pass
+                # Do not append AFFILIATED_LINKS route.
+            elif _AFFILIATE_GRAB_TEMPLATE.search(blob or ""):
                 if trace is not None:
                     try:
                         trace.setdefault("classifier", {}).setdefault("matches", {})["affiliate_skip"] = "grab_it_here_template"
