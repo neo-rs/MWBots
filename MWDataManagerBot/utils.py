@@ -600,6 +600,182 @@ def record_link_host_samples_from_text(text: str) -> None:
             return
 
 
+def _text_has_amazon_hint(text: str) -> bool:
+    t = str(text or "")
+    if not t:
+        return False
+    low = t.lower()
+    if "amzn.to" in low or "a.co/" in low:
+        return True
+    if "amazon." in low:
+        return True
+    try:
+        if _ASIN_RE.search(t):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _final_url_might_be_amazon(url: str) -> bool:
+    u = str(url or "")
+    if not u:
+        return False
+    try:
+        host = (urlparse(u).netloc or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if _AMAZON_HOST_RE.search(host):
+            return True
+    except Exception:
+        pass
+    if _AMZN_SHORT_RE.match(u):
+        return True
+    return False
+
+
+async def augment_text_with_universal_resolver_fallback(
+    original_visible: str, text_to_check: str, *, trace: Optional[Dict[str, Any]] = None
+) -> str:
+    """
+    Optional second-stage resolver for *classification only* (append resolved destinations to the blob).
+
+    Intended use: discover Amazon destinations hidden behind non-allowlisted wrappers (e.g. pricedoffers.com),
+    so routing does not treat the post as generic AFFILIATED_LINKS when it is actually Amazon.
+    """
+    try:
+        import settings_store as cfg
+    except Exception:
+        if trace is not None:
+            try:
+                trace.setdefault("classifier", {}).setdefault("matches", {})["universal_resolver_fallback"] = {
+                    "ran": False,
+                    "reason": "settings_unavailable",
+                }
+            except Exception:
+                pass
+        return text_to_check
+
+    def _urf_trace(meta: Dict[str, Any]) -> None:
+        if trace is None:
+            return
+        try:
+            trace.setdefault("classifier", {}).setdefault("matches", {})["universal_resolver_fallback"] = meta
+        except Exception:
+            pass
+
+    if not bool(getattr(cfg, "UNIVERSAL_RESOLVER_FALLBACK_ENABLED", False)):
+        _urf_trace({"ran": False, "reason": "disabled"})
+        return text_to_check
+    if not bool(getattr(cfg, "ENABLE_RAW_LINK_UNWRAP", True)):
+        _urf_trace({"ran": False, "reason": "raw_link_unwrap_disabled"})
+        return text_to_check
+    if bool(getattr(cfg, "UNIVERSAL_RESOLVER_FALLBACK_WHEN_NO_AMAZON_HINT", True)) and _text_has_amazon_hint(
+        text_to_check
+    ):
+        _urf_trace({"ran": False, "reason": "amazon_hint_skip"})
+        return text_to_check
+
+    try:
+        from universal_resolver_client import resolve_universal_cached
+    except Exception:
+        _urf_trace({"ran": False, "reason": "universal_resolver_client_unavailable"})
+        return text_to_check
+
+    vis = str(original_visible or "")
+    if not vis.strip():
+        _urf_trace({"ran": False, "reason": "empty_visible_text"})
+        return text_to_check
+
+    try:
+        timeout = int(getattr(cfg, "UNIVERSAL_RESOLVER_FALLBACK_TIMEOUT_SECONDS", 12) or 12)
+    except Exception:
+        timeout = 12
+    try:
+        max_depth = int(getattr(cfg, "UNIVERSAL_RESOLVER_FALLBACK_MAX_DEPTH", 10) or 10)
+    except Exception:
+        max_depth = 10
+    try:
+        max_urls = int(getattr(cfg, "UNIVERSAL_RESOLVER_FALLBACK_MAX_URLS_PER_MESSAGE", 2) or 2)
+    except Exception:
+        max_urls = 2
+    try:
+        ttl = int(getattr(cfg, "UNIVERSAL_RESOLVER_FALLBACK_CACHE_TTL_SECONDS", 15 * 60) or (15 * 60))
+    except Exception:
+        ttl = 15 * 60
+    include_known = bool(getattr(cfg, "UNIVERSAL_RESOLVER_FALLBACK_INCLUDE_KNOWN_WRAPPERS", False))
+
+    try:
+        cands = RAW_URL_REGEX.findall(vis)[:40]
+    except Exception:
+        cands = []
+
+    picked: List[str] = []
+    for u in cands:
+        uu = str(u or "").strip()
+        if not uu:
+            continue
+        if _is_discord_link_url(uu) or _is_discord_media_url(uu):
+            continue
+        if (not include_known) and _is_affiliate_domain(uu):
+            continue
+        if uu in picked:
+            continue
+        picked.append(uu)
+        if len(picked) >= max_urls:
+            break
+
+    if not picked:
+        _urf_trace(
+            {
+                "ran": False,
+                "reason": "no_candidates",
+                "visible_url_count": int(len(cands or [])),
+                "include_known_wrappers": bool(include_known),
+            }
+        )
+        return text_to_check
+
+    out_lines: List[str] = []
+    details: List[Dict[str, Any]] = []
+    for u in picked:
+        try:
+            final, method, err = await asyncio.to_thread(
+                resolve_universal_cached,
+                u,
+                timeout=timeout,
+                max_depth=max_depth,
+                ttl_seconds=ttl,
+            )
+        except Exception as e:
+            final, method, err = None, "error", str(e)
+        if final and _final_url_might_be_amazon(final) and str(final) not in str(text_to_check or ""):
+            out_lines.append(str(final).strip())
+        details.append(
+            {
+                "input": u,
+                "final": final,
+                "method": method,
+                "error": err,
+            }
+        )
+
+    if trace is not None:
+        try:
+            trace.setdefault("classifier", {}).setdefault("matches", {})["universal_resolver_fallback"] = {
+                "ran": True,
+                "candidates": picked,
+                "results": details,
+                "appended_count": len(out_lines),
+            }
+        except Exception:
+            pass
+
+    if not out_lines:
+        return text_to_check
+    return (str(text_to_check or "").strip() + " " + " ".join(out_lines)).strip()
+
+
 def _is_affiliate_domain(url: str) -> bool:
     try:
         host = (urlparse(url).netloc or "").lower()

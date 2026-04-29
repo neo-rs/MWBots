@@ -45,6 +45,16 @@ LINK_HOST_SAMPLES_ENABLED: bool = False
 LINK_HOST_SAMPLES_PATH: str = ""
 LINK_HOST_SAMPLES_MAX_HOSTS: int = 2000
 
+# Optional: universal resolver fallback (local `universal_link_resolver_v2_ready/universal_link_resolver.py`)
+# for classification-only URL expansion (never changes forwarded message text).
+UNIVERSAL_RESOLVER_FALLBACK_ENABLED: bool = False
+UNIVERSAL_RESOLVER_FALLBACK_TIMEOUT_SECONDS: int = 12
+UNIVERSAL_RESOLVER_FALLBACK_MAX_DEPTH: int = 10
+UNIVERSAL_RESOLVER_FALLBACK_MAX_URLS_PER_MESSAGE: int = 2
+UNIVERSAL_RESOLVER_FALLBACK_CACHE_TTL_SECONDS: int = 15 * 60
+UNIVERSAL_RESOLVER_FALLBACK_INCLUDE_KNOWN_WRAPPERS: bool = False
+UNIVERSAL_RESOLVER_FALLBACK_WHEN_NO_AMAZON_HINT: bool = True
+
 # Affiliate: skip routing bare URL-only posts (no embeds, no attachments) to AFFILIATED_LINKS.
 AFFILIATE_SKIP_LINK_ONLY_MESSAGES: bool = True
 AFFILIATED_LINKS_MIN_SUBSTANCE_CHARS: int = 80
@@ -282,6 +292,34 @@ def init(settings: Dict[str, Any]) -> None:
         LINK_HOST_SAMPLES_MAX_HOSTS = 50
     if LINK_HOST_SAMPLES_MAX_HOSTS > 20000:
         LINK_HOST_SAMPLES_MAX_HOSTS = 20000
+
+    UNIVERSAL_RESOLVER_FALLBACK_ENABLED = bool(settings.get("universal_resolver_fallback_enabled", False))
+    UNIVERSAL_RESOLVER_FALLBACK_TIMEOUT_SECONDS = _get_int(settings, "universal_resolver_fallback_timeout_seconds", 12)
+    if UNIVERSAL_RESOLVER_FALLBACK_TIMEOUT_SECONDS < 3:
+        UNIVERSAL_RESOLVER_FALLBACK_TIMEOUT_SECONDS = 3
+    if UNIVERSAL_RESOLVER_FALLBACK_TIMEOUT_SECONDS > 60:
+        UNIVERSAL_RESOLVER_FALLBACK_TIMEOUT_SECONDS = 60
+    UNIVERSAL_RESOLVER_FALLBACK_MAX_DEPTH = _get_int(settings, "universal_resolver_fallback_max_depth", 10)
+    if UNIVERSAL_RESOLVER_FALLBACK_MAX_DEPTH < 3:
+        UNIVERSAL_RESOLVER_FALLBACK_MAX_DEPTH = 3
+    if UNIVERSAL_RESOLVER_FALLBACK_MAX_DEPTH > 20:
+        UNIVERSAL_RESOLVER_FALLBACK_MAX_DEPTH = 20
+    UNIVERSAL_RESOLVER_FALLBACK_MAX_URLS_PER_MESSAGE = _get_int(settings, "universal_resolver_fallback_max_urls_per_message", 2)
+    if UNIVERSAL_RESOLVER_FALLBACK_MAX_URLS_PER_MESSAGE < 1:
+        UNIVERSAL_RESOLVER_FALLBACK_MAX_URLS_PER_MESSAGE = 1
+    if UNIVERSAL_RESOLVER_FALLBACK_MAX_URLS_PER_MESSAGE > 6:
+        UNIVERSAL_RESOLVER_FALLBACK_MAX_URLS_PER_MESSAGE = 6
+    UNIVERSAL_RESOLVER_FALLBACK_CACHE_TTL_SECONDS = _get_int(settings, "universal_resolver_fallback_cache_ttl_seconds", 15 * 60)
+    if UNIVERSAL_RESOLVER_FALLBACK_CACHE_TTL_SECONDS < 60:
+        UNIVERSAL_RESOLVER_FALLBACK_CACHE_TTL_SECONDS = 60
+    if UNIVERSAL_RESOLVER_FALLBACK_CACHE_TTL_SECONDS > 24 * 60 * 60:
+        UNIVERSAL_RESOLVER_FALLBACK_CACHE_TTL_SECONDS = 24 * 60 * 60
+    UNIVERSAL_RESOLVER_FALLBACK_INCLUDE_KNOWN_WRAPPERS = bool(
+        settings.get("universal_resolver_fallback_include_known_wrappers", False)
+    )
+    UNIVERSAL_RESOLVER_FALLBACK_WHEN_NO_AMAZON_HINT = bool(
+        settings.get("universal_resolver_fallback_when_no_amazon_hint", True)
+    )
 
     AFFILIATE_SKIP_LINK_ONLY_MESSAGES = bool(settings.get("affiliate_skip_link_only_messages", True))
     AFFILIATED_LINKS_MIN_SUBSTANCE_CHARS = _get_int(settings, "affiliated_links_min_substance_chars", 80)

@@ -44,6 +44,7 @@ from utils import (
     is_image_attachment,
     is_discord_media_url,
     record_link_host_samples_from_text,
+    augment_text_with_universal_resolver_fallback,
 )
 
 def _first_non_discord_url(urls: List[str]) -> str:
@@ -1100,6 +1101,14 @@ class MessageForwarder:
             except Exception as e:
                 if cfg.VERBOSE:
                     log_warn(f"[FILTER] raw-link unwrap failed: {e}")
+
+        # Optional: universal resolver fallback (classification-only) for hidden Amazon destinations.
+        try:
+            text_to_check = await augment_text_with_universal_resolver_fallback(
+                original_text_for_raw, text_to_check, trace=trace
+            )
+        except Exception:
+            pass
 
         # Track links for global triggers
         self._track_link_occurrences(text_to_check, channel_id)

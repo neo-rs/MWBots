@@ -47,6 +47,13 @@
   "link_host_samples_enabled": true,
   "link_host_samples_path": "logs/link_host_samples.json",
   "link_host_samples_max_hosts": 2000,
+  "universal_resolver_fallback_enabled": false,
+  "universal_resolver_fallback_timeout_seconds": 12,
+  "universal_resolver_fallback_max_depth": 10,
+  "universal_resolver_fallback_max_urls_per_message": 2,
+  "universal_resolver_fallback_cache_ttl_seconds": 900,
+  "universal_resolver_fallback_include_known_wrappers": false,
+  "universal_resolver_fallback_when_no_amazon_hint": true,
   "affiliate_skip_link_only_messages": true,
   "strip_url_only_message_content_when_embeds": true,
   "mirrorworld_route_online": {

@@ -6,11 +6,8 @@
 # Webhook maps are secrets (never commit)
 **/config/channel_map.json
 
-# Fetchall UI runtime overrides (never commit; persists across !mwupdate python-only updates)
-**/config/fetchall_mappings.runtime.json
-
-# Runtime settings overrides (never commit)
-**/config/settings.runtime.json
+# MWDiscumBot fetchall_mappings.runtime.json + settings.runtime.json are tracked (push_mwbots_py_only stages them)
+# so Oracle/mwbots-code matches your intended overlay. Do not put secrets in those JSON files.
 
 # Runtime / logs (never commit)
 **/logs/**
@@ -47,3 +44,7 @@ Instorebotforwarder/.playwright/**
 Instorebotforwarder/Instorebotforwarder/playwright_profile/**
 Instorebotforwarder/Instorebotforwarder/.playwright/**
 Instorebotforwarder/api-token.env
+
+# Universal link resolver (local batch outputs / URL lists — not deploy artifacts)
+MWDataManagerBot/universal_link_resolver_v2_ready/last_result.json
+MWDataManagerBot/universal_link_resolver_v2_ready/urls.txt
