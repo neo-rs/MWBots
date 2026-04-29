@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, Optional, Set
+from typing import Any, Dict, Iterable, Optional, Set, Tuple
 
 VERBOSE: bool = True
 
@@ -58,6 +58,12 @@ UNIVERSAL_RESOLVER_FALLBACK_WHEN_NO_AMAZON_HINT: bool = True
 # Affiliate: skip routing bare URL-only posts (no embeds, no attachments) to AFFILIATED_LINKS.
 AFFILIATE_SKIP_LINK_ONLY_MESSAGES: bool = True
 AFFILIATED_LINKS_MIN_SUBSTANCE_CHARS: int = 80
+# AFFILIATED_LINKS send gates (evaluated only when dispatch includes AFFILIATED_LINKS).
+AFFILIATED_LINKS_DEDUPE_ENABLED: bool = False
+AFFILIATED_LINKS_DEDUPE_DOMAINS: Tuple[str, ...] = ("mavely.app.link",)
+AFFILIATED_LINKS_DEDUPE_TTL_SECONDS: int = 24 * 60 * 60
+AFFILIATED_LINKS_REQUIRE_IMAGE: bool = False
+AFFILIATED_LINKS_REQUIRE_EXTERNAL_HTTP_LINK: bool = False
 
 # Forwarding: if message content is URL-only and we are sending embeds, drop content (no duplicate top line).
 STRIP_URL_ONLY_CONTENT_WHEN_EMBEDS: bool = True
@@ -328,6 +334,28 @@ def init(settings: Dict[str, Any]) -> None:
     if AFFILIATED_LINKS_MIN_SUBSTANCE_CHARS > 600:
         AFFILIATED_LINKS_MIN_SUBSTANCE_CHARS = 600
     STRIP_URL_ONLY_CONTENT_WHEN_EMBEDS = bool(settings.get("strip_url_only_message_content_when_embeds", True))
+
+    AFFILIATED_LINKS_DEDUPE_ENABLED = bool(settings.get("affiliated_links_dedupe_enabled", False))
+    _dd = settings.get("affiliated_links_dedupe_domains")
+    if isinstance(_dd, list) and _dd:
+        AFFILIATED_LINKS_DEDUPE_DOMAINS = tuple(
+            str(x).lower().strip() for x in _dd if str(x).strip()
+        )
+    elif isinstance(_dd, str) and _dd.strip():
+        AFFILIATED_LINKS_DEDUPE_DOMAINS = tuple(
+            p.strip().lower() for p in _dd.split(",") if p.strip()
+        )
+    else:
+        AFFILIATED_LINKS_DEDUPE_DOMAINS = ("mavely.app.link",)
+    AFFILIATED_LINKS_DEDUPE_TTL_SECONDS = _get_int(settings, "affiliated_links_dedupe_ttl_seconds", 24 * 60 * 60)
+    if AFFILIATED_LINKS_DEDUPE_TTL_SECONDS < 60:
+        AFFILIATED_LINKS_DEDUPE_TTL_SECONDS = 60
+    if AFFILIATED_LINKS_DEDUPE_TTL_SECONDS > 14 * 24 * 60 * 60:
+        AFFILIATED_LINKS_DEDUPE_TTL_SECONDS = 14 * 24 * 60 * 60
+    AFFILIATED_LINKS_REQUIRE_IMAGE = bool(settings.get("affiliated_links_require_image", False))
+    AFFILIATED_LINKS_REQUIRE_EXTERNAL_HTTP_LINK = bool(
+        settings.get("affiliated_links_require_external_http_link", False)
+    )
 
     dests = settings.get("smartfilter_destinations") if isinstance(settings.get("smartfilter_destinations"), dict) else {}
     SMARTFILTER_AMAZON_CHANNEL_ID = _get_int(dests, "AMAZON", 0)

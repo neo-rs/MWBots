@@ -55,6 +55,13 @@
   "universal_resolver_fallback_include_known_wrappers": false,
   "universal_resolver_fallback_when_no_amazon_hint": true,
   "affiliate_skip_link_only_messages": true,
+  "affiliated_links_dedupe_enabled": true,
+  "affiliated_links_dedupe_domains": [
+    "mavely.app.link"
+  ],
+  "affiliated_links_dedupe_ttl_seconds": 86400,
+  "affiliated_links_require_image": true,
+  "affiliated_links_require_external_http_link": true,
   "strip_url_only_message_content_when_embeds": true,
   "mirrorworld_route_online": {
     "1438969997178306661": 1438969997178306661,

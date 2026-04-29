@@ -45,7 +45,14 @@ from classifier import determine_source_group, detect_all_link_types, order_link
 from global_triggers import detect_global_triggers
 from keywords import load_keywords
 import settings_store as cfg
-from utils import collect_embed_strings, generate_content_signature
+from utils import (
+    append_image_attachments_as_embeds,
+    collect_embed_strings,
+    extract_urls_from_text,
+    format_embeds_for_forwarding,
+    generate_content_signature,
+    is_image_attachment,
+)
 
 
 def _safe_console(s: str) -> str:
@@ -76,6 +83,116 @@ def _banner(title: str) -> None:
     print("=" * 78)
     print(title)
     print("=" * 78)
+
+
+def _content_is_only_urls(content: str) -> bool:
+    """Match `live_forwarder._content_is_only_urls` for outbound preview parity."""
+    body = (content or "").strip()
+    if not body:
+        return True
+    urls = extract_urls_from_text(body)
+    if not urls:
+        return False
+    cleaned = body
+    try:
+        for u in sorted(set(urls), key=len, reverse=True):
+            if u:
+                cleaned = cleaned.replace(u, " ")
+    except Exception:
+        pass
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned == ""
+
+
+def _build_outbound_forward_preview(
+    raw_content: str,
+    embeds: List[Dict[str, Any]],
+    attachments: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Mirror `live_forwarder.handle_message` outbound shaping: visible content only (not classifier blob),
+    formatted embeds, optional attachment URL append when not forwarding as files, URL-only strip when embeds.
+    """
+    formatted_content = str(raw_content or "")
+    embeds_out: List[Dict[str, Any]] = []
+    try:
+        embeds_out = format_embeds_for_forwarding(embeds or [])
+    except Exception:
+        embeds_out = list(embeds or [])
+
+    strip_applied = False
+    use_files = bool(getattr(cfg, "FORWARD_ATTACHMENTS_AS_FILES", True))
+    non_image_urls: List[str] = []
+
+    if not use_files:
+        try:
+            embeds_out = append_image_attachments_as_embeds(embeds_out, attachments or [], max_embeds=10)
+        except Exception:
+            pass
+        try:
+            for a in attachments or []:
+                if not isinstance(a, dict):
+                    continue
+                if is_image_attachment(a):
+                    continue
+                u = str(a.get("url") or "").strip()
+                if u:
+                    non_image_urls.append(u)
+            if non_image_urls:
+                formatted_content = (formatted_content + "\n\n" + "\n".join(non_image_urls[:10])).strip()
+        except Exception:
+            pass
+
+    if bool(getattr(cfg, "STRIP_URL_ONLY_CONTENT_WHEN_EMBEDS", True)):
+        try:
+            if _content_is_only_urls(formatted_content) and bool(embeds_out):
+                formatted_content = ""
+                strip_applied = True
+        except Exception:
+            pass
+
+    embed_lines: List[str] = []
+    for i, e in enumerate((embeds_out or [])[:6]):
+        ed = e if isinstance(e, dict) else {}
+        title = str(ed.get("title") or "")[:140]
+        desc = str(ed.get("description") or "")[:200].replace("\n", " ")
+        url_f = str(ed.get("url") or "")
+        embed_lines.append(f"  [{i}] title={title!r} url={url_f!r} desc_snip={desc!r}")
+
+    return {
+        "content": formatted_content,
+        "embed_count": len(embeds_out or []),
+        "strip_url_only_content": strip_applied,
+        "forward_attachments_as_files": use_files,
+        "attachment_urls_inlined": list(non_image_urls[:10]),
+        "embed_summary_lines": embed_lines,
+    }
+
+
+def _print_route_message_preview(*, raw_content: str, embeds: List[Dict[str, Any]], attachments: List[Dict[str, Any]]) -> None:
+    prev = _build_outbound_forward_preview(raw_content, embeds, attachments)
+    _line("")
+    _line("   ROUTE MESSAGE (outbound preview — same payload live_forwarder sends to each destination)")
+    _line("   (Routing picks channels; this is the message body + formatted embeds.)")
+    _line(f"   forward_attachments_as_files={prev.get('forward_attachments_as_files')}  "
+          f"strip_url_only_content={prev.get('strip_url_only_content')}")
+    att_inl = prev.get("attachment_urls_inlined") or []
+    if att_inl:
+        _line(f"   non-image attachment URLs inlined in content: {len(att_inl)}")
+    cprev = str(prev.get("content") or "")
+    _line("   Content:")
+    if cprev.strip():
+        snap = cprev[:900] + ("..." if len(cprev) > 900 else "")
+        for ln in snap.splitlines()[:25]:
+            _line(f"      {ln}")
+    else:
+        _line("      (empty — e.g. URL-only body stripped when embeds carry the link)")
+    ec = int(prev.get("embed_count") or 0)
+    _line(f"   Formatted embeds: {ec}")
+    for el in (prev.get("embed_summary_lines") or [])[:8]:
+        _line(el)
+    if ec > 6:
+        _line(f"   ... ({ec - 6} more embeds not shown)")
 
 
 def _build_dest_labels(settings: Dict[str, Any]) -> Dict[int, str]:
@@ -257,7 +374,7 @@ async def _post_route_mirror_copy(
     *,
     target_ch: Any,
     message: Any,
-    text_to_check: str,
+    outbound_preview: Dict[str, Any],
     tag: str,
     dest_cid: int,
     dest_label: str,
@@ -269,6 +386,7 @@ async def _post_route_mirror_copy(
         f"Tag: `{tag}` | Live dest: <#{dest_cid}> ({dest_label})\n"
         f"Original: {jump}\n"
         "---\n"
+        "**Outbound preview** (same shaping as `live_forwarder` — not the classifier blob)\n"
     )
     att_lines: List[str] = []
     for a in getattr(message, "attachments", []) or []:
@@ -278,9 +396,20 @@ async def _post_route_mirror_copy(
     att_block = ""
     if att_lines:
         att_block = "\nAttachments:\n" + "\n".join(att_lines[:8])
-    room = max(0, 2000 - len(header) - len(att_block) - 20)
-    body = (text_to_check or "")[:room]
-    payload = header + body + att_block
+    body_txt = str(outbound_preview.get("content") or "")
+    emb_n = int(outbound_preview.get("embed_count") or 0)
+    emb_lines = "\n".join(outbound_preview.get("embed_summary_lines") or [])
+    meta = (
+        f"forward_attachments_as_files={outbound_preview.get('forward_attachments_as_files')} "
+        f"strip_url_only_content={outbound_preview.get('strip_url_only_content')}\n"
+        f"Formatted embeds: {emb_n}\n"
+    )
+    mid = body_txt
+    if emb_lines:
+        mid = mid + "\n" + emb_lines
+    room = max(0, 2000 - len(header) - len(meta) - len(att_block) - 40)
+    mid = mid[:room]
+    payload = header + meta + mid + att_block
     if len(payload) > 2000:
         payload = payload[:2000]
     await target_ch.send(payload)
@@ -702,6 +831,7 @@ def main() -> int:
                     "amz_deals_still_in_pairs": bool(still_amz),
                     "matches": matches,
                     "trace": trace,
+                    "outbound_preview": _build_outbound_forward_preview(raw_content, embeds, attachments),
                 }
                 rows_out.append(row)
                 try:
@@ -734,6 +864,7 @@ def main() -> int:
                         f"- fallback: {fb[1]} -> <#{int(fb[0])}> {dest_labels.get(int(fb[0]), '')}"
                         f"{_audit_same_channel_note(audit_channel_id=int(audit_channel_id), dest_channel_id=int(fb[0]))}"
                     )
+                _print_route_message_preview(raw_content=raw_content, embeds=embeds, attachments=attachments)
                 if global_hits:
                     _line()
                     _line("5) GLOBAL TRIGGERS")
@@ -751,6 +882,7 @@ def main() -> int:
 
                 # Optional mirror preview for the one message
                 if mirror_category_id > 0 and cat is not None:
+                    out_prev = _build_outbound_forward_preview(raw_content, embeds, attachments)
                     ordered2, _ = order_link_types(list(pairs))
                     targets = _mirror_send_targets(
                         ordered=ordered2,
@@ -774,7 +906,7 @@ def main() -> int:
                         await _post_route_mirror_copy(
                             target_ch=target_ch,
                             message=message,
-                            text_to_check=text_to_check,
+                            outbound_preview=out_prev,
                             tag=tag,
                             dest_cid=int(dest_cid),
                             dest_label=str(dest_labels.get(int(dest_cid), "") or ""),
@@ -862,6 +994,7 @@ def main() -> int:
                     "global_triggers": [{"channel_id": int(c), "tag": t} for c, t in global_hits],
                     "amz_deals_still_in_pairs": bool(still_amz),
                     "classifier_matches": matches,
+                    "outbound_preview": _build_outbound_forward_preview(raw_content, embeds, attachments),
                 }
             )
 
@@ -899,6 +1032,7 @@ def main() -> int:
                 same = _audit_same_channel_note(audit_channel_id=int(audit_channel_id), dest_channel_id=int(cid))
                 print(f"   - {tag} → <#{cid}> ({lbl}){mark}{same}")
             print(f"   stop_after_first (PRICE_ERROR present): {stop_after_first}")
+            _print_route_message_preview(raw_content=raw_content, embeds=embeds, attachments=attachments)
             print()
             print("6) SINGLE-TARGET FALLBACK (select_target_channel_id)")
             if fb:
@@ -949,6 +1083,7 @@ def main() -> int:
 
             posted_slugs: List[str] = []
             if mirror_category_id > 0 and cat is not None and guild is not None:
+                out_prev = _build_outbound_forward_preview(raw_content, embeds, attachments)
                 targets = _mirror_send_targets(
                     ordered=ordered,
                     fb=fb,
@@ -974,7 +1109,7 @@ def main() -> int:
                         await _post_route_mirror_copy(
                             target_ch=mch,
                             message=message,
-                            text_to_check=text_to_check,
+                            outbound_preview=out_prev,
                             tag=tag,
                             dest_cid=int(dest_cid),
                             dest_label=dest_labels.get(int(dest_cid), str(dest_cid)),
