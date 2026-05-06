@@ -466,8 +466,10 @@ _AFFILIATE_FLIP_FIELDS_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _AFFILIATE_QUICK_LINKS_PATTERN = re.compile(r"(?im)^\s*quick\s+links?\b", re.IGNORECASE)
-_AFFILIATE_POKEMON_PATTERN = re.compile(r"\bpok[eé]mon\b", re.IGNORECASE)
-_AFFILIATE_POKEMON_MENTION_PATTERN = re.compile(r"@pokemon\b", re.IGNORECASE)
+# Pokemon: use substring match so pokemoncenter.com / URLs match (word-boundary \bpokemon\b misses those).
+_AFFILIATE_POKEMON_SUBSTRING_PATTERN = re.compile(r"pokemon", re.IGNORECASE)
+# One Piece (TCG/anime): titles + StockX-style URLs use `One+Piece` / `one-piece` — not generic affiliated drops.
+_AFFILIATE_ONE_PIECE_SUBSTRING_PATTERN = re.compile(r"(?i)one[\s+\-_]*piece")
 _AFFILIATE_COMICS_PATTERN = re.compile(
     r"\b(marvel|capcom|dc|dcu|mcu|x-?men|avengers|spider-?man|batman|superman|wolverine|daredevil|punisher|"
     r"joker|harley\s+quinn|deadpool|iron\s+man|captain\s+america|thor|hulk)\b",
@@ -477,6 +479,14 @@ _AFFILIATE_COMICS_CONTEXT_PATTERN = re.compile(
     r"\b(variant|cover|foc|ratio|print(?:ing)?|issue\s*#?\s*\d+|#\s*\d{1,4})\b",
     re.IGNORECASE,
 )
+
+
+def _affiliate_text_strip_markdown_noise(blob: str) -> str:
+    """So **Retail:** $12 embed fields match price-grid guards."""
+    s = str(blob or "")
+    s = re.sub(r"[\*_`]+", " ", s)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
 
 
 def affiliate_should_suppress_affiliated_links(blob: str, *, min_core_chars: int = 80) -> str:
@@ -534,6 +544,21 @@ def affiliate_should_suppress_affiliated_links(blob: str, *, min_core_chars: int
         if (not non_discord_urls) and re.search(r"(?i)discord(?:app)?\.com/channels/\d+/\d+/\d+", raw):
             return "discord_message_link_only"
 
+    # Deal-monitor price grids: "Retail: $…" / "Resale: $…" (and flip-spelled "Resell:") — not generic affiliate drops.
+    guard_plain = _affiliate_text_strip_markdown_noise(raw)
+    if re.search(r"(?i)retail\s*:\s*\$", guard_plain):
+        return "affiliate_retail_dollar_line"
+    if re.search(r"(?i)(?:resale|resell)\s*:\s*\$", guard_plain):
+        return "affiliate_resale_dollar_line"
+
+    # Pokemon anywhere (body, mention, pokemoncenter.com, TCG titles).
+    if _AFFILIATE_POKEMON_SUBSTRING_PATTERN.search(raw):
+        return "pokemon_content"
+
+    # One Piece franchise / TCG (Crunchyroll Divine/Zephyr monitors, StockX search URLs, etc.).
+    if _AFFILIATE_ONE_PIECE_SUBSTRING_PATTERN.search(raw):
+        return "one_piece_content"
+
     # Flip template fields: When/Where/Retail/Resell (+ quick links or ebay) => not AFFILIATED_LINKS.
     has_when = bool(re.search(r"(?im)^\s*when\b", raw))
     has_where = bool(re.search(r"(?im)^\s*where\b", raw))
@@ -543,10 +568,6 @@ def affiliate_should_suppress_affiliated_links(blob: str, *, min_core_chars: int
         return "flip_template_fields"
     if has_retail and has_resell and (bool(_AFFILIATE_QUICK_LINKS_PATTERN.search(raw)) or "ebay" in raw.lower()):
         return "flip_template_retail_resell"
-
-    # Pokemon: product feeds + role pings are not AFFILIATED_LINKS.
-    if _AFFILIATE_POKEMON_PATTERN.search(raw) or _AFFILIATE_POKEMON_MENTION_PATTERN.search(raw):
-        return "pokemon_content"
 
     # Comics / hero-villain fandom posts: only suppress when comic-like context exists, to avoid blocking "Washington DC".
     if _AFFILIATE_COMICS_PATTERN.search(raw) and _AFFILIATE_COMICS_CONTEXT_PATTERN.search(raw):

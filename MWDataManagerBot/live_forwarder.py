@@ -6,7 +6,7 @@ import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
-from patterns import passes_deal_substance_gate
+from patterns import affiliate_should_suppress_affiliated_links, passes_deal_substance_gate
 from classifier import (
     detect_all_link_types,
     is_definitive_major_clearance_embed,
@@ -520,6 +520,24 @@ class MessageForwarder:
 
         Dedupe keys use utils.normalize_url() (query stripped) for configured domains (default mavely.app.link).
         """
+        try:
+            att_txt = " ".join([str(a.get("url", "")) for a in (attachments or []) if isinstance(a, dict)])
+            gate_blob = (
+                str(content or "")
+                + " "
+                + " ".join(collect_embed_strings(embeds or []))
+                + " "
+                + att_txt
+            ).strip()
+            sup_gate = affiliate_should_suppress_affiliated_links(
+                gate_blob,
+                min_core_chars=int(getattr(cfg, "AFFILIATED_LINKS_MIN_SUBSTANCE_CHARS", 80) or 80),
+            )
+        except Exception:
+            sup_gate = ""
+        if sup_gate:
+            return sup_gate, []
+
         if bool(getattr(cfg, "AFFILIATED_LINKS_REQUIRE_IMAGE", False)):
             if not self._message_has_embed_or_attachment_image(embeds, attachments):
                 return "affiliated_links_missing_image", []
