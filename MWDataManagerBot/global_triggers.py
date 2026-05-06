@@ -8,7 +8,7 @@ from logging_utils import log_smartfilter
 from patterns import (
     AMAZON_LINK_PATTERN,
     PRICE_ERROR_PATTERN,
-    passes_deal_substance_gate,
+    passes_price_error_routing_gate,
     PROFITABLE_FLIP_PATTERN,
     is_amazon_deal_complicated_monitor_blob,
     is_amz_price_errors_monitor_blob,
@@ -240,13 +240,18 @@ def detect_global_triggers(
     # Exclude rigid AMZ Price Errors monitor templates (Amazon Sold / eBay Avg / flip lines).
     price_error_blob = merge_text_and_embed_strings_for_classifier(text_to_check or "", embeds)
     _pe_min_g = int(getattr(cfg, "PRICE_ERROR_MIN_SUBSTANCE_CHARS", 52) or 52)
+    _pe_need_signals = bool(getattr(cfg, "PRICE_ERROR_REQUIRES_DEAL_SUBSTANCE_SIGNALS", True))
     if (
         cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID
         and source_is_online
         and not source_is_instore
         and PRICE_ERROR_PATTERN.search(normalize_message(price_error_blob))
         and not is_amz_price_errors_monitor_blob(price_error_blob)
-        and passes_deal_substance_gate(price_error_blob, min_core_chars=_pe_min_g)
+        and passes_price_error_routing_gate(
+            price_error_blob,
+            min_core_chars=_pe_min_g,
+            require_deal_substance_signals=_pe_need_signals,
+        )
     ):
         results.append((cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID, "PRICE_ERROR"))
 

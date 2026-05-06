@@ -460,6 +460,21 @@ def passes_deal_substance_gate(blob: str, *, min_core_chars: int) -> bool:
     return deal_substance_core_len(blob) >= mc
 
 
+def passes_price_error_routing_gate(
+    blob: str, *, min_core_chars: int, require_deal_substance_signals: bool
+) -> bool:
+    """
+    PRICE_ERROR destination gate: same as passes_deal_substance_gate, plus optional requirement that the blob
+    contain commerce signals (URL, $ / £ / € amounts, %-off, ASIN-ish tokens). When required, blocks meme posts
+    that only mention phrases like \"price error\" in prose with no deal substance.
+    """
+    if not passes_deal_substance_gate(blob, min_core_chars=min_core_chars):
+        return False
+    if require_deal_substance_signals and not blob_has_deal_substance_signals(blob):
+        return False
+    return True
+
+
 # AFFILIATED_LINKS suppressions (channel is noisy if it accepts flip templates / fandom drops / stub edits).
 _AFFILIATE_FLIP_FIELDS_PATTERN = re.compile(
     r"(?im)^\s*(when|where|retail|resell)\b",

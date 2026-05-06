@@ -115,6 +115,7 @@
   "hd_total_inventory_min_total": 500,
   "hd_total_inventory_delete_source_on_success": true,
   "major_clearance_source_channel_ids": [1434967990406873169,1435277398886060073,1434974855215714354,1435268708632363200],
+  "price_error_requires_deal_substance_signals": true,
   "fallback_channel_id": 1435066509860012073,
   "debug_reactions": {
     "enabled": true,

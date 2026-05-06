@@ -28,7 +28,9 @@ from patterns import (
     instore_explicit_footwear_intent,
     should_skip_amazon_profitable_leads_monitor_blob,
     is_simple_amazon_profitable_lead_blob,
+    blob_has_deal_substance_signals,
     passes_deal_substance_gate,
+    passes_price_error_routing_gate,
     affiliate_should_suppress_affiliated_links,
     CARDS_PATTERN,
     DISCOUNTED_STORE_PATTERN,
@@ -931,27 +933,33 @@ def select_target_channel_id(
     # 0) PRICE_ERROR / glitched (online-only; same gate as global_triggers).
     # Exclude rigid AMZ Price Errors monitor templates (Amazon Sold / eBay Avg / flip lines) — not true "glitch" leads.
     _pe_min = int(getattr(cfg, "PRICE_ERROR_MIN_SUBSTANCE_CHARS", 52) or 52)
+    _pe_need_signals = bool(getattr(cfg, "PRICE_ERROR_REQUIRES_DEAL_SUBSTANCE_SIGNALS", True))
     if (
         cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID
         and source_group != "instore"
         and not is_amz_price_errors_monitor_blob(text_blob)
         and PRICE_ERROR_PATTERN.search(text_blob)
     ):
-        if not passes_deal_substance_gate(text_blob, min_core_chars=_pe_min):
-            if trace is not None:
-                try:
-                    trace.setdefault("classifier", {}).setdefault("matches", {})[
-                        "price_error_substance_gate"
-                    ] = "blocked_thin_placeholder"
-                except Exception:
-                    pass
-        else:
+        if passes_price_error_routing_gate(
+            text_blob,
+            min_core_chars=_pe_min,
+            require_deal_substance_signals=_pe_need_signals,
+        ):
             if trace is not None:
                 try:
                     trace.setdefault("classifier", {}).setdefault("matches", {})["price_error"] = True
                 except Exception:
                     pass
             return cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID, "PRICE_ERROR"
+        if trace is not None:
+            try:
+                m = trace.setdefault("classifier", {}).setdefault("matches", {})
+                if not passes_deal_substance_gate(text_blob, min_core_chars=_pe_min):
+                    m["price_error_substance_gate"] = "blocked_thin_placeholder"
+                elif _pe_need_signals and not blob_has_deal_substance_signals(text_blob):
+                    m["price_error_signal_gate"] = "blocked_no_deal_signals"
+            except Exception:
+                pass
 
     # Woot is an online affiliate merchant (computers.woot.com, etc.). It is not an in-store lead bucket.
     # `_is_amazon_primary` already suppresses AMAZON when Woot is present (amzn.to comps).
@@ -1305,27 +1313,33 @@ def detect_all_link_types(
 
     # PRICE_ERROR / glitched (add early for order_link_types priority; online-only + exclude AMZ monitor templates)
     _pe_min_m = int(getattr(cfg, "PRICE_ERROR_MIN_SUBSTANCE_CHARS", 52) or 52)
+    _pe_need_signals_m = bool(getattr(cfg, "PRICE_ERROR_REQUIRES_DEAL_SUBSTANCE_SIGNALS", True))
     if (
         cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID
         and source_group != "instore"
         and not is_amz_price_errors_monitor_blob(pe_check_blob)
         and PRICE_ERROR_PATTERN.search(pe_check_blob)
     ):
-        if not passes_deal_substance_gate(pe_check_blob, min_core_chars=_pe_min_m):
-            if trace is not None:
-                try:
-                    trace.setdefault("classifier", {}).setdefault("matches", {})[
-                        "price_error_substance_gate"
-                    ] = "blocked_thin_placeholder"
-                except Exception:
-                    pass
-        else:
+        if passes_price_error_routing_gate(
+            pe_check_blob,
+            min_core_chars=_pe_min_m,
+            require_deal_substance_signals=_pe_need_signals_m,
+        ):
             results.append((cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID, "PRICE_ERROR"))
             if trace is not None:
                 try:
                     trace.setdefault("classifier", {}).setdefault("matches", {})["price_error"] = True
                 except Exception:
                     pass
+        elif trace is not None:
+            try:
+                m = trace.setdefault("classifier", {}).setdefault("matches", {})
+                if not passes_deal_substance_gate(pe_check_blob, min_core_chars=_pe_min_m):
+                    m["price_error_substance_gate"] = "blocked_thin_placeholder"
+                elif _pe_need_signals_m and not blob_has_deal_substance_signals(pe_check_blob):
+                    m["price_error_signal_gate"] = "blocked_no_deal_signals"
+            except Exception:
+                pass
 
     # Woot is online / affiliate-shaped; do not short-circuit the multi-route classifier into INSTORE_LEADS.
     if _store_label_present_in_blob(text_blob, "woot") or WOOT_DEALS_PATTERN.search(text_blob or ""):

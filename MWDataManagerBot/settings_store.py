@@ -112,6 +112,8 @@ SHORT_EMBED_RETRY_DELAY_SECONDS: float = 5.0
 SHORT_EMBED_MAX_WAIT_SECONDS: float = 35.0
 # PRICE_ERROR / short-embed: minimum "core" body length unless URL / $ / %-off signals are present.
 PRICE_ERROR_MIN_SUBSTANCE_CHARS: int = 52
+# When True, PRICE_ERROR also requires deal signals (link/money/%/ASIN) so text-only \"price error\" memes do not route.
+PRICE_ERROR_REQUIRES_DEAL_SUBSTANCE_SIGNALS: bool = True
 
 FALLBACK_CHANNEL_ID: int = 0
 
@@ -212,7 +214,7 @@ def init(settings: Dict[str, Any]) -> None:
     global RECENT_TTL_SECONDS, GLOBAL_DUPLICATE_TTL_SECONDS, MONITOR_EMBED_TTL_SECONDS, LINK_TRACKING_TTL_SECONDS
     global FORWARD_ON_EDIT
     global SHORT_EMBED_CHAR_THRESHOLD, SHORT_EMBED_RETRY_DELAY_SECONDS, SHORT_EMBED_MAX_WAIT_SECONDS
-    global PRICE_ERROR_MIN_SUBSTANCE_CHARS
+    global PRICE_ERROR_MIN_SUBSTANCE_CHARS, PRICE_ERROR_REQUIRES_DEAL_SUBSTANCE_SIGNALS
     global FALLBACK_CHANNEL_ID
     global EDIT_COOLDOWN_SECONDS
     global MAJOR_CLEARANCE_PAIR_TTL_SECONDS, MAJOR_CLEARANCE_SEND_SINGLE_ON_TIMEOUT
@@ -415,6 +417,10 @@ def init(settings: Dict[str, Any]) -> None:
         PRICE_ERROR_MIN_SUBSTANCE_CHARS = 12
     if PRICE_ERROR_MIN_SUBSTANCE_CHARS > 500:
         PRICE_ERROR_MIN_SUBSTANCE_CHARS = 500
+
+    PRICE_ERROR_REQUIRES_DEAL_SUBSTANCE_SIGNALS = bool(
+        settings.get("price_error_requires_deal_substance_signals", True)
+    )
 
     try:
         FALLBACK_CHANNEL_ID = int(settings.get("fallback_channel_id") or 0)
