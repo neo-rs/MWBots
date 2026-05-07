@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -209,6 +211,58 @@ def resolve_chrome_launch_kwargs(cfg: Mapping[str, Any]) -> Tuple[Dict[str, Any]
     return kwargs, resolved
 
 
+def _ensure_headed_linux_display(cfg: Mapping[str, Any]) -> Tuple[Optional[subprocess.Popen[Any]], Optional[str]]:
+    """
+    Match Windows visible-Chrome mode on headless Linux services by providing a display.
+
+    `run_interactive_visible_chrome.bat` launches installed Chrome with headless=False.
+    Windows already has a desktop. Oracle/systemd does not, so the exact Linux equivalent
+    is headed Chrome on an X display. If DISPLAY is missing, start Xvfb and set DISPLAY.
+    """
+    if not sys.platform.startswith("linux"):
+        return None, None
+    if _cfg_bool(cfg, "ebay_first8_headless", True):
+        return None, None
+    if os.environ.get("DISPLAY"):
+        return None, None
+    if not _cfg_bool(cfg, "ebay_first8_xvfb_enabled", True):
+        return None, "DISPLAY is not set and ebay_first8_xvfb_enabled=false"
+
+    xvfb = shutil.which("Xvfb")
+    if not xvfb:
+        return None, "Xvfb not installed; install xvfb for headed Chrome under systemd"
+
+    display = str(cfg.get("ebay_first8_xvfb_display") or ":99").strip() or ":99"
+    screen = str(cfg.get("ebay_first8_xvfb_screen") or "1680x1500x24").strip() or "1680x1500x24"
+    wait_s = _cfg_float(cfg, "ebay_first8_xvfb_wait_s", 3.0, lo=0.2, hi=20.0)
+    poll_s = _cfg_float(cfg, "ebay_first8_xvfb_poll_s", 0.1, lo=0.05, hi=1.0)
+    socket_path = Path(f"/tmp/.X11-unix/X{display.lstrip(':')}")
+    if socket_path.exists():
+        os.environ["DISPLAY"] = display
+        return None, None
+
+    proc = subprocess.Popen(  # noqa: S603 - controlled executable/args from local config for bot runtime.
+        [xvfb, display, "-screen", "0", screen, "-nolisten", "tcp"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            return None, f"Xvfb exited early with code {proc.returncode}"
+        if socket_path.exists():
+            os.environ["DISPLAY"] = display
+            return proc, None
+        time.sleep(poll_s)
+    if proc.poll() is None:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    return None, f"Xvfb did not create {socket_path} within {wait_s:.1f}s"
+
+
 async def _wait_for_results_or_empty(page: Any, timeout_ms: int) -> str:
     try:
         await page.wait_for_selector("body", timeout=timeout_ms)
@@ -322,6 +376,15 @@ async def fetch_first8_sold_comps(title: str, cfg: Mapping[str, Any], *, bot_dir
     extra_wait_s = _cfg_float(cfg, "ebay_first8_extra_wait_s", 2.0, lo=0.0, hi=30.0)
     padding = _cfg_int(cfg, "ebay_first8_screenshot_padding", 12, lo=0, hi=80)
     screenshot_enabled = _cfg_bool(cfg, "ebay_first8_screenshot_enabled", True)
+    xvfb_proc: Optional[subprocess.Popen[Any]] = None
+    xvfb_err: Optional[str] = None
+    if not _cfg_bool(cfg, "ebay_first8_connect_cdp", False):
+        xvfb_proc, xvfb_err = _ensure_headed_linux_display(cfg)
+        if xvfb_err:
+            result.update({"status": "browser_error", "reason": xvfb_err})
+            return result
+        if os.environ.get("DISPLAY"):
+            result["display"] = os.environ.get("DISPLAY")
 
     async with async_playwright() as p:
         browser = None
@@ -423,3 +486,8 @@ async def fetch_first8_sold_comps(title: str, cfg: Mapping[str, Any], *, bot_dir
                     await browser.close()
             except Exception:
                 pass
+            if xvfb_proc is not None and xvfb_proc.poll() is None:
+                try:
+                    xvfb_proc.terminate()
+                except Exception:
+                    pass
