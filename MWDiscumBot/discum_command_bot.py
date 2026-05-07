@@ -590,6 +590,89 @@ def _parse_quick_map_message(content: str) -> Optional[Tuple[int, List[int], int
         return None
 
 
+_DISCUM_MIRROR_WEBHOOK_NAME = "MWDiscumBot"
+
+
+def _webhook_url_has_usable_token(url: str) -> bool:
+    """True if URL looks like https://discord.com/api/webhooks/<id>/<token> with a real token (not '/None')."""
+    u = str(url or "").strip()
+    if not u:
+        return False
+    m = re.search(r"/webhooks/(\d+)/([^/?#]+)", u)
+    if not m:
+        return False
+    tok = str(m.group(2) or "").strip()
+    return bool(tok) and tok.lower() != "none"
+
+
+async def _ensure_mirror_webhook_url(bot_obj: commands.Bot, dest) -> Tuple[Optional[str], str]:
+    """
+    One canonical path for !g quick-map: reuse the MWDiscumBot webhook on the destination channel
+    if it has a usable token URL; otherwise create it.
+
+    Discord occasionally omits token on webhook list payloads; Webhook.url then ends with '/None'.
+    We validate URLs and repair via fetch_webhook(webhook_id) when needed.
+    """
+    try:
+        wh_list = await dest.webhooks()
+    except Exception as e:
+        return None, f"Could not list webhooks: {e}"
+
+    named = [w for w in (wh_list or []) if getattr(w, "name", None) == _DISCUM_MIRROR_WEBHOOK_NAME]
+    for w in named:
+        raw_u = getattr(w, "url", None)
+        if _webhook_url_has_usable_token(str(raw_u or "")):
+            return str(raw_u), ""
+        wid = getattr(w, "id", None)
+        if wid:
+            try:
+                fw = await bot_obj.fetch_webhook(int(wid))
+                fu = getattr(fw, "url", None)
+                if _webhook_url_has_usable_token(str(fu or "")):
+                    _log_channel_mapping(
+                        f"quick-map: repaired MWDiscumBot webhook url via fetch_webhook id={wid}"
+                    )
+                    return str(fu), ""
+            except Exception:
+                pass
+
+    try:
+        wh = await dest.create_webhook(
+            name=_DISCUM_MIRROR_WEBHOOK_NAME, reason="Quick channel mapping"
+        )
+    except discord.HTTPException as e:
+        msg = str(e)
+        hint = ""
+        if getattr(e, "status", None) == 400 or "maximum" in msg.lower() or "limit" in msg.lower():
+            hint = (
+                " This channel may have hit Discord's webhook-per-channel limit (~15); "
+                "delete unused integrations under Channel settings → Integrations, then retry."
+            )
+        return None, f"Could not create webhook:{hint} {msg}"
+    except Exception as e:
+        return None, f"Could not create webhook: {e}"
+
+    final_u = getattr(wh, "url", None) if wh else None
+    if _webhook_url_has_usable_token(str(final_u or "")):
+        return str(final_u), ""
+
+    wid = getattr(wh, "id", None) if wh else None
+    if wid:
+        try:
+            fw = await bot_obj.fetch_webhook(int(wid))
+            fu = getattr(fw, "url", None)
+            if _webhook_url_has_usable_token(str(fu or "")):
+                return str(fu), ""
+        except Exception:
+            pass
+
+    return (
+        None,
+        "Discord returned a webhook without a usable token URL (would save as .../None). "
+        "Try again after clearing webhook slots or check bot Manage Webhooks permission.",
+    )
+
+
 async def _do_quick_map(
     bot_obj: commands.Bot,
     guild_id: int,
@@ -609,17 +692,9 @@ async def _do_quick_map(
     if dest is None or not hasattr(dest, "create_webhook"):
         return (False, "Destination is not a text channel or webhooks are not allowed.", None)
     try:
-        wh_list = await dest.webhooks()
-        wh_url = None
-        for w in wh_list:
-            if getattr(w, "name", None) == "MWDiscumBot":
-                wh_url = getattr(w, "url", None)
-                break
+        wh_url, wh_err = await _ensure_mirror_webhook_url(bot_obj, dest)
         if not wh_url:
-            wh = await dest.create_webhook(name="MWDiscumBot", reason="Quick channel mapping")
-            wh_url = wh.url if wh else None
-        if not wh_url:
-            return (False, "Could not create or reuse webhook (need Manage Webhooks).", None)
+            return (False, wh_err or "Could not create or reuse webhook (need Manage Webhooks).", None)
         channel_map = _load_channel_map()
         channel_map[int(source_channel_id)] = str(wh_url)
         if not _save_channel_map(channel_map):
@@ -667,17 +742,9 @@ async def _do_quick_map_multi(
     if dest is None or not hasattr(dest, "create_webhook"):
         return (False, "Destination is not a text channel or webhooks are not allowed.", None)
     try:
-        wh_list = await dest.webhooks()
-        wh_url = None
-        for w in wh_list:
-            if getattr(w, "name", None) == "MWDiscumBot":
-                wh_url = getattr(w, "url", None)
-                break
+        wh_url, wh_err = await _ensure_mirror_webhook_url(bot_obj, dest)
         if not wh_url:
-            wh = await dest.create_webhook(name="MWDiscumBot", reason="Quick channel mapping")
-            wh_url = wh.url if wh else None
-        if not wh_url:
-            return (False, "Could not create or reuse webhook (need Manage Webhooks).", None)
+            return (False, wh_err or "Could not create or reuse webhook (need Manage Webhooks).", None)
         channel_map = _load_channel_map()
         for sid in source_channel_ids:
             channel_map[int(sid)] = str(wh_url)
@@ -1650,17 +1717,12 @@ async def _discum_browse_for_guild(interaction: discord.Interaction, *, source_g
                     await ii.response.send_message("Destination channel not found or not a text channel.", ephemeral=True)
                     return
                 try:
-                    wh_list = await dest.webhooks()
-                    wh_url = None
-                    for w in wh_list:
-                        if getattr(w, "name", None) == "MWDiscumBot":
-                            wh_url = getattr(w, "url", None)
-                            break
+                    wh_url, wh_err = await _ensure_mirror_webhook_url(bot, dest)
                     if not wh_url:
-                        wh = await dest.create_webhook(name="MWDiscumBot", reason="MWDiscumBot mapping")
-                        wh_url = wh.url if wh else None
-                    if not wh_url:
-                        await ii.response.send_message("Failed to create/use webhook (need Manage Webhooks).", ephemeral=True)
+                        await ii.response.send_message(
+                            wh_err or "Failed to create/use webhook (need Manage Webhooks).",
+                            ephemeral=True,
+                        )
                         return
                     m = _load_channel_map()
                     for src_cid in self.selected_ids:
