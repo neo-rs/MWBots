@@ -483,6 +483,31 @@ _AFFILIATE_FLIP_FIELDS_PATTERN = re.compile(
 _AFFILIATE_QUICK_LINKS_PATTERN = re.compile(r"(?im)^\s*quick\s+links?\b", re.IGNORECASE)
 # Pokemon: use substring match so pokemoncenter.com / URLs match (word-boundary \bpokemon\b misses those).
 _AFFILIATE_POKEMON_SUBSTRING_PATTERN = re.compile(r"pokemon", re.IGNORECASE)
+# TCG stock-update style posts (ETB / booster / blister + SKU/available-stock/restock language) are not generic
+# affiliate drops and should not route to AFFILIATED_LINKS even when "pokemon" is not present.
+_AFFILIATE_TCG_GENERIC_TERMS_PATTERN = re.compile(
+    r"\b("
+    r"elite\s+trainer\s+box|"
+    r"\betb\b|"
+    r"booster\s*(?:bundle|box|pack)?|"
+    r"3-?\s*booster\s+blister|"
+    r"\bblister\b|"
+    r"trading\s+card\s+game|"
+    r"\btcg\b|"
+    r"\bcard\s+game\b"
+    r")\b",
+    re.IGNORECASE,
+)
+_AFFILIATE_TCG_STOCK_UPDATE_TERMS_PATTERN = re.compile(
+    r"\b("
+    r"stock\s+update|"
+    r"available\s+stock|"
+    r"\brestock\b|"
+    r"\bdrop\b|"
+    r"\bsku\s*[:#]"
+    r")\b",
+    re.IGNORECASE,
+)
 # One Piece (TCG/anime): titles + StockX-style URLs use `One+Piece` / `one-piece` — not generic affiliated drops.
 _AFFILIATE_ONE_PIECE_SUBSTRING_PATTERN = re.compile(r"(?i)one[\s+\-_]*piece")
 _AFFILIATE_COMICS_PATTERN = re.compile(
@@ -569,6 +594,10 @@ def affiliate_should_suppress_affiliated_links(blob: str, *, min_core_chars: int
     # Pokemon anywhere (body, mention, pokemoncenter.com, TCG titles).
     if _AFFILIATE_POKEMON_SUBSTRING_PATTERN.search(raw):
         return "pokemon_content"
+
+    # Generic TCG restock/stock-update posts (ETB/booster/SKU/available stock) are not AFFILIATED_LINKS.
+    if _AFFILIATE_TCG_GENERIC_TERMS_PATTERN.search(raw) and _AFFILIATE_TCG_STOCK_UPDATE_TERMS_PATTERN.search(raw):
+        return "tcg_stock_update"
 
     # One Piece franchise / TCG (Crunchyroll Divine/Zephyr monitors, StockX search URLs, etc.).
     if _AFFILIATE_ONE_PIECE_SUBSTRING_PATTERN.search(raw):

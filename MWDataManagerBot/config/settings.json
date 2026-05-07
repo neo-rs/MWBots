@@ -47,7 +47,7 @@
   "link_host_samples_enabled": true,
   "link_host_samples_path": "logs/link_host_samples.json",
   "link_host_samples_max_hosts": 2000,
-  "universal_resolver_fallback_enabled": false,
+  "universal_resolver_fallback_enabled": true,
   "universal_resolver_fallback_timeout_seconds": 12,
   "universal_resolver_fallback_max_depth": 10,
   "universal_resolver_fallback_max_urls_per_message": 2,
