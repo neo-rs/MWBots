@@ -4625,9 +4625,6 @@ class InstorebotForwarder:
             return True
 
         mode = str(mapping.get("mode") or "").strip().lower()
-        if mode == "affiliated_leads":
-            await self._maybe_affiliated_leads_forward(message, int(dest_channel_id), mapping)
-            return True
         if mode == "price_error_embed_forward":
             await self._maybe_price_error_embed_forward(message, int(dest_channel_id), mapping)
             return True
@@ -4841,111 +4838,9 @@ class InstorebotForwarder:
             message_id=str(message.id),
         )
 
-    async def _maybe_affiliated_leads_forward(self, message: discord.Message, dest_channel_id: int, mapping: Dict[str, Any]) -> None:
-        """
-        Forward lead messages as an embed that contains the original text with emojis removed.
-        Only forwards when we can extract a raw store destination and confirm affiliate support
-        (either Amazon or Mavely) using the existing RSForwarder affiliate rewriter logic.
-        """
-        if not message.guild:
-            return
-
-        ch = self.bot.get_channel(int(dest_channel_id))
-        if ch is None:
-            try:
-                ch = await self.bot.fetch_channel(int(dest_channel_id))
-            except Exception:
-                return
-
-        if not isinstance(ch, (discord.TextChannel, discord.Thread, discord.DMChannel)):
-            return
-
-        block = self._simple_message_block(message)
-        block = _strip_emoji_text(block).strip()
-        if not block:
-            return
-
-        urls = self._collect_message_urls(message)
-        if not urls:
-            return
-
-        # Cheap pre-filter to avoid expensive affiliate rewriting for unrelated messages.
-        has_amazonish = any(affiliate_rewriter.is_amazon_like_url((u or "").strip()) for u in urls)
-        has_mavelyish = any(affiliate_rewriter.is_mavely_link((u or "").strip()) for u in urls)
-        if not (has_amazonish or has_mavelyish):
-            return
-
-        # Confirm affiliate support via the canonical RSForwarder rewrite engine.
-        try:
-            mapped, notes = await affiliate_rewriter.compute_affiliate_rewrites_plain(self.config or {}, urls)
-        except Exception:
-            return
-
-        associate_tag = (self.config or {}).get("amazon_associate_tag") or (os.getenv("AMAZON_ASSOCIATE_TAG", "") or "").strip()
-        associate_tag = str(associate_tag or "").strip()
-
-        def _is_amazon_affiliate_url(u: str) -> bool:
-            try:
-                parsed = urlparse(u)
-                host = (parsed.netloc or "").lower()
-                if not (affiliate_rewriter.is_amazon_like_url(u) or "amazon." in host or host.endswith("amazon.com")):
-                    return False
-                q = parsed.query or ""
-                return ("tag=" in q) and (not associate_tag or f"tag={associate_tag}" in q)
-            except Exception:
-                return False
-
-        confirmed = False
-        chosen_input_url = ""
-        chosen_raw_url = ""
-        if isinstance(mapped, dict) and mapped:
-            for orig_u, repl in mapped.items():
-                repl_s = str(repl or "").strip()
-                if affiliate_rewriter.is_mavely_link(repl_s) or _is_amazon_affiliate_url(repl_s):
-                    confirmed = True
-                    chosen_input_url = str(orig_u or "").strip()
-                    break
-
-        if not confirmed or not chosen_input_url:
-            return
-
-        # Derive the raw store destination URL by unwrapping/expanding the chosen original URL.
-        try:
-            import aiohttp
-
-            timeout_s = float((mapping.get("expand_timeout_s") or _cfg_float(self.config, "amazon_expand_timeout_s", "AMAZON_EXPAND_TIMEOUT_S") or 8.0))
-            max_redirects = int(mapping.get("expand_max_redirects") or _cfg_int(self.config, "amazon_expand_max_redirects", "AMAZON_EXPAND_MAX_REDIRECTS") or 8)
-            async with aiohttp.ClientSession() as session:
-                chosen_raw_url = await self._expand_url_best_effort(session, chosen_input_url, timeout_s=timeout_s, max_redirects=max_redirects)
-                chosen_raw_url = affiliate_rewriter.unwrap_known_query_redirects(chosen_raw_url) or chosen_raw_url
-        except Exception:
-            chosen_raw_url = ""
-
-        if not chosen_raw_url:
-            return
-
-        # Always embed: preserve the original text (minus emojis), but provide the raw URL as the embed link.
-        desc = self._neutralize_mentions(block)
-        if len(desc) > 3900:
-            desc = desc[:3897] + "..."
-        embed = discord.Embed(description=desc, url=chosen_raw_url)
-        media_u = self._first_source_embed_media_url(message)
-        if media_u:
-            try:
-                embed.set_image(url=media_u)
-            except Exception:
-                pass
-        try:
-            await ch.send(embeds=[embed], allowed_mentions=discord.AllowedMentions.none())
-            self._log_message_forward_summary(
-                src_channel_id=int(message.channel.id),
-                dest_channel_id=int(dest_channel_id),
-                path="affiliated_leads",
-                extra="",
-                message_id=str(message.id),
-            )
-        except Exception:
-            return
+    # NOTE: The old `affiliated_leads` simple-forward path has been removed.
+    # The canonical owner for "rephrase + embed forward" is `conversational_deals_forwarder.py`,
+    # which now handles both conversational_deals and affiliated_leads source channels.
 
     async def _detect_amazon(self, urls: List[str]) -> Optional[AmazonDetection]:
         if not urls:
@@ -5702,9 +5597,9 @@ class InstorebotForwarder:
             except Exception:
                 # Hard-stop: this channel must never fall back to Amazon routing.
                 try:
-                    from conversational_deals_forwarder import SOURCE_CHANNEL_ID  # type: ignore
+                    from conversational_deals_forwarder import SOURCE_CHANNEL_IDS  # type: ignore
 
-                    if int(message.channel.id) == int(SOURCE_CHANNEL_ID):
+                    if int(message.channel.id) in set(int(x) for x in (SOURCE_CHANNEL_IDS or [])):
                         return
                 except Exception:
                     return

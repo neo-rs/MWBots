@@ -16,6 +16,18 @@ except Exception:
 SOURCE_CHANNEL_ID = 1438970053352751215
 DEST_CHANNEL_ID = 1484473267031904287
 
+# Canonical mapping: multiple sources may share the same "conversational" rewrite+embed pipeline.
+# Keep this as the single source of truth so InstorebotForwarder doesn't need a parallel forwarder.
+CHANNEL_MAP: Dict[int, int] = {
+    # Conversational deals (existing)
+    int(SOURCE_CHANNEL_ID): int(DEST_CHANNEL_ID),
+    # Mavely Leads (affiliated_leads) — run the same conversational pipeline
+    1435308472639160522: 1484599902863622195,
+}
+
+# Canonical multi-source export for the caller hard-stop (so these channels never fall back to Amazon routing).
+SOURCE_CHANNEL_IDS = sorted(CHANNEL_MAP.keys())
+
 
 _RE_URL = re.compile(r"(?i)\bhttps?://\S+")
 _RE_DISCORD_CDN_ATTACHMENT = re.compile(r"(?i)\bhttps?://cdn\.discordapp\.com/attachments/\S+")
@@ -231,9 +243,11 @@ async def forward_runtime_message(inst: Any, message: discord.Message) -> bool:
     `inst` is expected to be the InstorebotForwarder instance (for config + bot access).
     """
     try:
-        if int(getattr(message.channel, "id", 0) or 0) != int(SOURCE_CHANNEL_ID):
-            return False
+        src_id = int(getattr(message.channel, "id", 0) or 0)
     except Exception:
+        return False
+    dest_id = CHANNEL_MAP.get(int(src_id))
+    if not dest_id:
         return False
 
     cfg = getattr(inst, "config", None) or {}
@@ -241,10 +255,10 @@ async def forward_runtime_message(inst: Any, message: discord.Message) -> bool:
     if bot is None:
         return False
 
-    ch = bot.get_channel(int(DEST_CHANNEL_ID))
+    ch = bot.get_channel(int(dest_id))
     if ch is None:
         try:
-            ch = await bot.fetch_channel(int(DEST_CHANNEL_ID))
+            ch = await bot.fetch_channel(int(dest_id))
         except Exception:
             ch = None
     if not isinstance(ch, (discord.TextChannel, discord.Thread, discord.DMChannel)):

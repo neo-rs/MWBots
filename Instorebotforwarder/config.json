@@ -153,12 +153,6 @@
       "dest_channel_id": 1457129505050202377,
       "merge_window_s": 3.0,
       "enrich_stockx": true
-    },
-    "1435308472639160522": {
-      "dest_channel_id": 1484599902863622195,
-      "mode": "affiliated_leads",
-      "strip_emoji": true,
-      "always_embed": true
     }
   },
   "retail_product_link_listener": {
