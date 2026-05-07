@@ -51,6 +51,22 @@ from mirror_world_config import load_config_with_secrets, is_placeholder_secret,
 from RSForwarder import affiliate_rewriter
 try:
     # Oracle live tree (module sits alongside this file).
+    from ebay_first8_dom_comps import (  # type: ignore
+        ebay_keyword_from_title,
+        ebay_sold_search_url,
+        fetch_first8_sold_comps,
+        parse_price as parse_ebay_price,
+    )
+except Exception:
+    # MWBots repo layout / package import.
+    from Instorebotforwarder.ebay_first8_dom_comps import (  # type: ignore
+        ebay_keyword_from_title,
+        ebay_sold_search_url,
+        fetch_first8_sold_comps,
+        parse_price as parse_ebay_price,
+    )
+try:
+    # Oracle live tree (module sits alongside this file).
     from retail_product_link_listener import maybe_reply_retail_product_links  # type: ignore
 except Exception:
     # MWBots repo layout / package import.
@@ -259,8 +275,8 @@ _CALM_FLOW_STAGES = frozenset(
         "FILTER_SKIP",
         "DUP_ASIN_SKIP",
         "SKIP_OOS",
-        "EBAY_PW_FAIL",
-        "EBAY_PW_SKIP_AFTER_CRASH",
+        "EBAY_FIRST8_DONE",
+        "EBAY_FIRST8_EXC",
         "PRICE_ERR_SKIP",
     }
 )
@@ -755,7 +771,7 @@ class InstorebotForwarder:
 
         self._amazon_scrape_cache: Dict[str, Dict[str, str]] = {}
         self._amazon_scrape_cache_ts: Dict[str, float] = {}
-        self._ebay_sold_cache: Dict[str, Dict[str, Dict[str, str]]] = {}
+        self._ebay_sold_cache: Dict[str, Dict[str, Any]] = {}
         self._ebay_sold_cache_ts: Dict[str, float] = {}
 
         # Simple forward buffers (config-gated; does not affect existing Amazon mappings)
@@ -1093,158 +1109,23 @@ class InstorebotForwarder:
         return val, sym
 
     # -----------------------
-    # eBay sold comps (same idea as sheet: keyword -> sold search URL; scrape sold prices by condition)
+    # eBay sold comps: keyword -> sold search URL -> first-8 DOM cards (hard posting gate)
     # -----------------------
     def _ebay_keyword_from_title(self, title: str) -> str:
-        """
-        Sanitize product title for eBay _nkw (same logic as Google Sheet formula):
-        Keep only word chars, spaces, :|+- ; trim. Optionally truncate to first N words so long
-        Amazon titles don't yield "No exact matches" on eBay (config: ebay_max_search_words).
-        """
-        s = (title or "").strip()
-        if not s:
-            return ""
-        # [^\w\s:|+-] -> remove chars that are not word, space, : | + -
-        s = re.sub(r"[^\w\s:|+-]", "", s, flags=re.IGNORECASE)
-        s = " ".join(s.split()).strip()
-        max_words = int((self.config or {}).get("ebay_max_search_words") or 0)
-        if max_words > 0:
-            words = s.split()
-            s = " ".join(words[:max_words]) if words else s
-        return s
+        """Canonical first-8 eBay keyword builder."""
+        try:
+            max_words = int((self.config or {}).get("ebay_max_search_words") or 0)
+        except Exception:
+            max_words = 0
+        return ebay_keyword_from_title(title, max_words=max_words)
 
-    def _ebay_sold_search_url(self, keyword: str, *, condition_id: Optional[int] = None) -> str:
-        """
-        Build eBay sold listings search URL (same pattern as bookmarklet: _nkw=encodeURIComponent(q)&LH_Sold=1&LH_Complete=1).
-        Proper encoding avoids broken links / redirects to ebay.com/n/all-categories when _nkw is malformed.
-        condition_id: 1000=New, 2000=Refurbished, 3000=Used/Pre-owned; None = no filter.
-        """
-        from urllib.parse import quote_plus
-
-        q = (keyword or "").strip()
-        if not q:
-            return ""
-        # Match bookmarklet: encode query so URL is valid in Discord markdown and eBay doesn't redirect
-        encoded_nkw = quote_plus(q)
-        base = f"https://www.ebay.com/sch/i.html?_nkw={encoded_nkw}&LH_Sold=1&LH_Complete=1&LH_PrefLoc=1&_sop=15&_dmd=2"
-        if condition_id is not None:
-            base += f"&LH_ItemCondition={condition_id}"
-        return base
+    def _ebay_sold_search_url(self, keyword: str) -> str:
+        """Canonical first-8 eBay sold search URL."""
+        return ebay_sold_search_url(keyword)
 
     def _parse_ebay_raw_price(self, raw: str) -> Optional[float]:
-        """Parse price from eBay price string (e.g. 'US $15.99', 'to $20.00'). Same logic as Ebay-Scraper __ParseRawPrice."""
-        if not raw or not raw.strip():
-            return None
-        s = raw.replace(",", ".").strip()
-        m = re.search(r"(\d+(?:\.\d+)?)", s)
-        if not m:
-            return None
-        try:
-            v = float(m.group(1))
-            return v if 0.01 <= v <= 1_000_000 else None
-        except Exception:
-            return None
-
-    def _extract_ebay_sold_prices_from_html(self, html_txt: str, *, condition_hint: Optional[str] = None, max_listings: int = 0) -> List[float]:
-        """Extract USD sold prices from eBay search results. condition_hint restricts to items matching that condition. max_listings caps how many main-result items to use (0 = no limit); use e.g. 10 to match 'first page' ranges."""
-        prices: List[float] = []
-        seen: set[str] = set()
-
-        def add(v: float) -> None:
-            if v is None:
-                return
-            if 0.01 <= v <= 1_000_000:
-                key = f"{v:.2f}"
-                if key not in seen:
-                    seen.add(key)
-                    prices.append(v)
-
-        # 0) BeautifulSoup: only main search results (ul.srp-results / #srp-river-results), not "More items related to" sidebar
-        try:
-            from bs4 import BeautifulSoup  # noqa: F401
-            soup = BeautifulSoup(html_txt, "html.parser")
-            # Main results: ul.srp-results or container with srp-river-results (excludes related/suggested items)
-            main = soup.select_one("ul.srp-results") or soup.select_one("#srp-river-results") or soup.select_one(".srp-river-results")
-            items_scope = main.select(".s-item") if main else []
-            # When "No exact matches" / "Results matching fewer words", items may be outside main; use full-page .s-item but still apply condition filter
-            if not items_scope:
-                items_scope = soup.select(".s-item")
-            if max_listings > 0 and len(items_scope) > max_listings:
-                items_scope = items_scope[:max_listings]
-            if condition_hint:
-                cond_lower = condition_hint.lower().replace("_", " ")
-                cond_keywords = (
-                    ["refurbished"] if "refurb" in cond_lower else
-                    ["pre-owned", "pre owned", "used"] if "pre" in cond_lower or "own" in cond_lower else
-                    ["new", "brand new"] if "new" in cond_lower else
-                    []
-                )
-                for item in items_scope:
-                    item_text = (item.get_text() or "").lower()
-                    if not cond_keywords or any(kw in item_text for kw in cond_keywords):
-                        for tag in item.select(".s-item__price"):
-                            text = (tag.get_text() or "").strip()
-                            if text:
-                                v = self._parse_ebay_raw_price(text)
-                                add(v)
-                if prices:
-                    return prices
-                # Condition-specific scrape found no matching items; do not use unfiltered regex fallback (would pick up other conditions)
-                return []
-            for item in items_scope:
-                for tag in item.select(".s-item__price"):
-                    text = (tag.get_text() or "").strip()
-                    if text:
-                        v = self._parse_ebay_raw_price(text)
-                        add(v)
-            if prices:
-                return prices
-        except Exception:
-            pass
-
-        # 1) Regex: s-item__price elements (class may be s-item__price or s-item__price--sold)
-        for m in re.finditer(
-            r'class="[^"]*s-item__price[^"]*"[^>]*>([^<]+)<',
-            html_txt,
-            re.IGNORECASE,
-        ):
-            text = (m.group(1) or "").strip()
-            if not text:
-                continue
-            v = self._parse_ebay_raw_price(text)
-            add(v)
-
-        # 2) Same with single-quoted class and possible extra tags
-        for m in re.finditer(
-            r"class='[^']*s-item__price[^']*'[^>]*>([^<]+)<",
-            html_txt,
-            re.IGNORECASE,
-        ):
-            v = self._parse_ebay_raw_price((m.group(1) or "").strip())
-            add(v)
-
-        # 3) Visible prices in HTML: $X.XX, US $X.XX
-        for m in re.finditer(
-            r"(?:US\s*)?\$\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)", html_txt, re.IGNORECASE
-        ):
-            raw = (m.group(1) or "").replace(",", "").strip()
-            try:
-                add(float(raw))
-            except Exception:
-                continue
-
-        # 4) JSON/model: "currentPrice":{"value":19.99} (eBay app/srp state)
-        for m in re.finditer(
-            r'"(?:currentPrice|convertedPrice|itemPrice|soldPrice|price)"\s*:\s*\{\s*"value"\s*:\s*"?(\d+(?:\.\d{2})?)"?',
-            html_txt,
-            re.IGNORECASE,
-        ):
-            try:
-                add(float((m.group(1) or "").strip()))
-            except Exception:
-                continue
-
-        return prices
+        """Parse eBay visible price text with valid comma-thousands handling."""
+        return parse_ebay_price(raw)
 
     def _ebay_scrape_enabled(self) -> bool:
         v = (self.config or {}).get("ebay_scrape_enabled", None)
@@ -1255,21 +1136,14 @@ class InstorebotForwarder:
             return True
         return False
 
-    def _ebay_scrape_timeout_s(self) -> float:
-        try:
-            v = float((self.config or {}).get("ebay_scrape_timeout_s") or 12.0)
-        except Exception:
-            v = 12.0
-        return max(3.0, min(v, 30.0))
-
     def _ebay_scrape_cache_ttl_s(self) -> float:
         try:
-            v = float((self.config or {}).get("ebay_scrape_cache_ttl_s") or 3600.0)
+            v = float((self.config or {}).get("ebay_first8_cache_ttl_s") or 3600.0)
         except Exception:
             v = 3600.0
         return max(300.0, min(v, 7 * 24 * 3600.0))
 
-    def _ebay_scrape_cache_get(self, keyword: str) -> Optional[Dict[str, Dict[str, str]]]:
+    def _ebay_scrape_cache_get(self, keyword: str) -> Optional[Dict[str, Any]]:
         k = (keyword or "").strip().lower()[:200]
         if not k:
             return None
@@ -1283,363 +1157,93 @@ class InstorebotForwarder:
             return None
         return self._ebay_sold_cache.get(k)
 
-    def _ebay_scrape_cache_put(self, keyword: str, data: Dict[str, Dict[str, str]]) -> None:
+    def _ebay_scrape_cache_put(self, keyword: str, data: Dict[str, Any]) -> None:
         k = (keyword or "").strip().lower()[:200]
         if not k:
             return
-        self._ebay_sold_cache[k] = {kk: dict(vv) for kk, vv in (data or {}).items()}
+        self._ebay_sold_cache[k] = dict(data or {})
         self._ebay_sold_cache_ts[k] = time.time()
 
-    def _is_ebay_challenge_page(self, html_txt: str) -> bool:
-        """eBay returns a bot challenge ('Pardon Our Interruption') instead of search results for plain HTTP."""
-        if not html_txt or len(html_txt) < 200:
-            return True
-        low = html_txt.lower()
-        return (
-            "pardon our interruption" in low
-            or "checking your browser" in low
-            or "challengeget" in low
-        )
-
-    def _pw_err_indicates_crash(self, err: str) -> bool:
-        """
-        Playwright sometimes raises exceptions like "Page.content: Target crashed".
-        When this happens, retrying Playwright again (e.g. after aiohttp challenge detection)
-        is usually wasteful.
-        """
-        e = (err or "").lower()
-        return any(
-            s in e
-            for s in (
-                "target crashed",
-                "page crashed",
-                "crashed",
-                "browser has disconnected",
-                "target closed",
-            )
-        )
-
-    async def _fetch_ebay_sold_page(
+    async def _scrape_ebay_first8_comps(
         self,
-        url: str,
+        title: str,
         *,
         dest_channel_id: Optional[int] = None,
         source_channel_id: Optional[int] = None,
         source_label: Optional[str] = None,
         trace_acc: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[Optional[str], Optional[str]]:
-        """Fetch one eBay sold search page; return (html, error). Uses Playwright first when enabled (eBay is JS-rendered); else aiohttp with Playwright fallback on challenge."""
-        if self._playwright_enabled():
-            pw_html, pw_err = await self._fetch_ebay_sold_page_playwright(url)
-            if pw_html and not pw_err:
-                _log_flow(
-                    "EBAY_PW_OK",
-                    url=url[:60],
-                    dest_channel_id=dest_channel_id,
-                    source_channel_id=source_channel_id,
-                    source_label=source_label,
-                )
-                return pw_html, None
-            pw_crashed = self._pw_err_indicates_crash(str(pw_err or ""))
-            if pw_err:
-                _log_flow(
-                    "EBAY_PW_FAIL",
-                    url=url[:60],
-                    err=(pw_err or "no_content")[:80],
-                    dest_channel_id=dest_channel_id,
-                    source_channel_id=source_channel_id,
-                    source_label=source_label,
-                )
-                if trace_acc is not None:
-                    trace_acc["pw_fail_count"] = int(trace_acc.get("pw_fail_count") or 0) + 1
-                    trace_acc["pw_fail_last_err"] = str(pw_err or "")[:220]
-                    trace_acc["pw_fail_sample_url"] = url[:160]
-            # Fall through to aiohttp only when Playwright failed
-        else:
-            pw_crashed = False
-        try:
-            import aiohttp
-        except Exception:
-            return None, "aiohttp not available"
-        timeout_s = self._ebay_scrape_timeout_s()
-        headers = {
-            "User-Agent": self._scrape_user_agent(),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-        try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_s)) as session:
-                async with session.get(url, headers=headers, allow_redirects=True) as resp:
-                    if resp.status >= 400:
-                        return None, f"HTTP {resp.status}"
-                    html_txt = await resp.text()
-                    if self._is_ebay_challenge_page(html_txt):
-                        _log_flow(
-                            "EBAY_CHALLENGE",
-                            method="aiohttp",
-                            url=url[:60],
-                            dest_channel_id=dest_channel_id,
-                            source_channel_id=source_channel_id,
-                            source_label=source_label,
-                        )
-                        # If Playwright already crashed once, avoid re-spinning it.
-                        if pw_crashed:
-                            _log_flow(
-                                "EBAY_PW_SKIP_AFTER_CRASH",
-                                reason="pw_crashed_first_attempt",
-                                dest_channel_id=dest_channel_id,
-                                source_channel_id=source_channel_id,
-                                source_label=source_label,
-                            )
-                            if trace_acc is not None:
-                                trace_acc["pw_skip_crash_count"] = int(trace_acc.get("pw_skip_crash_count") or 0) + 1
-                            return html_txt, None  # no prices; caller will handle
-
-                        pw_html, pw_err = await self._fetch_ebay_sold_page_playwright(url)
-                        if pw_html and not pw_err:
-                            _log_flow(
-                                "EBAY_PW_OK",
-                                url=url[:60],
-                                dest_channel_id=dest_channel_id,
-                                source_channel_id=source_channel_id,
-                                source_label=source_label,
-                            )
-                            return pw_html, None
-                        _log_flow(
-                            "EBAY_PW_FAIL",
-                            url=url[:60],
-                            err=(pw_err or "no_content")[:80],
-                            dest_channel_id=dest_channel_id,
-                            source_channel_id=source_channel_id,
-                            source_label=source_label,
-                        )
-                        if trace_acc is not None:
-                            trace_acc["pw_fail_count"] = int(trace_acc.get("pw_fail_count") or 0) + 1
-                            trace_acc["pw_fail_last_err"] = str(pw_err or "")[:220]
-                            trace_acc["pw_fail_sample_url"] = url[:160]
-                        return html_txt, None  # return challenge HTML so caller sees no prices
-                    return html_txt, None
-        except asyncio.TimeoutError:
-            return None, "timeout"
-        except Exception as e:
-            return None, str(e)[:200]
-
-    def _fetch_ebay_sold_page_playwright_sync(self, url: str) -> Tuple[Optional[str], Optional[str]]:
-        """Sync Playwright load (run in thread). Wait for challenge to pass and results to appear."""
-        from playwright.sync_api import sync_playwright
-        timeout_ms = 45000  # 45s for goto + challenge
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=self._playwright_headless(),
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-gpu",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                ],
-            )
-            try:
-                context = browser.new_context(
-                    viewport={"width": 1280, "height": 720},
-                    user_agent=self._scrape_user_agent(),
-                    locale="en-US",
-                )
-                page = context.new_page()
-                page.goto(url, wait_until="commit", timeout=timeout_ms)
-                # Let challenge run: wait for navigation to complete
-                try:
-                    page.wait_for_load_state("networkidle", timeout=20000)
-                except Exception:
-                    pass
-                page.wait_for_timeout(8000)  # challenge often needs 5–10s
-                # Wait for results if not yet present
-                try:
-                    page.wait_for_selector(".s-item__price, .srp-river-results, [data-view=srv]", timeout=15000)
-                except Exception:
-                    pass
-                page.wait_for_timeout(2000)
-                return page.content(), None
-            finally:
-                browser.close()
-
-    async def _fetch_ebay_sold_page_playwright(self, url: str) -> Tuple[Optional[str], Optional[str]]:
-        """Load eBay sold search in a real browser to bypass challenge; return (html, error)."""
-        if not self._playwright_enabled():
-            return None, "playwright disabled"
-        try:
-            import playwright  # type: ignore  # noqa: F401
-        except Exception:
-            return None, "playwright not installed"
-        try:
-            html_txt, _ = await asyncio.to_thread(self._fetch_ebay_sold_page_playwright_sync, url)
-            if not html_txt:
-                return None, "no content"
-            if self._is_ebay_challenge_page(html_txt):
-                return None, "still challenge after playwright"
-            return html_txt, None
-        except Exception as e:
-            return None, str(e)[:200]
-
-    async def _scrape_ebay_sold_ranges(
-        self,
-        keyword: str,
-        *,
-        dest_channel_id: Optional[int] = None,
-        source_channel_id: Optional[int] = None,
-        source_label: Optional[str] = None,
-        trace_acc: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[Optional[Dict[str, Dict[str, str]]], Optional[str]]:
+    ) -> Dict[str, Any]:
         """
-        For a search keyword, fetch eBay sold listings for New (1000), Pre-owned (3000), Refurbished (2000),
-        parse sold prices, return low/high per condition. Result e.g. {"new": {"low": "$10", "high": "$50"}, ...}.
+        Canonical eBay comps path: one sold-grid DOM scrape, first up to 8 cards.
+        No aiohttp/HTML/condition fallback is attempted; callers hard-skip when status != ok.
         """
-        q = self._ebay_keyword_from_title(keyword)
+        q = self._ebay_keyword_from_title(title)
+        if trace_acc is not None:
+            trace_acc["ebay_keyword"] = q[:200]
+            trace_acc["canonical"] = "first8_dom"
         if not q:
             _log_flow(
-                "EBAY_KEYWORD",
-                keyword="",
-                reason="empty",
+                "EBAY_FIRST8_SKIP",
+                reason="empty_keyword",
                 dest_channel_id=dest_channel_id,
                 source_channel_id=source_channel_id,
                 source_label=source_label,
             )
-            return None, "empty keyword"
+            return {"status": "no_keyword", "reason": "empty keyword", "keyword": "", "listings": []}
+
+        cached = self._ebay_scrape_cache_get(q)
+        if cached:
+            _log_flow(
+                "EBAY_FIRST8_CACHE_HIT",
+                keyword=q[:60],
+                listings=len(cached.get("listings") or []),
+                dest_channel_id=dest_channel_id,
+                source_channel_id=source_channel_id,
+                source_label=source_label,
+            )
+            if trace_acc is not None:
+                trace_acc.update({k: v for k, v in cached.items() if k in {"status", "reason", "url", "used_cards", "detected_cards"}})
+            return cached
+
         _log_flow(
-            "EBAY_KEYWORD",
+            "EBAY_FIRST8_START",
             keyword=q[:60],
+            url=self._ebay_sold_search_url(q)[:90],
             dest_channel_id=dest_channel_id,
             source_channel_id=source_channel_id,
             source_label=source_label,
         )
-        cached = self._ebay_scrape_cache_get(q)
-        if cached:
-            _log_flow(
-                "EBAY_CACHE_HIT",
-                keyword=q[:40],
-                dest_channel_id=dest_channel_id,
-                source_channel_id=source_channel_id,
-                source_label=source_label,
-            )
-            return cached, None
-
-        # 1000=New, 2000=Refurbished, 3000=Used/Pre-owned
-        condition_ids: List[Tuple[str, int]] = [
-            ("new", 1000),
-            ("pre_owned", 3000),
-            ("refurbished", 2000),
-        ]
+        result = await fetch_first8_sold_comps(title, self.config or {}, bot_dir=Path(__file__).parent)
+        listings = list(result.get("listings") or [])
+        prices = [x.get("price_display") or x.get("price") for x in listings[:8]]
+        _log_flow(
+            "EBAY_FIRST8_DONE",
+            status=str(result.get("status") or ""),
+            detected_cards=str(result.get("detected_cards") or 0),
+            used_cards=str(result.get("used_cards") or len(listings)),
+            prices=",".join(str(x) for x in prices[:8])[:180],
+            screenshot=str(result.get("screenshot_path") or "")[:120],
+            reason=str(result.get("reason") or "")[:120],
+            dest_channel_id=dest_channel_id,
+            source_channel_id=source_channel_id,
+            source_label=source_label,
+        )
         if trace_acc is not None:
-            trace_acc["ebay_keyword"] = q[:200]
-            trace_acc["conditions_attempted"] = len(condition_ids)
-        result: Dict[str, Dict[str, str]] = {}
-        for cond_key, cond_id in condition_ids:
-            url = self._ebay_sold_search_url(q, condition_id=cond_id)
-            _log_flow(
-                "EBAY_FETCH_START",
-                cond=cond_key,
-                url=url[:70],
-                dest_channel_id=dest_channel_id,
-                source_channel_id=source_channel_id,
-                source_label=source_label,
+            trace_acc.update(
+                {
+                    "status": str(result.get("status") or ""),
+                    "reason": str(result.get("reason") or "")[:220],
+                    "url": str(result.get("url") or ""),
+                    "opened_url": str(result.get("opened_url") or ""),
+                    "detected_cards": int(result.get("detected_cards") or 0),
+                    "used_cards": int(result.get("used_cards") or len(listings)),
+                    "prices": [str(x) for x in prices[:8]],
+                    "screenshot_path": str(result.get("screenshot_path") or ""),
+                }
             )
-            html, err = await self._fetch_ebay_sold_page(
-                url,
-                dest_channel_id=dest_channel_id,
-                source_channel_id=source_channel_id,
-                source_label=source_label,
-                trace_acc=trace_acc,
-            )
-            if err or not html:
-                _log_flow(
-                    "EBAY_FETCH",
-                    cond=cond_key,
-                    err=(err or "no_html")[:80],
-                    html_len=0,
-                    dest_channel_id=dest_channel_id,
-                    source_channel_id=source_channel_id,
-                    source_label=source_label,
-                )
-                result[cond_key] = {"low": "N/A", "high": "N/A", "url": url}
-                continue
-            _log_flow(
-                "EBAY_FETCH",
-                cond=cond_key,
-                err="ok",
-                html_len=len(html or ""),
-                dest_channel_id=dest_channel_id,
-                source_channel_id=source_channel_id,
-                source_label=source_label,
-            )
-            max_listings = int((self.config or {}).get("ebay_max_listings_per_condition") or 0)
-            prices = self._extract_ebay_sold_prices_from_html(html, condition_hint=cond_key, max_listings=max_listings)
-            if not prices:
-                _log_flow(
-                    "EBAY_PRICES",
-                    cond=cond_key,
-                    raw_count=0,
-                    low="N/A",
-                    high="N/A",
-                    dest_channel_id=dest_channel_id,
-                    source_channel_id=source_channel_id,
-                    source_label=source_label,
-                )
-                result[cond_key] = {"low": "N/A", "high": "N/A", "url": url}
-                continue
-            # Ignore very low prices (parts, accessories) when computing range
-            min_sold_price = float((self.config or {}).get("ebay_min_sold_price") or 5.0)
-            prices_filtered = [p for p in prices if p >= min_sold_price]
-            if not prices_filtered:
-                prices_filtered = prices
-            low_val, high_val = min(prices_filtered), max(prices_filtered)
-            result[cond_key] = {
-                "low": f"${low_val:,.2f}" if low_val != high_val else f"${low_val:,.2f}",
-                "high": f"${high_val:,.2f}" if low_val != high_val else f"${high_val:,.2f}",
-                "url": url,
-            }
-            _log_flow(
-                "EBAY_PRICES",
-                cond=cond_key,
-                raw_count=len(prices),
-                filtered=len(prices_filtered),
-                low=result[cond_key]["low"],
-                high=result[cond_key]["high"],
-                dest_channel_id=dest_channel_id,
-                source_channel_id=source_channel_id,
-                source_label=source_label,
-            )
-        # If Refurbished looks like cross-contamination (same as another condition, mix of bounds, or overlaps Pre-owned), clear it
-        ref = result.get("refurbished") or {}
-        if ref.get("low") != "N/A" and ref.get("high") != "N/A":
-            new_r, pre_r = result.get("new") or {}, result.get("pre_owned") or {}
-            ref_lo, ref_hi = ref.get("low"), ref.get("high")
-            same_as_new = ref_lo == new_r.get("low") and ref_hi == new_r.get("high")
-            same_as_pre = ref_lo == pre_r.get("low") and ref_hi == pre_r.get("high")
-            mixed_bounds = (ref_lo == new_r.get("low") and ref_hi == pre_r.get("high")) or (ref_lo == pre_r.get("low") and ref_hi == new_r.get("high"))
-            # Refurbished overlaps or is contained in Pre-owned (e.g. $16–$41 vs Pre-owned $12.95–$41)
-            def _ebay_price_val(s: Optional[str]) -> Optional[float]:
-                if not s or s == "N/A":
-                    return None
-                m = re.search(r"[\d,]+(?:\.\d{2})?", (s or "").replace(",", ""))
-                return float(m.group(0)) if m else None
-            pre_lo_val, pre_hi_val = _ebay_price_val(pre_r.get("low")), _ebay_price_val(pre_r.get("high"))
-            ref_lo_val, ref_hi_val = _ebay_price_val(ref_lo), _ebay_price_val(ref_hi)
-            overlaps_pre = (
-                pre_lo_val is not None and pre_hi_val is not None
-                and ref_lo_val is not None and ref_hi_val is not None
-                and (ref_hi_val == pre_hi_val or (ref_lo_val >= pre_lo_val and ref_hi_val <= pre_hi_val))
-            )
-            if same_as_new or same_as_pre or mixed_bounds or overlaps_pre:
-                result["refurbished"] = {"low": "N/A", "high": "N/A", "url": ref.get("url", "")}
-                _log_flow(
-                    "EBAY_PRICES",
-                    cond="refurbished_cleared",
-                    reason="contamination",
-                    dest_channel_id=dest_channel_id,
-                    source_channel_id=source_channel_id,
-                    source_label=source_label,
-                )
-        self._ebay_scrape_cache_put(q, result)
-        return result, None
+        if str(result.get("status") or "") == "ok":
+            self._ebay_scrape_cache_put(q, result)
+        return result
 
     def _extract_amazon_before_price_from_html(self, html_txt: str, *, current_price: str = "") -> str:
         """
@@ -2201,7 +1805,7 @@ class InstorebotForwarder:
         )
         ex.emit()
 
-    def _explain_ebay_sold_comps_outcome(
+    def _explain_ebay_first8_gate(
         self,
         *,
         trace_acc: Dict[str, Any],
@@ -2210,20 +1814,14 @@ class InstorebotForwarder:
         source_channel_id: Optional[int],
         source_label: Optional[str],
         title_sample: str,
-        ebay_err: Optional[str],
-        had_any_comp_data: bool,
+        will_post: bool,
     ) -> None:
         if not self._explainable_enabled():
-            return
-        pw_fail = int(trace_acc.get("pw_fail_count") or 0)
-        pw_skip = int(trace_acc.get("pw_skip_crash_count") or 0)
-        err_s = (ebay_err or "").strip()
-        if pw_fail == 0 and pw_skip == 0 and not err_s:
             return
 
         ex = self._explainable()
         ex.start(
-            "EBAY SOLD COMPS",
+            "EBAY FIRST-8 SOLD COMPS",
             message_id=message_id,
             destination=(f"<#{dest_channel_id}>" if dest_channel_id else ""),
             source=(f"<#{source_channel_id}>" if source_channel_id else ""),
@@ -2232,37 +1830,34 @@ class InstorebotForwarder:
         )
 
         kw = str(trace_acc.get("ebay_keyword") or title_sample or "")[:100]
-        conds = int(trace_acc.get("conditions_attempted") or 3)
-        last_err = str(trace_acc.get("pw_fail_last_err") or "")[:160]
-        sample_url = str(trace_acc.get("pw_fail_sample_url") or "")[:120]
+        status = str(trace_acc.get("status") or "").strip() or "unknown"
+        reason = str(trace_acc.get("reason") or "").strip()
+        used_cards = int(trace_acc.get("used_cards") or 0)
+        detected_cards = int(trace_acc.get("detected_cards") or 0)
+        prices = [str(x) for x in (trace_acc.get("prices") or []) if str(x).strip()]
+        url = str(trace_acc.get("url") or "").strip()
+        screenshot_path = str(trace_acc.get("screenshot_path") or "").strip()
 
-        if pw_fail > 0:
-            bottom = (
-                "FALLBACK USED — eBay sold-listing prices were not available. "
-                "Playwright (headless browser) crashed while loading eBay search pages."
-            )
-        elif err_s:
-            bottom = f"FALLBACK USED — eBay comp scrape did not return usable ranges ({err_s[:80]})."
+        if will_post:
+            bottom = f"PASS - eBay first-8 DOM comps returned {used_cards} priced sold card(s)."
         else:
-            bottom = "eBay comp fetch finished with guard-rail skips (see notes)."
+            bottom = f"BLOCKED / NO ROUTE - eBay comps are required and status was `{status}`."
 
         saw = [
-            f"We run up to {conds} separate eBay sold searches (New, Pre-owned, Refurbished) from the product title.",
+            "We run one eBay sold-grid search and read the first up to 8 DOM result cards.",
             f"Title/keyword used (trimmed): {kw!r}" if kw else "Title/keyword: (empty)",
+            f"Detected cards: {detected_cards}; priced cards used: {used_cards}",
         ]
-        if pw_fail > 0:
-            saw.append(f"Playwright reported failure on {pw_fail} fetch(es); last error: {last_err!r}" if last_err else f"Playwright failed {pw_fail} time(s).")
-        if pw_skip > 0:
-            saw.append(
-                f"After a crash, aiohttp sometimes still returns eBay's challenge HTML; we skip re-launching Playwright ({pw_skip} skip(s)) to avoid hammering a broken browser."
-            )
+        if prices:
+            saw.append("Prices found: " + ", ".join(prices[:8]))
+        if screenshot_path:
+            saw.append(f"Screenshot saved: {screenshot_path}")
 
-        decision_lines = [
-            "- Amazon embed generation continues.",
-            "- eBay comp lines in the card may show N/A or omit the comps block when there is no data.",
-        ]
-        if had_any_comp_data:
-            decision_lines.insert(0, "- Some condition buckets may still have price ranges if any fetch succeeded.")
+        decision_lines = (
+            ["- Continue rendering and posting the Amazon card with eBay comps."]
+            if will_post
+            else ["- Do not render/post this Amazon card.", "- Release any reserved ASIN dedupe lock for this skipped lead."]
+        )
 
         ex.section(
             3,
@@ -2281,37 +1876,38 @@ class InstorebotForwarder:
             4,
             "HUMAN DECISION SUMMARY",
             [
-                "Winning (for eBay data):",
-                "- Playwright loads real search results without crash, or aiohttp returns parseable HTML (no bot challenge).",
+                "Winning condition:",
+                "- First-8 DOM scrape status is `ok` and at least one priced sold card is extracted.",
                 "",
-                "Losing (this run):",
-                *(
-                    ["- Playwright: Target crashed / browser disconnected (common on constrained hosts)."]
-                    if pw_fail > 0
-                    else ["- See ELI5."]
-                ),
+                "Losing condition:",
+                f"- status={status!r}" + (f"; reason={reason!r}" if reason else ""),
                 "",
                 "Notes:",
-                "- This does not block posting the Amazon deal card by itself.",
-                "- Three fetches per lead is expected (one per condition); repeated log lines are normal unless aggregated here.",
+                "- There is no aiohttp/HTML/condition-bucket fallback in this path.",
+                "- If no comps are found, posting is intentionally blocked.",
             ],
         )
         ex.section(
             8,
             "FAILURE HINTS",
             [
-                "- If crashes persist: check Playwright/Chromium deps, memory, and `--no-sandbox` style flags on the server.",
-                "- eBay may serve a bot challenge page; challenge + Playwright crash together triggers skip-after-crash.",
+                "- If status is `blocked`, eBay returned an interstitial/challenge page instead of sold cards.",
+                "- If status is `no_cards`, the keyword may be too narrow or eBay returned no sold tiles.",
+                "- If status is `no_prices`, DOM cards loaded but no prices above `ebay_min_sold_price` were extracted.",
+                "- If status is `browser_error`, check Chrome/Playwright availability on the runtime host.",
             ],
         )
         ex.trace(
             {
-                "pw_fail_count": pw_fail,
-                "pw_skip_after_crash_count": pw_skip,
-                "pw_fail_last_err": last_err,
-                "pw_fail_sample_url": sample_url,
-                "ebay_scrape_err": err_s[:200],
-                "had_any_comp_data": str(bool(had_any_comp_data)),
+                "status": status,
+                "reason": reason[:200],
+                "keyword": kw,
+                "url": url[:200],
+                "detected_cards": str(detected_cards),
+                "used_cards": str(used_cards),
+                "prices": ", ".join(prices[:8]),
+                "screenshot_path": screenshot_path[:220],
+                "will_post": str(bool(will_post)),
             }
         )
         ex.emit()
@@ -5727,7 +5323,7 @@ class InstorebotForwarder:
         dest_id, route_reason = self._pick_dest_channel_id(source_channel_id=(src_id or None), category=category, enrich_failed=False)
         _log_flow("ROUTE", dest_id=(dest_id or ""), reason=route_reason)
 
-        # eBay sold comps (run before card body so we can inject eBay block and compute upside).
+        # eBay first-8 sold comps are a hard posting gate for Amazon cards.
         ebay_comps_url = ""
         ebay_sold_new = "N/A"
         ebay_sold_pre_owned = "N/A"
@@ -5736,76 +5332,68 @@ class InstorebotForwarder:
         ebay_sold_new_near = "N/A"
         ebay_upside_str = ""
         ebay_refurb_preowned_line = ""
+        ebay_first8_prices_line = ""
+        ebay_first8_screenshot_path = ""
         ebay_trace: Dict[str, Any] = {}
-        if self._ebay_scrape_enabled() and title:
-            _log_flow("EBAY_START", title=(title or "")[:50])
-            scrape_return_err = ""
+        if not self._ebay_scrape_enabled():
+            ebay_trace.update({"status": "disabled", "reason": "ebay_scrape_enabled=false", "used_cards": 0, "detected_cards": 0})
+        elif not title:
+            ebay_trace.update({"status": "no_title", "reason": "missing amazon title", "used_cards": 0, "detected_cards": 0})
+        else:
             try:
-                ebay_ranges, scrape_return_err = await self._scrape_ebay_sold_ranges(
+                ebay_result = await self._scrape_ebay_first8_comps(
                     title,
                     dest_channel_id=dest_id,
                     source_channel_id=(src_id or None),
                     source_label=source_label,
                     trace_acc=ebay_trace,
                 )
-                if scrape_return_err:
-                    ebay_sold_err = scrape_return_err
-                    _log_flow("EBAY_SCRAPE_FAIL", err=scrape_return_err[:120])
-                elif ebay_ranges:
-                    q = self._ebay_keyword_from_title(title)
-                    ebay_comps_url = self._ebay_sold_search_url(q) if q else ""
-                    for cond_key, display in [("new", "ebay_sold_new"), ("pre_owned", "ebay_sold_pre_owned"), ("refurbished", "ebay_sold_refurbished")]:
-                        r = (ebay_ranges or {}).get(cond_key) or {}
-                        lo, hi = r.get("low", "N/A"), r.get("high", "N/A")
-                        if lo and hi and lo != "N/A" and hi != "N/A":
-                            val = f"{lo} – {hi}" if lo != hi else lo
-                        else:
-                            val = "N/A"
-                        if display == "ebay_sold_new":
-                            ebay_sold_new = val
-                            ebay_sold_new_near = lo
-                        elif display == "ebay_sold_pre_owned":
-                            ebay_sold_pre_owned = val
-                        else:
-                            ebay_sold_refurbished = val
-                    _log_flow("EBAY_SCRAPE_OK", new=ebay_sold_new[:40], pre_owned=ebay_sold_pre_owned[:40], refurb=ebay_sold_refurbished[:40])
-                    # Upside: eBay New low minus current price (only when both parse as USD).
+            except Exception as e:
+                ebay_result = {"status": "browser_error", "reason": str(e)[:200], "listings": []}
+                ebay_trace.update(ebay_result)
+                _log_flow("EBAY_FIRST8_EXC", err=str(e)[:120])
+
+            listings = list((ebay_result or {}).get("listings") or [])
+            if str((ebay_result or {}).get("status") or "") == "ok" and listings:
+                ebay_comps_url = str((ebay_result or {}).get("url") or "")
+                ebay_first8_screenshot_path = str((ebay_result or {}).get("screenshot_path") or "")
+                prices = [float(x.get("price")) for x in listings if x.get("price") is not None]
+                if prices:
+                    low_val, high_val = min(prices), max(prices)
+                    ebay_sold_new_near = f"${low_val:,.2f}"
+                    ebay_sold_new = f"${low_val:,.2f} - ${high_val:,.2f}" if low_val != high_val else f"${low_val:,.2f}"
+                    shown = [str(x.get("price_display") or f"${float(x.get('price')):,.2f}") for x in listings[:8]]
+                    ebay_first8_prices_line = f"First {len(shown)} sold cards: " + ", ".join(shown)
                     try:
-                        new_low_val, _ = self._price_to_float(ebay_sold_new_near)
                         cur_val, _ = self._price_to_float(price)
-                        if new_low_val is not None and cur_val is not None and new_low_val > cur_val:
-                            upside = round(new_low_val - cur_val, 2)
+                        if cur_val is not None and low_val > cur_val:
+                            upside = round(low_val - cur_val, 2)
                             ebay_upside_str = f"Roughly ${upside:,.0f} in upside per unit"
                     except Exception:
                         pass
-                    # Pre-owned and Refurbished on separate lines; only show when we have data for that condition.
-                    parts = []
-                    if ebay_sold_pre_owned != "N/A":
-                        parts.append(f"Pre-owned {ebay_sold_pre_owned}")
-                    if ebay_sold_refurbished != "N/A":
-                        parts.append(f"Refurbished {ebay_sold_refurbished}")
-                    ebay_refurb_preowned_line = "\n".join(parts) if parts else ""
-            except Exception as e:
-                ebay_sold_err = str(e)[:200]
-                _log_flow("EBAY_SCRAPE_EXC", err=ebay_sold_err[:120])
-            had_ebay_data = (
-                bool(ebay_comps_url)
-                or (ebay_sold_new != "N/A")
-                or (ebay_sold_pre_owned != "N/A")
-                or (ebay_sold_refurbished != "N/A")
-            )
-            self._explain_ebay_sold_comps_outcome(
-                trace_acc=ebay_trace,
-                message_id=str(message.id),
-                dest_channel_id=int(dest_id) if dest_id else None,
-                source_channel_id=int(src_id) if src_id else None,
-                source_label=source_label,
-                title_sample=(title or "")[:200],
-                ebay_err=(ebay_sold_err or scrape_return_err or None),
-                had_any_comp_data=had_ebay_data,
-            )
-        elif self._ebay_scrape_enabled() and not title:
-            _log_flow("EBAY_SKIP", reason="no_title")
+
+        will_post_ebay = bool(ebay_comps_url and ebay_sold_new_near and ebay_sold_new_near != "N/A")
+        self._explain_ebay_first8_gate(
+            trace_acc=ebay_trace,
+            message_id=str(message.id),
+            dest_channel_id=int(dest_id) if dest_id else None,
+            source_channel_id=int(src_id) if src_id else None,
+            source_label=source_label,
+            title_sample=(title or "")[:200],
+            will_post=will_post_ebay,
+        )
+        if not will_post_ebay:
+            status = str(ebay_trace.get("status") or "unknown")
+            reason = str(ebay_trace.get("reason") or "")[:140]
+            _log_flow("FILTER_SKIP", channel=dest_id, reason=f"ebay_first8_required_{status}", detail=reason)
+            if dedupe_reserved and asin:
+                self._dedupe_release(asin)
+            return None, {
+                "urls": urls,
+                "amazon": {"asin": asin, "final_url": final_url, "url_used": det.url_used if det else None},
+                "filter_reason": f"ebay_first8_required_{status}",
+                "ebay_first8": dict(ebay_trace),
+            }
 
         # Build the "card body" to match your desired format (no footer/timestamp, one key link).
         card_lines: List[str] = []
@@ -5829,18 +5417,16 @@ class InstorebotForwarder:
         if key_link:
             card_lines.append("")
             card_lines.append(key_link)
-        # eBay Comps block: link + recent sales near (New) + upside + Pre-owned/Refurbished (separate lines, only when data).
+        # eBay Comps block: required first-8 DOM sold prices.
         if ebay_comps_url:
             card_lines.append("")
-            card_lines.append(f"**eBay Comps:** [view sold listings]({ebay_comps_url})")
-            if ebay_sold_new_near and ebay_sold_new_near != "N/A":
-                card_lines.append(f"Recent eBay sales near {ebay_sold_new_near} (sold range for New)")
+            card_lines.append(f"**eBay Comps:** [view first sold listings]({ebay_comps_url})")
+            if ebay_first8_prices_line:
+                card_lines.append(ebay_first8_prices_line)
+            elif ebay_sold_new_near and ebay_sold_new_near != "N/A":
+                card_lines.append(f"Recent eBay sales near {ebay_sold_new_near}")
             if ebay_upside_str:
                 card_lines.append(ebay_upside_str)
-            if ebay_sold_pre_owned != "N/A":
-                card_lines.append(f"Pre-owned {ebay_sold_pre_owned}")
-            if ebay_sold_refurbished != "N/A":
-                card_lines.append(f"Refurbished {ebay_sold_refurbished}")
         card_body = "\n".join(card_lines).strip()
         
         # Strict filter for channel 1457129557067960482: only Amazon links with "glitch"/"price error" keywords (case-insensitive) AND >= 80% OFF
@@ -5958,6 +5544,8 @@ class InstorebotForwarder:
             "ebay_sold_new_near": ebay_sold_new_near,
             "ebay_upside_str": ebay_upside_str,
             "ebay_refurb_preowned_line": ebay_refurb_preowned_line,
+            "ebay_first8_prices_line": ebay_first8_prices_line,
+            "ebay_first8_screenshot_path": ebay_first8_screenshot_path,
         }
 
         embed = _embed_from_template(tpl or {}, ctx) if tpl else None
