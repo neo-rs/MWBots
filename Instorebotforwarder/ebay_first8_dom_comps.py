@@ -331,6 +331,44 @@ async def _extract_cards(page: Any, limit: int, min_price: float) -> Tuple[List[
     return out, int(total_count or 0)
 
 
+async def _get_first_card_boxes(page: Any, limit: int) -> Tuple[List[Dict[str, float]], int]:
+    """
+    Product cards only (`li.s-card`); excludes river banners like "Have one to sell?".
+
+    Measure all cards in one DOM pass at scroll 0. Per-card scrolling mixes
+    coordinates from different scroll states and can cut off lower rows.
+    """
+    total_count = await page.locator("ul.srp-results li.s-card").count()
+    take = min(int(limit), int(total_count or 0))
+    if take <= 0:
+        return [], int(total_count or 0)
+    boxes_raw = await page.evaluate(
+        """
+        (lim) => {
+          const nodes = document.querySelectorAll('ul.srp-results li.s-card');
+          const out = [];
+          const n = Math.min(lim, nodes.length);
+          for (let i = 0; i < n; i++) {
+            const r = nodes[i].getBoundingClientRect();
+            out.push({x: r.x, y: r.y, width: r.width, height: r.height});
+          }
+          return out;
+        }
+        """,
+        take,
+    )
+    boxes: List[Dict[str, float]] = []
+    for box in boxes_raw or []:
+        try:
+            w = float(box.get("width", 0))
+            h = float(box.get("height", 0))
+            if w > 20 and h > 20:
+                boxes.append({"x": float(box["x"]), "y": float(box["y"]), "width": w, "height": h})
+        except Exception:
+            continue
+    return boxes, int(total_count or 0)
+
+
 def _merge_boxes(boxes: List[Dict[str, float]], padding: int) -> Dict[str, float]:
     x = min(b["x"] for b in boxes) - padding
     y = min(b["y"] for b in boxes) - padding
@@ -440,16 +478,22 @@ async def fetch_first8_sold_comps(title: str, cfg: Mapping[str, Any], *, bot_dir
                 return result
 
             if screenshot_enabled:
-                boxes = []
-                for item in listings:
-                    box = item.get("box") or {}
+                boxes, screenshot_total_count = await _get_first_card_boxes(page, limit)
+                if boxes:
+                    clip_try = _merge_boxes(boxes, padding)
                     try:
-                        w = float(box.get("width", 0))
-                        h = float(box.get("height", 0))
-                        if w > 20 and h > 20:
-                            boxes.append({"x": float(box["x"]), "y": float(box["y"]), "width": w, "height": h})
+                        vh = int(await page.evaluate("() => window.innerHeight"))
+                        need_h = int(clip_try["y"] + clip_try["height"]) + 24
+                        if need_h > vh:
+                            vw = int(await page.evaluate("() => window.innerWidth"))
+                            new_h = min(max(need_h, viewport_height), 3200)
+                            await page.set_viewport_size({"width": vw, "height": new_h})
+                            await page.wait_for_timeout(150)
+                            await page.evaluate("window.scrollTo(0, 0)")
+                            await page.wait_for_timeout(200)
+                            boxes, screenshot_total_count = await _get_first_card_boxes(page, limit)
                     except Exception:
-                        continue
+                        pass
                 if boxes:
                     out_dir_raw = str(cfg.get("ebay_first8_output_dir") or "ebay_screenshots").strip()
                     out_dir = Path(out_dir_raw)
@@ -468,9 +512,11 @@ async def fetch_first8_sold_comps(title: str, cfg: Mapping[str, Any], *, bot_dir
                     )
                     clip["width"] = min(clip["width"], max(1, float(dims.get("width", clip["width"])) - clip["x"]))
                     clip["height"] = min(clip["height"], max(1, float(dims.get("height", clip["height"])) - clip["y"]))
-                    shot = str(base) + f"_first_{len(listings)}.png"
+                    shot = str(base) + f"_first_{len(boxes)}.png"
                     await page.screenshot(path=shot, full_page=False, clip=clip)
                     result["screenshot_path"] = shot
+                    result["screenshot_cards"] = len(boxes)
+                    result["screenshot_total_cards"] = screenshot_total_count
                     meta_path = str(base) + ".json"
                     Path(meta_path).write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
                     result["meta_path"] = meta_path

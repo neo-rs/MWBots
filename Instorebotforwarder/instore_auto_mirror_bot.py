@@ -5342,7 +5342,7 @@ class InstorebotForwarder:
         ebay_sold_new_near = "N/A"
         ebay_upside_str = ""
         ebay_refurb_preowned_line = ""
-        ebay_first8_prices_line = ""
+        ebay_first8_avg_line = ""
         ebay_first8_screenshot_path = ""
         ebay_trace: Dict[str, Any] = {}
         if not self._ebay_scrape_enabled():
@@ -5370,10 +5370,10 @@ class InstorebotForwarder:
                 prices = [float(x.get("price")) for x in listings if x.get("price") is not None]
                 if prices:
                     low_val, high_val = min(prices), max(prices)
+                    avg_val = sum(prices) / len(prices)
                     ebay_sold_new_near = f"${low_val:,.2f}"
                     ebay_sold_new = f"${low_val:,.2f} - ${high_val:,.2f}" if low_val != high_val else f"${low_val:,.2f}"
-                    shown = [str(x.get("price_display") or f"${float(x.get('price')):,.2f}") for x in listings[:8]]
-                    ebay_first8_prices_line = f"First {len(shown)} sold cards: " + ", ".join(shown)
+                    ebay_first8_avg_line = f"Avg Sold Price: ${avg_val:,.2f}"
                     try:
                         cur_val, _ = self._price_to_float(price)
                         if cur_val is not None and low_val > cur_val:
@@ -5430,9 +5430,9 @@ class InstorebotForwarder:
         # eBay Comps block: required first-8 DOM sold prices.
         if ebay_comps_url:
             card_lines.append("")
-            card_lines.append(f"**eBay Comps:** [view first sold listings]({ebay_comps_url})")
-            if ebay_first8_prices_line:
-                card_lines.append(ebay_first8_prices_line)
+            card_lines.append(f"**[eBay Comps]({ebay_comps_url})**")
+            if ebay_first8_avg_line:
+                card_lines.append(ebay_first8_avg_line)
             elif ebay_sold_new_near and ebay_sold_new_near != "N/A":
                 card_lines.append(f"Recent eBay sales near {ebay_sold_new_near}")
             if ebay_upside_str:
@@ -5554,7 +5554,7 @@ class InstorebotForwarder:
             "ebay_sold_new_near": ebay_sold_new_near,
             "ebay_upside_str": ebay_upside_str,
             "ebay_refurb_preowned_line": ebay_refurb_preowned_line,
-            "ebay_first8_prices_line": ebay_first8_prices_line,
+            "ebay_first8_avg_line": ebay_first8_avg_line,
             "ebay_first8_screenshot_path": ebay_first8_screenshot_path,
         }
 
