@@ -14,6 +14,7 @@ from patterns import (
     AMAZON_LINK_PATTERN,
     CONVERSATIONAL_DEALS_RETAIL_PATTERN,
     AMAZON_PROFITABLE_INDICATOR_PATTERN,
+    has_placeholder_teaser_price,
     is_amazon_deal_complicated_monitor_blob,
     is_amz_price_errors_monitor_blob,
     is_divine_helper_price_monitor_blob,
@@ -709,6 +710,10 @@ def _looks_like_conversational_amazon_deal(
         )
         if short_pointer or price_errors_pointer:
             return _skip("discord_jump_link_pointer")
+
+    # Teaser/placeholder prices like "$7.xx" are template artifacts, not conversational deal write-ups.
+    if has_placeholder_teaser_price(text_blob):
+        return _skip("xx_placeholder_price")
 
     if is_amazon_deal_complicated_monitor_blob(text_blob) and not allow_amz_deals_despite_complicated_monitor(text_blob):
         return _skip("teaser_or_xx_price_monitor")

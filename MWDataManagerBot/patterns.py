@@ -852,6 +852,18 @@ _AMZ_COMPLICATED_XX_PRICE_PATTERN = re.compile(
 )
 
 
+def has_placeholder_teaser_price(text: str) -> bool:
+    """
+    True when the content includes teaser / placeholder pricing like "$7.xx".
+
+    These are monitor/template artifacts and should not qualify as CONVERSATIONAL_DEALS.
+    """
+    try:
+        return bool(_AMZ_COMPLICATED_XX_PRICE_PATTERN.search(str(text or "")))
+    except Exception:
+        return False
+
+
 def is_amazon_deal_complicated_monitor_blob(text: str) -> bool:
     """
     True for loud monitor-style deal posts (headers, teaser prices). These stay on the generic
