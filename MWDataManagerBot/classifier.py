@@ -12,6 +12,7 @@ from patterns import (
     CONVERSATIONAL_DEALS_AMAZON_PHRASE_PATTERN,
     CONVERSATIONAL_DEALS_STRICT_SIGNAL_PATTERN,
     AMAZON_LINK_PATTERN,
+    CONVERSATIONAL_DEALS_BLOCKED_DOMAIN_PATTERN,
     CONVERSATIONAL_DEALS_RETAIL_PATTERN,
     AMAZON_PROFITABLE_INDICATOR_PATTERN,
     has_placeholder_teaser_price,
@@ -669,6 +670,9 @@ def _looks_like_conversational_amazon_deal(
     # These templates almost always include at least one explicit price token.
     if "$" not in text_blob:
         return _skip("no_dollar_sign")
+    # User-requested suppression: JoyLink wrapper links should not route to CONVERSATIONAL_DEALS.
+    if CONVERSATIONAL_DEALS_BLOCKED_DOMAIN_PATTERN.search(text_blob or ""):
+        return _skip("blocked_domain_joylink")
     # Exclude stock-monitor / clearance-feed style embeds that can include "Amazon" in comps.
     if re.search(
         r"(store\s+clearance\s+deals|clearance\s+deals?\s*-\s*new\s+item|"

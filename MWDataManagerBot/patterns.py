@@ -990,6 +990,10 @@ CONVERSATIONAL_DEALS_RETAIL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Affiliate wrapper domains that should never qualify for CONVERSATIONAL_DEALS.
+# (User request: exclude JoyLink links from CONVERSATIONAL_DEALS.)
+CONVERSATIONAL_DEALS_BLOCKED_DOMAIN_PATTERN = re.compile(r"https?://(?:www\.)?joylink\.io\b", re.IGNORECASE)
+
 # Store lists (subset; mirrors global_filters)
 MAJOR_STORES = [
     "walmart",
