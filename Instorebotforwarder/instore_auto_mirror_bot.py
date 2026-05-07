@@ -1825,6 +1825,7 @@ class InstorebotForwarder:
         source_label: Optional[str],
         title_sample: str,
         will_post: bool,
+        reroute_dest_channel_id: Optional[int] = None,
     ) -> None:
         if not self._explainable_enabled():
             return
@@ -1850,6 +1851,8 @@ class InstorebotForwarder:
 
         if will_post:
             bottom = f"PASS - eBay first-8 DOM comps returned {used_cards} priced sold card(s)."
+        elif reroute_dest_channel_id:
+            bottom = f"REROUTE - eBay comps/value gate failed; send this card to <#{reroute_dest_channel_id}> for review."
         else:
             bottom = f"BLOCKED / NO ROUTE - eBay comps are required and status was `{status}`."
 
@@ -1866,7 +1869,14 @@ class InstorebotForwarder:
         decision_lines = (
             ["- Continue rendering and posting the Amazon card with eBay comps."]
             if will_post
-            else ["- Do not render/post this Amazon card.", "- Release any reserved ASIN dedupe lock for this skipped lead."]
+            else (
+                [
+                    f"- Do not post this card to the original destination.",
+                    f"- Route it to <#{reroute_dest_channel_id}> so staff can inspect the failure/value issue.",
+                ]
+                if reroute_dest_channel_id
+                else ["- Do not render/post this Amazon card.", "- Release any reserved ASIN dedupe lock for this skipped lead."]
+            )
         )
 
         ex.section(
@@ -5344,6 +5354,9 @@ class InstorebotForwarder:
         ebay_refurb_preowned_line = ""
         ebay_first8_avg_line = ""
         ebay_first8_screenshot_path = ""
+        ebay_avg_sold_price_val: Optional[float] = None
+        ebay_gate_failure_line = ""
+        use_enrich_failed_template = False
         ebay_trace: Dict[str, Any] = {}
         if not self._ebay_scrape_enabled():
             ebay_trace.update({"status": "disabled", "reason": "ebay_scrape_enabled=false", "used_cards": 0, "detected_cards": 0})
@@ -5371,6 +5384,7 @@ class InstorebotForwarder:
                 if prices:
                     low_val, high_val = min(prices), max(prices)
                     avg_val = sum(prices) / len(prices)
+                    ebay_avg_sold_price_val = avg_val
                     ebay_sold_new_near = f"${low_val:,.2f}"
                     ebay_sold_new = f"${low_val:,.2f} - ${high_val:,.2f}" if low_val != high_val else f"${low_val:,.2f}"
                     ebay_first8_avg_line = f"Avg Sold Price: ${avg_val:,.2f}"
@@ -5382,7 +5396,27 @@ class InstorebotForwarder:
                     except Exception:
                         pass
 
-        will_post_ebay = bool(ebay_comps_url and ebay_sold_new_near and ebay_sold_new_near != "N/A")
+        will_post_ebay = bool(ebay_comps_url and ebay_avg_sold_price_val is not None)
+        cur_val_for_ebay_gate, _ = self._price_to_float(price)
+        if will_post_ebay and cur_val_for_ebay_gate is not None and ebay_avg_sold_price_val is not None:
+            if cur_val_for_ebay_gate > ebay_avg_sold_price_val:
+                will_post_ebay = False
+                ebay_trace.update(
+                    {
+                        "status": "value_failed",
+                        "reason": (
+                            f"current_price ${cur_val_for_ebay_gate:,.2f} "
+                            f"> avg_sold_price ${ebay_avg_sold_price_val:,.2f}"
+                        ),
+                        "current_price": cur_val_for_ebay_gate,
+                        "avg_sold_price": ebay_avg_sold_price_val,
+                    }
+                )
+                ebay_gate_failure_line = (
+                    f"eBay Gate: Current price is above avg sold price "
+                    f"(${cur_val_for_ebay_gate:,.2f} > ${ebay_avg_sold_price_val:,.2f}); sent to review."
+                )
+        failed_ebay_dest_id = self._route_to_dest_id("enrich_failed") if not will_post_ebay else None
         self._explain_ebay_first8_gate(
             trace_acc=ebay_trace,
             message_id=str(message.id),
@@ -5391,19 +5425,34 @@ class InstorebotForwarder:
             source_label=source_label,
             title_sample=(title or "")[:200],
             will_post=will_post_ebay,
+            reroute_dest_channel_id=int(failed_ebay_dest_id) if failed_ebay_dest_id else None,
         )
         if not will_post_ebay:
             status = str(ebay_trace.get("status") or "unknown")
             reason = str(ebay_trace.get("reason") or "")[:140]
             _log_flow("FILTER_SKIP", channel=dest_id, reason=f"ebay_first8_required_{status}", detail=reason)
-            if dedupe_reserved and asin:
+            if not failed_ebay_dest_id and dedupe_reserved and asin:
                 self._dedupe_release(asin)
-            return None, {
-                "urls": urls,
-                "amazon": {"asin": asin, "final_url": final_url, "url_used": det.url_used if det else None},
-                "filter_reason": f"ebay_first8_required_{status}",
-                "ebay_first8": dict(ebay_trace),
-            }
+            if not failed_ebay_dest_id:
+                return None, {
+                    "urls": urls,
+                    "amazon": {"asin": asin, "final_url": final_url, "url_used": det.url_used if det else None},
+                    "filter_reason": f"ebay_first8_required_{status}",
+                    "ebay_first8": dict(ebay_trace),
+                }
+            original_dest_id = dest_id
+            dest_id = failed_ebay_dest_id
+            route_reason = f"ebay_gate_failed:{status}"
+            use_enrich_failed_template = True
+            if not ebay_gate_failure_line:
+                detail = f": {reason}" if reason else ""
+                ebay_gate_failure_line = f"eBay Gate: Required comps/value check failed ({status}{detail}); sent to review."
+            _log_flow(
+                "ROUTE",
+                dest_id=dest_id,
+                reason=route_reason,
+                original_dest_id=(original_dest_id or ""),
+            )
 
         # Build the "card body" to match your desired format (no footer/timestamp, one key link).
         card_lines: List[str] = []
@@ -5437,6 +5486,9 @@ class InstorebotForwarder:
                 card_lines.append(f"Recent eBay sales near {ebay_sold_new_near}")
             if ebay_upside_str:
                 card_lines.append(ebay_upside_str)
+        if ebay_gate_failure_line:
+            card_lines.append("")
+            card_lines.append(ebay_gate_failure_line)
         card_body = "\n".join(card_lines).strip()
         
         # Strict filter for channel 1457129557067960482: only Amazon links with "glitch"/"price error" keywords (case-insensitive) AND >= 80% OFF
@@ -5503,7 +5555,7 @@ class InstorebotForwarder:
                     self._dedupe_release(asin)
                 return None, {"urls": urls, "amazon": {"asin": asin, "final_url": final_url, "url_used": det.url_used if det else None}, "filter_reason": fr}
 
-        tpl, tpl_key = self._pick_template(dest_id, enrich_failed=False)
+        tpl, tpl_key = self._pick_template(dest_id, enrich_failed=use_enrich_failed_template)
         _log_flow("TEMPLATE", key=tpl_key)
 
         source_line = ""
@@ -5585,7 +5637,7 @@ class InstorebotForwarder:
         meta = {
             "urls": urls,
             "amazon": {"asin": asin, "final_url": final_url, "url_used": det.url_used},
-            "enrich_failed": False,
+            "enrich_failed": bool(use_enrich_failed_template),
             "enrich_err": None,
             "dest_channel_id": dest_id,
             "route_reason": route_reason,
