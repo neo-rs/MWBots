@@ -419,6 +419,16 @@ def _embed_from_template(tpl: Dict[str, Any], ctx: Dict[str, str]) -> Optional[d
     return embed
 
 
+def _discord_attachment_name(path: str, *, default: str = "ebay_first8_sold.png") -> str:
+    raw = Path(str(path or default)).name.strip() or default
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", raw).strip("._-")
+    if not cleaned:
+        cleaned = default
+    if "." not in cleaned:
+        cleaned += ".png"
+    return cleaned[:120]
+
+
 @dataclass
 class AmazonDetection:
     asin: str
@@ -5550,8 +5560,24 @@ class InstorebotForwarder:
 
         embed = _embed_from_template(tpl or {}, ctx) if tpl else None
         if embed:
+            ebay_file_payload: List[Dict[str, str]] = []
+            if ebay_first8_screenshot_path:
+                shot_path = Path(ebay_first8_screenshot_path)
+                if shot_path.exists() and shot_path.is_file():
+                    shot_name = _discord_attachment_name(ebay_first8_screenshot_path)
+                    ebay_file_payload.append({"path": str(shot_path), "filename": shot_name})
+                    try:
+                        # Main card image becomes the eBay sold-comps screenshot.
+                        embed.set_image(url=f"attachment://{shot_name}")
+                        if image_url:
+                            embed.set_thumbnail(url=image_url)
+                    except Exception:
+                        pass
+                else:
+                    _log_flow("EBAY_FIRST8_SCREENSHOT_MISSING", path=str(shot_path)[:160])
             _log_flow("RENDER", ok="1", title=(embed.title or "")[:80], fields=len(embed.fields))
         else:
+            ebay_file_payload = []
             _log_flow("RENDER", ok="0")
             if dedupe_reserved and asin:
                 self._dedupe_release(asin)
@@ -5565,6 +5591,7 @@ class InstorebotForwarder:
             "route_reason": route_reason,
             "template_key": tpl_key,
             "ctx": ctx,
+            "discord_files": ebay_file_payload,
             "dedupe_reserved": bool(dedupe_reserved),
         }
         return embed, meta
@@ -5674,7 +5701,22 @@ class InstorebotForwarder:
                 return
 
             try:
-                await ch.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+                file_payloads = meta.get("discord_files") if isinstance(meta, dict) else None
+                files: List[discord.File] = []
+                if isinstance(file_payloads, list):
+                    for fp in file_payloads:
+                        if not isinstance(fp, dict):
+                            continue
+                        fpath = str(fp.get("path") or "").strip()
+                        fname = str(fp.get("filename") or "").strip() or _discord_attachment_name(fpath)
+                        if fpath and Path(fpath).exists():
+                            files.append(discord.File(fpath, filename=fname))
+                        elif fpath:
+                            _log_flow("EBAY_FIRST8_SCREENSHOT_MISSING", path=fpath[:160])
+                if files:
+                    await ch.send(embed=embed, files=files, allowed_mentions=discord.AllowedMentions.none())
+                else:
+                    await ch.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
                 if self._verbose_flow_logs():
                     _log_flow("SEND_OK", dest_id=dest_id, message_id=str(message.id))
                 ex = f"asin={asin}" if asin else ""
