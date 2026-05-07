@@ -684,6 +684,9 @@ _RINGINTHEDEALS_HOST_PATTERN = re.compile(r"ringinthedeals\.com", re.IGNORECASE)
 # FLIPFLUENCE-style: "Take 67% Off Product Name!"
 _TAKE_PCT_OFF_HEADLINE_PATTERN = re.compile(r"take\s+\d{1,3}\s*%\s*off\b", re.IGNORECASE)
 _REG_PAREN_PRICE_PATTERN = re.compile(r"\(\s*Reg\s*\$", re.IGNORECASE)
+_SUBSCRIBE_SAVE_PATTERN = re.compile(r"subscribe\s*&\s*save", re.IGNORECASE)
+# Common FlipFluence/RingInTheDeals template emoji scaffolding.
+_FLIPFLUENCE_TEMPLATE_EMOJI_PATTERN = re.compile(r"[🔔🏷️✅]", re.UNICODE)
 _FLIPFLUENCE_REROUTER_BYLINE_PATTERN = re.compile(
     r"from:\s*flipfluence\s*\|\s*by:\s*rerouter\s*\|\s*flipfluence\b",
     re.IGNORECASE,
@@ -699,8 +702,14 @@ def is_ringinthedeals_flipfluence_deal_blob(text: str) -> bool:
         return False
     raw = str(text)
     sl = raw.lower()
-    if not _RINGINTHEDEALS_HOST_PATTERN.search(sl):
+    has_ring = bool(_RINGINTHEDEALS_HOST_PATTERN.search(sl))
+    # Some variants may not include the ringinthedeals URL in the same blob chunk (e.g. content-only snapshot),
+    # but still carry the distinctive template scaffolding + "Reg $" pricing line.
+    template_scaffold = bool(_SUBSCRIBE_SAVE_PATTERN.search(raw) and _REG_PAREN_PRICE_PATTERN.search(raw))
+    if not has_ring and not template_scaffold:
         return False
+    if template_scaffold and _FLIPFLUENCE_TEMPLATE_EMOJI_PATTERN.search(raw):
+        return True
     if _TAKE_PCT_OFF_HEADLINE_PATTERN.search(raw):
         return True
     if "flipfluence" in sl:
