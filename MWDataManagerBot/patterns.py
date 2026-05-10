@@ -519,6 +519,36 @@ _AFFILIATE_COMICS_CONTEXT_PATTERN = re.compile(
     r"\b(variant|cover|foc|ratio|print(?:ing)?|issue\s*#?\s*\d+|#\s*\d{1,4})\b",
     re.IGNORECASE,
 )
+# Sneaker / raffle release monitors (structured embeds — not generic affiliate product drops).
+_AFFILIATE_RAFFLE_CTA_PATTERN = re.compile(
+    r"(?i)click\s+here\s+for\s+raffle(?:\s+link)?\b",
+)
+_AFFILIATE_START_DATE_LABEL_PATTERN = re.compile(r"(?i)\bstart\s+date\s*:")
+_AFFILIATE_END_DATE_LABEL_PATTERN = re.compile(r"(?i)\bend\s+date\s*:")
+_AFFILIATE_RELEASE_DATE_LABEL_PATTERN = re.compile(r"(?i)\brelease\s+date\s*:")
+_AFFILIATE_RETAILER_LABEL_PATTERN = re.compile(r"(?i)\bretailer\s*:")
+_AFFILIATE_LINK_LABEL_PATTERN = re.compile(r"(?i)\blink\s*:")
+
+
+def _affiliate_blob_is_raffle_release_monitor(blob: str) -> bool:
+    """True for fixed-layout raffle / release-date monitors (not AFFILIATED_LINKS)."""
+    raw = str(blob or "")
+    if not raw.strip():
+        return False
+    if _AFFILIATE_RAFFLE_CTA_PATTERN.search(raw):
+        return True
+    has_start = bool(_AFFILIATE_START_DATE_LABEL_PATTERN.search(raw))
+    has_end = bool(_AFFILIATE_END_DATE_LABEL_PATTERN.search(raw))
+    has_release = bool(_AFFILIATE_RELEASE_DATE_LABEL_PATTERN.search(raw))
+    has_retailer = bool(_AFFILIATE_RETAILER_LABEL_PATTERN.search(raw))
+    has_link_line = bool(_AFFILIATE_LINK_LABEL_PATTERN.search(raw))
+    # Typical raffle embed: Start + End + Retailer (+ optional Price / Link).
+    if has_start and has_end and has_retailer:
+        return True
+    # Release-date monitor (Adidas-style): Release Date + Retailer + Link row.
+    if has_release and has_retailer and has_link_line:
+        return True
+    return False
 
 
 def _affiliate_text_strip_markdown_noise(blob: str) -> str:
@@ -590,6 +620,10 @@ def affiliate_should_suppress_affiliated_links(blob: str, *, min_core_chars: int
         return "affiliate_retail_dollar_line"
     if re.search(r"(?i)(?:resale|resell)\s*:\s*\$", guard_plain):
         return "affiliate_resale_dollar_line"
+
+    # Raffle / sneaker release monitors (structured Start Date / End Date / Retailer / "click here for raffle").
+    if _affiliate_blob_is_raffle_release_monitor(raw):
+        return "raffle_release_monitor_template"
 
     # Pokemon anywhere (body, mention, pokemoncenter.com, TCG titles).
     if _AFFILIATE_POKEMON_SUBSTRING_PATTERN.search(raw):
