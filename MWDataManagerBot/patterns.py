@@ -719,8 +719,8 @@ _RINGINTHEDEALS_HOST_PATTERN = re.compile(r"ringinthedeals\.com", re.IGNORECASE)
 _TAKE_PCT_OFF_HEADLINE_PATTERN = re.compile(r"take\s+\d{1,3}\s*%\s*off\b", re.IGNORECASE)
 _REG_PAREN_PRICE_PATTERN = re.compile(r"\(\s*Reg\s*\$", re.IGNORECASE)
 _SUBSCRIBE_SAVE_PATTERN = re.compile(r"subscribe\s*&\s*save", re.IGNORECASE)
-# Common FlipFluence/RingInTheDeals template emoji scaffolding.
-_FLIPFLUENCE_TEMPLATE_EMOJI_PATTERN = re.compile(r"[🔔🏷️✅]", re.UNICODE)
+# Common FlipFluence/RingInTheDeals template emoji scaffolding (four-line blast: headline / sub / price / link).
+_FLIPFLUENCE_TEMPLATE_EMOJI_PATTERN = re.compile(r"[🔔🏷️✅🔗]", re.UNICODE)
 _FLIPFLUENCE_REROUTER_BYLINE_PATTERN = re.compile(
     r"from:\s*flipfluence\s*\|\s*by:\s*rerouter\s*\|\s*flipfluence\b",
     re.IGNORECASE,
@@ -860,6 +860,10 @@ def is_amz_deals_affiliate_bridge_blob(text: str) -> bool:
     if not text or not str(text).strip():
         return False
     raw = str(text)
+    # RingInTheDeals / FLIPFLUENCE feed templates must NOT force CONVERSATIONAL_DEALS via this bridge path
+    # (detect_all_link_types checks this before _looks_like_conversational_amazon_deal).
+    if is_ringinthedeals_flipfluence_deal_blob(raw):
+        return False
     sl = raw.lower()
     has_amazonish = bool(
         re.search(r"\bamazon\b", sl)
