@@ -5350,9 +5350,22 @@ class InstorebotForwarder:
             )
 
         # Build the "card body" to match your desired format (no footer/timestamp, one key link).
+        #
+        # Layout (canonical):
+        #   <Amazon URL>            (first line of description, right under embed title)
+        #   <blank>
+        #   Current Price / Before / Discount / CODE [/ How it works + steps]
+        #   eBay Comps              (flush under deal info, NOT bold, still a link)
+        #   Avg Sold Price: $X
+        #   <upside>
+        # The eBay gate-failure variant also sits flush under the deal info
+        # (no blank line) so the failure note reads as part of the same card.
         card_lines: List[str] = []
         if price_glitch:
             card_lines.append("**Price Glitch!**")
+            card_lines.append("")
+        if key_link:
+            card_lines.append(key_link)
             card_lines.append("")
         card_lines.append(f"Current Price: **{price}**" if price else "Current Price:")
         if before_price and str(before_price).strip() and str(before_price).strip().upper() != "N/A":
@@ -5368,13 +5381,11 @@ class InstorebotForwarder:
             card_lines.append("")
             card_lines.append("How it works:")
             card_lines.append(steps_rephrased)
-        if key_link:
-            card_lines.append("")
-            card_lines.append(key_link)
-        # eBay Comps block: required first-8 DOM sold prices.
+        # eBay Comps block: required first-8 DOM sold prices. Flush under the
+        # deal info (no leading blank line) and the label is a plain link,
+        # not bold, per the canonical layout above.
         if ebay_comps_url:
-            card_lines.append("")
-            card_lines.append(f"**[eBay Comps]({ebay_comps_url})**")
+            card_lines.append(f"[eBay Comps]({ebay_comps_url})")
             if ebay_first8_avg_line:
                 card_lines.append(ebay_first8_avg_line)
             elif ebay_sold_new_near and ebay_sold_new_near != "N/A":
@@ -5382,7 +5393,6 @@ class InstorebotForwarder:
             if ebay_upside_str:
                 card_lines.append(ebay_upside_str)
         if ebay_gate_failure_line:
-            card_lines.append("")
             card_lines.append(ebay_gate_failure_line)
         card_body = "\n".join(card_lines).strip()
         
