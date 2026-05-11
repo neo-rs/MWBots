@@ -56,7 +56,7 @@
   "ebay_first8_limit": 8,
   "ebay_first8_cache_ttl_s": 3600,
   "ebay_first8_headless": false,
-  "ebay_first8_connect_cdp": false,
+  "ebay_first8_connect_cdp": true,
   "ebay_first8_cdp_url": "http://127.0.0.1:9222",
   "ebay_first8_chrome_exe": "",
   "ebay_first8_allow_playwright_chromium": false,
