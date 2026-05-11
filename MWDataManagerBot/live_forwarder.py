@@ -518,7 +518,9 @@ class MessageForwarder:
         Returns:
           (skip_reason, normalized_url_keys_to_register_after_successful_send)
 
-        Dedupe keys use utils.normalize_url() (query stripped) for configured domains (default mavely.app.link).
+        Dedupe keys use utils.normalize_url() (query stripped). By default every non-Discord external URL
+        is tracked (see `affiliated_links_dedupe_all_external_urls`); legacy mode limits to
+        `affiliated_links_dedupe_domains` only.
         """
         try:
             att_txt = " ".join([str(a.get("url", "")) for a in (attachments or []) if isinstance(a, dict)])
@@ -557,11 +559,14 @@ class MessageForwarder:
         except Exception:
             ttl = 86400.0
         domains = getattr(cfg, "AFFILIATED_LINKS_DEDUPE_DOMAINS", ()) or ()
+        dedupe_all_external = bool(getattr(cfg, "AFFILIATED_LINKS_DEDUPE_ALL_EXTERNAL_URLS", True))
         keys_to_register: List[str] = []
         seen_k: Set[str] = set()
 
         for u in vis_urls:
             if not u.startswith("http"):
+                continue
+            if self._is_discord_cdn_or_chat_url(u):
                 continue
             try:
                 host = (urlparse(u).netloc or "").lower()
@@ -569,7 +574,13 @@ class MessageForwarder:
                     host = host[4:]
             except Exception:
                 host = ""
-            if not host or not self._host_matches_dedupe_domains(host, domains):
+            if not host:
+                continue
+            if dedupe_all_external:
+                track_url = True
+            else:
+                track_url = bool(self._host_matches_dedupe_domains(host, domains))
+            if not track_url:
                 continue
             nk = normalize_url(u)
             if not nk or nk in seen_k:

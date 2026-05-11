@@ -59,6 +59,7 @@
   "affiliated_links_dedupe_domains": [
     "mavely.app.link"
   ],
+  "affiliated_links_dedupe_all_external_urls": true,
   "affiliated_links_dedupe_ttl_seconds": 86400,
   "affiliated_links_require_image": true,
   "affiliated_links_require_external_http_link": true,

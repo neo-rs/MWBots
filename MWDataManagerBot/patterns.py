@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 # NOTE: These are vendored from `neonxt/core/global_filters.py` so MWDataManagerBot
@@ -519,6 +519,27 @@ _AFFILIATE_COMICS_CONTEXT_PATTERN = re.compile(
     r"\b(variant|cover|foc|ratio|print(?:ing)?|issue\s*#?\s*\d+|#\s*\d{1,4})\b",
     re.IGNORECASE,
 )
+# Merchant / editorial hosts that should not route to AFFILIATED_LINKS (not generic deal-affiliate drops).
+_AFFILIATE_BLOCKED_MERCHANT_HOSTS: Tuple[str, ...] = (
+    "topps.com",
+    "pokebeach.com",
+    "pokemoncenter.com",
+)
+
+
+def _affiliate_url_host_blocked_for_leads(host: str) -> bool:
+    h = (host or "").lower().strip()
+    if h.startswith("www."):
+        h = h[4:]
+    for b in _AFFILIATE_BLOCKED_MERCHANT_HOSTS:
+        bl = str(b or "").lower().strip()
+        if not bl:
+            continue
+        if h == bl or h.endswith("." + bl):
+            return True
+    return False
+
+
 # Sneaker / raffle release monitors (structured embeds — not generic affiliate product drops).
 _AFFILIATE_RAFFLE_CTA_PATTERN = re.compile(
     r"(?i)click\s+here\s+for\s+raffle(?:\s+link)?\b",
@@ -613,6 +634,20 @@ def affiliate_should_suppress_affiliated_links(blob: str, *, min_core_chars: int
             non_discord_urls.append(ul)
         if (not non_discord_urls) and re.search(r"(?i)discord(?:app)?\.com/channels/\d+/\d+/\d+", raw):
             return "discord_message_link_only"
+
+    try:
+        urls_host_scan = re.findall(r"https?://[^\s<>\"]+", raw, flags=re.IGNORECASE)
+    except Exception:
+        urls_host_scan = []
+    for ul in urls_host_scan or []:
+        try:
+            ph = (urlparse(str(ul).strip()).netloc or "").lower()
+            if ph.startswith("www."):
+                ph = ph[4:]
+        except Exception:
+            ph = ""
+        if ph and _affiliate_url_host_blocked_for_leads(ph):
+            return "affiliate_blocked_merchant_host"
 
     # Deal-monitor price grids: "Retail: $…" / "Resale: $…" (and flip-spelled "Resell:") — not generic affiliate drops.
     guard_plain = _affiliate_text_strip_markdown_noise(raw)
