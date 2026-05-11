@@ -306,6 +306,40 @@ def generate_content_signature(
     return hashlib.md5(signature_source.encode("utf-8")).hexdigest()
 
 
+_SEMANTIC_URL_STRIP_PATTERN = re.compile(r"https?://\S+")
+
+
+def generate_semantic_duplicate_signature(
+    content: str,
+    embeds: Optional[List[Dict[str, Any]]],
+    attachments: Optional[List[Dict[str, Any]]],
+) -> str:
+    """
+    Signature that ignores http(s) URLs so duplicate monitor posts still match when Discord assigns
+    different CDN attachment IDs or embed preview URLs change.
+
+    Used for instore-source ingress dedupe only (see live_forwarder).
+    """
+    parts: List[str] = []
+    parts.append(normalize_message(content or ""))
+    for item in collect_embed_strings(embeds or [], omit_embed_identity=True):
+        if item:
+            parts.append(normalize_message(str(item)))
+    blob = "\n".join(p for p in parts if p)
+    blob = _SEMANTIC_URL_STRIP_PATTERN.sub(" ", blob)
+    blob = re.sub(r"\s+", " ", blob).strip()
+    fnames = sorted(
+        str(a.get("filename") or "").strip().lower()
+        for a in (attachments or [])
+        if isinstance(a, dict) and str(a.get("filename") or "").strip()
+    )
+    if fnames:
+        blob = (blob + "\nATTACH:" + "|".join(fnames)).strip()
+    if not blob:
+        return ""
+    return hashlib.md5(blob.encode("utf-8")).hexdigest()
+
+
 def matches_instore_theatre(text: str, where_location: str = "") -> bool:
     if not text:
         return False

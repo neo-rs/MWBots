@@ -42,6 +42,7 @@ from utils import (
     extract_urls_from_text,
     format_embeds_for_forwarding,
     generate_content_signature,
+    generate_semantic_duplicate_signature,
     is_image_attachment,
     is_discord_media_url,
     normalize_url,
@@ -173,6 +174,8 @@ class MessageForwarder:
         self.pending_major_clearance_followups: Dict[Tuple[int, int], Dict[str, Any]] = {}
         self.pending_major_clearance: Dict[Tuple[int, int], Dict[str, Any]] = {}
         self._pending_major_clearance_latest_by_sender: Dict[Tuple[int, str], int] = {}
+        # Serialize ingress dedupe read/update so concurrent duplicate webhook deliveries cannot both pass.
+        self._ingress_dedupe_lock = asyncio.Lock()
 
     async def _debug_react(self, message, *, allowed: Optional[bool], reason: str) -> None:
         """
@@ -213,18 +216,6 @@ class MessageForwarder:
                     log_debug(f"[debug_reactions] failed add_reaction ({reason}) msg={getattr(message,'id',0)} ch={ch_id}")
                 except Exception:
                     pass
-
-    def _is_global_duplicate(self, signature: str) -> bool:
-        now = asyncio.get_event_loop().time()
-        last = self.global_content_cache.get(signature, 0.0)
-        if last and (now - last) < self.global_content_ttl_seconds:
-            return True
-        self.global_content_cache[signature] = now
-        # bound size
-        if len(self.global_content_cache) > 2000:
-            cutoff = now - self.global_content_ttl_seconds
-            self.global_content_cache = {k: v for k, v in self.global_content_cache.items() if v > cutoff}
-        return False
 
     def _cleanup_link_tracking_cache(self) -> None:
         if not self.link_tracking_cache:
@@ -1199,28 +1190,118 @@ class MessageForwarder:
             return
 
         content_sig = generate_content_signature(content, embeds, attachments, for_cross_post_dedupe=True)
-        key = f"{channel_id}:{content_sig}"
-        now = asyncio.get_event_loop().time()
-        last = self.recent_hashes.get(key, 0.0)
-        if last and (now - last) < self.recent_ttl_seconds:
-            trace["decision"] = {
-                "action": "skip",
-                "reason": "per_channel_duplicate",
-                "dedupe_key": key,
-                "age_seconds": round(now - last, 3),
-            }
+        try:
+            _instore_source_ch = int(channel_id or 0) in getattr(cfg, "SMART_SOURCE_CHANNELS_INSTORE", set())
+        except Exception:
+            _instore_source_ch = False
+        semantic_sig = ""
+        if _instore_source_ch:
             try:
-                write_trace_log(trace)
+                semantic_sig = generate_semantic_duplicate_signature(content, embeds, attachments)
             except Exception:
-                pass
-            if cfg.VERBOSE:
-                log_info(f"Duplicate message detected (posted {round(now-last,1)}s ago) in channel <#{channel_id}>")
-            await self._debug_react(message, allowed=False, reason="per_channel_duplicate")
-            return
-        self.recent_hashes[key] = now
-        if len(self.recent_hashes) > 2000:
-            cutoff = now - self.recent_ttl_seconds
-            self.recent_hashes = {k: v for k, v in self.recent_hashes.items() if v > cutoff}
+                semantic_sig = ""
+
+        now = asyncio.get_event_loop().time()
+        async with self._ingress_dedupe_lock:
+            key = f"{channel_id}:{content_sig}"
+            last_pc = self.recent_hashes.get(key, 0.0)
+            if last_pc and (now - last_pc) < self.recent_ttl_seconds:
+                trace["decision"] = {
+                    "action": "skip",
+                    "reason": "per_channel_duplicate",
+                    "dedupe_key": key,
+                    "age_seconds": round(now - last_pc, 3),
+                }
+                try:
+                    write_trace_log(trace)
+                except Exception:
+                    pass
+                if cfg.VERBOSE:
+                    log_info(
+                        f"Duplicate message detected (posted {round(now-last_pc,1)}s ago) in channel <#{channel_id}>"
+                    )
+                await self._debug_react(message, allowed=False, reason="per_channel_duplicate")
+                return
+
+            if semantic_sig:
+                sem_pc_key = f"{channel_id}:sem:{semantic_sig}"
+                last_sem_pc = self.recent_hashes.get(sem_pc_key, 0.0)
+                if last_sem_pc and (now - last_sem_pc) < self.recent_ttl_seconds:
+                    trace["decision"] = {
+                        "action": "skip",
+                        "reason": "per_channel_duplicate_semantic",
+                        "dedupe_key": sem_pc_key,
+                        "age_seconds": round(now - last_sem_pc, 3),
+                    }
+                    try:
+                        write_trace_log(trace)
+                    except Exception:
+                        pass
+                    if cfg.VERBOSE:
+                        log_info(
+                            f"Duplicate instore message (semantic, posted {round(now-last_sem_pc,1)}s ago) "
+                            f"in channel <#{channel_id}>"
+                        )
+                    await self._debug_react(message, allowed=False, reason="per_channel_duplicate_semantic")
+                    return
+
+            last_g = self.global_content_cache.get(content_sig, 0.0)
+            if last_g and (now - last_g) < float(self.global_content_ttl_seconds or 300):
+                trace["decision"] = {
+                    "action": "skip",
+                    "reason": "global_duplicate",
+                    "global_sig": content_sig,
+                    "age_seconds": round(now - last_g, 3),
+                }
+                try:
+                    write_trace_log(trace)
+                except Exception:
+                    pass
+                if cfg.VERBOSE:
+                    log_global(
+                        f"skip duplicate content signature in channel <#{channel_id}>",
+                        event="global_duplicate",
+                    )
+                await self._debug_react(message, allowed=False, reason="global_duplicate")
+                return
+
+            if semantic_sig:
+                g_sem_key = f"sem:{semantic_sig}"
+                last_gs = self.global_content_cache.get(g_sem_key, 0.0)
+                if last_gs and (now - last_gs) < float(self.global_content_ttl_seconds or 300):
+                    trace["decision"] = {
+                        "action": "skip",
+                        "reason": "global_duplicate_semantic",
+                        "semantic_sig": semantic_sig,
+                        "age_seconds": round(now - last_gs, 3),
+                    }
+                    try:
+                        write_trace_log(trace)
+                    except Exception:
+                        pass
+                    if cfg.VERBOSE:
+                        log_global(
+                            f"skip duplicate instore semantic signature in channel <#{channel_id}>",
+                            event="global_duplicate_semantic",
+                        )
+                    await self._debug_react(message, allowed=False, reason="global_duplicate_semantic")
+                    return
+
+            self.recent_hashes[key] = now
+            if semantic_sig:
+                self.recent_hashes[f"{channel_id}:sem:{semantic_sig}"] = now
+            if len(self.recent_hashes) > 2000:
+                cutoff = now - float(self.recent_ttl_seconds or 10)
+                self.recent_hashes = {k: v for k, v in self.recent_hashes.items() if v > cutoff}
+
+            self.global_content_cache[content_sig] = now
+            if semantic_sig:
+                self.global_content_cache[f"sem:{semantic_sig}"] = now
+            if len(self.global_content_cache) > 2000:
+                cutoff_g = now - float(self.global_content_ttl_seconds or 300)
+                self.global_content_cache = {
+                    k: v for k, v in self.global_content_cache.items() if v >= cutoff_g
+                }
 
         # Build classification text
         embed_texts = collect_embed_strings(embeds)
@@ -1286,19 +1367,6 @@ class MessageForwarder:
 
         # Track links for global triggers
         self._track_link_occurrences(text_to_check, channel_id)
-
-        # Global duplicate (cross-channel signature) - do NOT include channel_id.
-        global_sig = generate_content_signature(content, embeds, attachments, for_cross_post_dedupe=True)
-        if self._is_global_duplicate(global_sig):
-            trace["decision"] = {"action": "skip", "reason": "global_duplicate", "global_sig": global_sig}
-            try:
-                write_trace_log(trace)
-            except Exception:
-                pass
-            if cfg.VERBOSE:
-                log_global(f"skip duplicate content signature in channel <#{channel_id}>", event="global_duplicate")
-            await self._debug_react(message, allowed=False, reason="global_duplicate")
-            return
 
         all_link_types = detect_all_link_types(
             text_to_check,
