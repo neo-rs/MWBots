@@ -4,8 +4,110 @@ import json
 import logging
 import re
 from typing import Any, Dict, Optional
+from urllib.request import Request, urlopen
 
 _gem_log = logging.getLogger("instorebotforwarder")
+
+
+# Canonical default model id used when config does not specify one. Keep in sync with
+# `rewrite_deal_post_keep_urls` (same default below) and any Instore config defaults.
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-lite"
+# One sync HTTP call's hard ceiling for probe_gemini_api(). Independent of the async
+# `timeout_s` used by `rewrite_deal_post_keep_urls`, because probes are short.
+PROBE_TIMEOUT_S = 20.0
+
+
+def gemini_status(cfg: Dict[str, Any]) -> Dict[str, str]:
+    """
+    Summarize Gemini configuration (NOT a live API call).
+
+    Returns a small string dict suitable for direct logging/printing:
+      enabled, api_key, model, temperature.
+    """
+    key = str((cfg or {}).get("gemini_api_key") or "").strip()
+    model = str((cfg or {}).get("gemini_model") or DEFAULT_GEMINI_MODEL).strip() or DEFAULT_GEMINI_MODEL
+    try:
+        temp = float((cfg or {}).get("gemini_temperature") or 0.65)
+    except Exception:
+        temp = 0.65
+    return {
+        "enabled": "yes" if bool(key) else "no",
+        "api_key": "set" if bool(key) else "missing",
+        "model": model,
+        "temperature": f"{max(0.0, min(temp, 1.0)):.4f}",
+    }
+
+
+def probe_gemini_api(cfg: Dict[str, Any]) -> Dict[str, str]:
+    """
+    Live one-shot Gemini :generateContent probe.
+
+    Sends a tiny prompt to the same endpoint `rewrite_deal_post_keep_urls` uses,
+    so a success here means the bot's rewrite path will reach Gemini too.
+
+    Returns:
+      {
+        "status": "200" | "<http_code>" | "no_key" | "error",
+        "detail": short string,
+        "model":  resolved model id,
+        "reply":  raw text Gemini returned (best-effort, may be empty),
+      }
+    """
+    key = str((cfg or {}).get("gemini_api_key") or "").strip()
+    model = str((cfg or {}).get("gemini_model") or DEFAULT_GEMINI_MODEL).strip() or DEFAULT_GEMINI_MODEL
+    if not key:
+        return {"status": "no_key", "detail": "missing gemini_api_key", "model": model, "reply": ""}
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": "Reply with exactly: OK"}]}],
+        "generationConfig": {"temperature": 0.0, "maxOutputTokens": 16, "topP": 1.0},
+    }
+    body = json.dumps(payload).encode("utf-8")
+    req = Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "mirror-world-instore-gemini-probe/1.0",
+        },
+    )
+    try:
+        with urlopen(req, timeout=PROBE_TIMEOUT_S) as resp:
+            status = str(getattr(resp, "status", 200))
+            txt = resp.read().decode("utf-8", errors="replace")
+        try:
+            data = json.loads(txt) if txt else {}
+        except Exception:
+            data = {}
+        reply = ""
+        try:
+            reply = (
+                (((data or {}).get("candidates") or [])[0] or {})
+                .get("content", {})
+                .get("parts", [{}])[0]
+                .get("text", "")
+                or ""
+            )
+            reply = str(reply).strip()
+        except Exception:
+            reply = ""
+        return {
+            "status": status,
+            "detail": (txt.strip()[:140] if txt else ""),
+            "model": model,
+            "reply": reply,
+        }
+    except Exception as e:
+        code = getattr(e, "code", None)
+        status = str(code) if code is not None else "error"
+        return {
+            "status": status,
+            "detail": f"{type(e).__name__}: {str(e)[:140]}",
+            "model": model,
+            "reply": "",
+        }
 
 
 def accumulate_gemini_response_usage(data: Any, sink: Dict[str, int]) -> None:

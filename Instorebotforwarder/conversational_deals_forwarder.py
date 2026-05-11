@@ -1,17 +1,30 @@
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Dict, Optional, Tuple
 
 import discord
 
+_log = logging.getLogger("instorebotforwarder")
+
 # Must work in both layouts:
 # - Imported as a package: `Instorebotforwarder.conversational_deals_forwarder`
 # - Executed/used from the bot folder on Oracle where `Instorebotforwarder/` is on sys.path
 try:
-    from Instorebotforwarder.automatedParaphrase.gemini_paraphraser import rewrite_deal_post_keep_urls  # type: ignore
+    from Instorebotforwarder.automatedParaphrase.gemini_paraphraser import (  # type: ignore
+        rewrite_deal_post_keep_urls,
+        gemini_status,
+    )
 except Exception:
-    from automatedParaphrase.gemini_paraphraser import rewrite_deal_post_keep_urls  # type: ignore
+    from automatedParaphrase.gemini_paraphraser import (  # type: ignore
+        rewrite_deal_post_keep_urls,
+        gemini_status,
+    )
+
+# Re-export so existing callers `from conversational_deals_forwarder import gemini_status`
+# keep working. Canonical owner is gemini_paraphraser.py.
+__all__ = ["gemini_status", "rewrite_deal_post_keep_urls"]
 
 SOURCE_CHANNEL_ID = 1438970053352751215
 DEST_CHANNEL_ID = 1484473267031904287
@@ -32,20 +45,42 @@ SOURCE_CHANNEL_IDS = sorted(CHANNEL_MAP.keys())
 _RE_URL = re.compile(r"(?i)\bhttps?://\S+")
 _RE_DISCORD_CDN_ATTACHMENT = re.compile(r"(?i)\bhttps?://cdn\.discordapp\.com/attachments/\S+")
 
+# Source-bot artifacts that must never appear in the destination embed, regardless
+# of whether Gemini ran. Centralized here so `simple_message_block_from_*` produce
+# already-cleaned text that is safe to (a) feed to Gemini and (b) post verbatim on
+# the Gemini-failure fallback path.
+_RE_AD_HASHTAG_LINE = re.compile(r"(?im)^\s*#\s*ad\s*$")
+_RE_AD_HASHTAG_INLINE = re.compile(r"(?i)(?<![A-Za-z0-9])#\s*ad\b")
+# "From: Divine | By: Divine Helper v2" style attribution. Some source bots put
+# this in the embed body rather than the embed footer (which we already skip).
+_RE_ATTRIBUTION_FROM_BY = re.compile(r"(?im)^\s*from:\s+.+?\s*\|\s*by:\s+.+?\s*$")
+# "Powered by ...", "Sent by ..." style attribution lines, when source bots use
+# them in the description.
+_RE_ATTRIBUTION_POWERED_BY = re.compile(r"(?im)^\s*powered by\s+.+?$")
+_RE_ATTRIBUTION_SENT_BY = re.compile(r"(?im)^\s*sent by\s+.+?$")
 
-def gemini_status(cfg: Dict[str, Any]) -> Dict[str, str]:
-    key = str((cfg or {}).get("gemini_api_key") or "").strip()
-    model = str((cfg or {}).get("gemini_model") or "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
-    try:
-        temp = float((cfg or {}).get("gemini_temperature") or 0.65)
-    except Exception:
-        temp = 0.65
-    return {
-        "enabled": "yes" if bool(key) else "no",
-        "api_key": "set" if bool(key) else "missing",
-        "model": model,
-        "temperature": f"{max(0.0, min(temp, 1.0)):.4f}",
-    }
+
+def _strip_source_artifacts(text: str) -> str:
+    """
+    Remove source-bot footer/disclosure artifacts from a message block.
+
+    Canonical responsibility: any string this function returns is what the
+    destination embed (and Gemini rewriter) should see. Cleanup is conservative
+    on purpose - we only strip well-known patterns, never anything that could
+    plausibly be deal content.
+    """
+    s = str(text or "")
+    if not s.strip():
+        return ""
+    s = _RE_ATTRIBUTION_FROM_BY.sub("", s)
+    s = _RE_ATTRIBUTION_POWERED_BY.sub("", s)
+    s = _RE_ATTRIBUTION_SENT_BY.sub("", s)
+    s = _RE_AD_HASHTAG_LINE.sub("", s)
+    s = _RE_AD_HASHTAG_INLINE.sub("", s)
+    s = re.sub(r"[ \t]{2,}", " ", s)
+    s = re.sub(r"[ \t]+\n", "\n", s)
+    s = re.sub(r"\n{3,}", "\n\n", s).strip()
+    return s
 
 
 def first_url_in_text(text: str) -> str:
@@ -92,6 +127,7 @@ def simple_message_block_from_discord_message(message: discord.Message) -> str:
     # Do not include raw attachment CDN URLs in the text body (image is carried via embed image).
     block = _RE_DISCORD_CDN_ATTACHMENT.sub("", block)
     block = re.sub(r"\n{3,}", "\n\n", block).strip()
+    block = _strip_source_artifacts(block)
     return block
 
 
@@ -157,6 +193,7 @@ def simple_message_block_from_rest(rest_msg: Dict[str, Any]) -> str:
     block = "\n".join([x for x in parts if str(x).strip()]).strip()
     block = _RE_DISCORD_CDN_ATTACHMENT.sub("", block)
     block = re.sub(r"\n{3,}", "\n\n", block).strip()
+    block = _strip_source_artifacts(block)
     return block
 
 
@@ -265,10 +302,28 @@ async def forward_runtime_message(inst: Any, message: discord.Message) -> bool:
         return True
 
     src_block = simple_message_block_from_discord_message(message)
-    desc = await rewrite_description(cfg, src_block, no_gemini=False)
-    if not str(desc or "").strip():
-        # Gemini failed/unchanged -> send nothing.
+    if not src_block:
+        # Nothing usable to forward (no content, no embed text, no attachments).
         return True
+
+    desc = await rewrite_description(cfg, src_block, no_gemini=False)
+    desc = str(desc or "").strip()
+    gemini_ok = bool(desc)
+    if not gemini_ok:
+        # Gemini failed/unchanged/throttled/disabled -> post the cleaned original.
+        # This honors the "no silent decisions" rule on the conversational/affiliated
+        # path: a lead must either be rewritten or forwarded as-is, never dropped.
+        desc = src_block
+        try:
+            _log.info(
+                "conversational_deals_forwarder fallback: posting cleaned original "
+                "(gemini=unavailable) src_channel=%s dest_channel=%s",
+                int(src_id),
+                int(dest_id),
+            )
+        except Exception:
+            pass
+
     media = media_url_from_discord_message(message)
     embed = build_embed(desc, media_url=media)
     try:

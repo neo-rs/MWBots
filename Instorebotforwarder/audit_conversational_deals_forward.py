@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
-Standalone conversational-deals forwarder preview/sender for one mapping:
-  source: 1438970053352751215
-  dest:   1484473267031904287
+Standalone Gemini-rewrite forwarder preview/sender for the conversational-deals pipeline.
+
+Supports every source mapped in `conversational_deals_forwarder.CHANNEL_MAP`, which is
+currently:
+  - 1438970053352751215 -> 1484473267031904287  (conversational_deals)
+  - 1435308472639160522 -> 1484599902863622195  (affiliated_leads / Mavely Leads)
 
 This tool is intentionally **standalone** and does NOT import `instore_auto_mirror_bot.py`.
 
@@ -23,13 +26,15 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 from urllib.request import Request, urlopen
 
 from conversational_deals_forwarder import (  # type: ignore
-    DEST_CHANNEL_ID,
-    SOURCE_CHANNEL_ID,
+    CHANNEL_MAP,
     first_url_in_text,
-    gemini_status,
     media_url_from_rest,
     rewrite_description,
     simple_message_block_from_rest,
+)
+from automatedParaphrase.gemini_paraphraser import (  # type: ignore
+    gemini_status,
+    probe_gemini_api,
 )
 
 
@@ -64,13 +69,20 @@ def _parse_discord_message_link(link: str) -> Tuple[Optional[int], int, int]:
     return guild_id, int(ch_raw), int(msg_raw)
 
 
-def _repo_root() -> Path:
+def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def _load_config() -> Dict[str, Any]:
-    cfg_path = _repo_root() / "MWBots" / "Instorebotforwarder" / "config.json"
-    sec_path = _repo_root() / "MWBots" / "Instorebotforwarder" / "config.secrets.json"
+def load_instore_config() -> Dict[str, Any]:
+    """
+    Canonical loader for Instorebotforwarder runtime config + secrets.
+
+    Reads `MWBots/Instorebotforwarder/config.json` and overlays
+    `MWBots/Instorebotforwarder/config.secrets.json` (latter wins, e.g. bot_token,
+    gemini_api_key). Returned dict is what every standalone Instore CLI tool consumes.
+    """
+    cfg_path = repo_root() / "MWBots" / "Instorebotforwarder" / "config.json"
+    sec_path = repo_root() / "MWBots" / "Instorebotforwarder" / "config.secrets.json"
     cfg: Dict[str, Any] = {}
     try:
         cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
@@ -122,35 +134,6 @@ def _save_probe_cache(o: Dict[str, Any]) -> None:
         pass
 
 
-def _probe_gemini_api(cfg: Dict[str, Any]) -> Dict[str, str]:
-    """
-    Direct Gemini API probe (one real request).
-    Returns: {status, detail}
-    """
-    key = str((cfg or {}).get("gemini_api_key") or "").strip()
-    model = str((cfg or {}).get("gemini_model") or "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
-    if not key:
-        return {"status": "no_key", "detail": "missing gemini_api_key"}
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
-    payload = {
-        "contents": [{"role": "user", "parts": [{"text": "Reply with exactly: OK"}]}],
-        "generationConfig": {"temperature": 0.0, "maxOutputTokens": 16, "topP": 1.0},
-    }
-    body = json.dumps(payload).encode("utf-8")
-    req = Request(url, data=body, method="POST", headers={"Content-Type": "application/json", "User-Agent": "mirror-world-instoreaudit/1.0"})
-    try:
-        with urlopen(req, timeout=20) as resp:
-            status = str(getattr(resp, "status", 200))
-            txt = resp.read().decode("utf-8", errors="replace")
-        return {"status": status, "detail": (txt.strip()[:140] if txt else "")}
-    except Exception as e:
-        # urllib's HTTPError has .code; keep it concise.
-        code = getattr(e, "code", None)
-        status = str(code) if code is not None else "error"
-        return {"status": status, "detail": f"{type(e).__name__}: {str(e)[:140]}"}
-
-
 def main(argv: Optional[Sequence[str]] = None) -> int:
     _configure_stdout()
     ap = argparse.ArgumentParser()
@@ -163,10 +146,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     link = str(args.link or "").strip() or input("Discord message link: ").strip()
     guild_id, channel_id, message_id = _parse_discord_message_link(link)
-    if int(channel_id) != int(SOURCE_CHANNEL_ID):
-        raise SystemExit(f"This standalone tool only supports source_channel_id={SOURCE_CHANNEL_ID}.")
+    mapped_dest = CHANNEL_MAP.get(int(channel_id))
+    if not mapped_dest:
+        supported = ", ".join(str(k) for k in sorted(CHANNEL_MAP.keys()))
+        raise SystemExit(
+            f"Source channel {channel_id} is not in CHANNEL_MAP. Supported sources: {supported}"
+        )
+    dest_channel_id = int(mapped_dest)
 
-    cfg = _load_config()
+    cfg = load_instore_config()
     token = str((cfg or {}).get("bot_token") or "").strip()
     if not token:
         raise SystemExit("bot_token missing (check Instorebotforwarder/config.secrets.json).")
@@ -199,7 +187,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             st = {"status": last_status, "detail": last_detail}
             src = "cache"
         else:
-            st = _probe_gemini_api(cfg)
+            st = probe_gemini_api(cfg)
             src = "live"
             _save_probe_cache({"ts": now_s, "status": st.get("status"), "detail": st.get("detail")})
         _print_safe("0.1) GEMINI API PROBE")
@@ -208,7 +196,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     _print_safe("1) MESSAGE INFO")
     _print_safe(f"   link={link}")
     _print_safe(f"   guild_id={guild_id or ''}")
-    _print_safe(f"   channel_id={channel_id}")
+    _print_safe(f"   source_channel_id={channel_id}")
+    _print_safe(f"   dest_channel_id={dest_channel_id}")
     _print_safe(f"   message_id={message_id}")
     _print_safe("")
 
@@ -218,19 +207,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     _print_safe("")
 
     desc = src_block
+    used_fallback = False
     if not args.no_gemini:
         before = desc
-        desc = asyncio.run(rewrite_description(cfg, desc, no_gemini=False))
-        desc = str(desc or "").strip()
-        changed = ("yes" if (desc and (str(desc).strip() != str(before).strip())) else "no")
-        ok = ("yes" if bool(desc) else "no")
+        gemini_out = asyncio.run(rewrite_description(cfg, desc, no_gemini=False))
+        gemini_out = str(gemini_out or "").strip()
+        changed = ("yes" if (gemini_out and (gemini_out != str(before).strip())) else "no")
+        ok = ("yes" if bool(gemini_out) else "no")
         _print_safe("3) GEMINI RESULT")
         _print_safe(f"   ok={ok} changed={changed}")
+        if gemini_out:
+            desc = gemini_out
+        else:
+            # Mirror the runtime forwarder: Gemini unavailable -> post cleaned original.
+            used_fallback = True
+            _print_safe(
+                "   fallback=cleaned_original  "
+                "(runtime will post src_block as-is - no silent drop)"
+            )
         _print_safe("")
-        if not desc:
-            _print_safe("4) OUTBOUND PREVIEW")
-            _print_safe("SKIPPED (Gemini failed or returned unchanged)")
-            return 0
     embed_url = first_url_in_text(desc)
     media_url = media_url_from_rest(data)
 
@@ -239,13 +234,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     _print_safe("")
     _print_safe("5) EMBED PREVIEW META")
     _print_safe("   send_mode=embed")
+    _print_safe(f"   embed_source={'gemini_fallback_cleaned_original' if used_fallback else 'gemini_rewrite'}")
     _print_safe(f"   embed_url={embed_url}")
     _print_safe(f"   image_url={media_url}")
     _print_safe("")
 
     if args.send_preview or args.send_now:
-        dest_channel_id = int(DEST_CHANNEL_ID)
-
         do_send = bool(args.send_now)
         if not do_send:
             _print_safe("6) SEND PREVIEW (optional)")
