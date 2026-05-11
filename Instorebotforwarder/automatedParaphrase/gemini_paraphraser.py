@@ -40,7 +40,7 @@ def _replace_unicode_dashes_with_hyphen(s: str) -> str:
     return s.replace("\u2014", "-").replace("\u2013", "-")
 
 
-async def minimal_rephrase_keep_urls(
+async def rewrite_deal_post_keep_urls(
     *,
     text: str,
     gemini_api_key: str,
@@ -51,12 +51,13 @@ async def minimal_rephrase_keep_urls(
     usage_accumulator: Optional[Dict[str, int]] = None,
 ) -> str:
     """
-    Gemini-based minimal paraphraser.
+    Gemini-based Discord deal-post rewriter.
 
     Contract:
-    - Returns a rewritten version of `text` that is minimally different.
-    - URLs should remain unchanged (prompted, but the caller must still validate if needed).
+    - Returns a natural rewrite of `text` in a clean RS-style Discord deal-post tone.
+    - URLs are pinned: same characters, same order (prompted; caller may still validate).
     - Always safe-fallback: on any failure returns the original `text`.
+    - Caller is responsible for treating an unchanged output as a drop signal if desired.
     """
     raw = (text or "").strip()
     if not raw:
@@ -66,25 +67,48 @@ async def minimal_rephrase_keep_urls(
     if not key:
         return raw
 
-    # Rewrite prompt: RS-style, clean, readable. URLs must remain exact strings.
+    # Rewrite prompt: RS-style Discord deal post. URLs must remain exact strings.
     sys_prompt = (
         "You rewrite short Discord deal/lead messages in a clean RS-style tone.\n"
-        "Rules:\n"
-        "- Rewrite the message so it reads cleaner, sharper, and easier to post.\n"
-        "- You may restructure the message for better flow; do not only swap words.\n"
-        "- Do NOT return the input unchanged. If the input is already good, still improve formatting and clarity (tighter wording, better line breaks).\n"
-        "- Keep all product names, brands, prices, codes, discounts, warranty details, and store comparisons accurate.\n"
-        "- Keep every URL exactly the same: same characters, same order.\n"
-        "- If the same URL appears more than once, remove duplicate copies when it is clearly the same link repeated.\n"
-        "- Remove filler, repeated lines, hashtag ad markers, Prime trial promos, and messy sales wording.\n"
-        "- Do not add new claims, fake urgency, fake stock info, or extra resale claims.\n"
-        "- Keep it casual and deal-focused, not corporate.\n"
-        "- Avoid overhype like 'must cop', 'insane', 'steal', 'don't miss', or 'crazy deal'.\n"
+        "\n"
+        "Goal:\n"
+        "- Rewrite the post so it sounds like a real person sharing a deal in Discord.\n"
+        "- Make it cleaner, sharper, and easier to skim.\n"
+        "- Improve wording and flow, not just punctuation or line breaks.\n"
+        "- Keep it casual and deal-focused, not corporate or salesy.\n"
+        "- Rewrite naturally even if the source message is already clean.\n"
+        "- Prefer improving wording and flow over making tiny cosmetic edits.\n"
+        "\n"
+        "Style:\n"
+        "- Lead with the strongest hook: product + price, discount, savings, coupon, or comparison value.\n"
         "- Prefer short readable lines instead of one long paragraph.\n"
-        "- Put the main link on its own line when possible.\n"
-        "- Lead with the strongest hook: price + product, discount, or comparison value.\n"
+        "- Use natural deal-channel wording.\n"
+        "- Avoid robotic extracted-data formatting unless the source is very list-heavy.\n"
+        "- Do not over-explain. Keep the post compact.\n"
+        "- Sound like a reseller posting a quick find, not an ad.\n"
+        "\n"
+        "Examples of tone:\n"
+        "- Bad: 'Save $330 at Best Buy. MSRP $659.99.'\n"
+        "- Better: '50% OFF at Best Buy from the usual $659.99 MSRP.'\n"
+        "- Bad: 'Now only $3 with Subscribe & Save.'\n"
+        "- Better: '$3 with sub/save which is way below most stores right now.'\n"
+        "- Bad: 'Limited time deal. Great savings available now.'\n"
+        "- Better: 'Nice price drop if you were waiting on this one.'\n"
+        "\n"
+        "Accuracy rules:\n"
+        "- Keep all product names, brands, prices, codes, discounts, warranty details, and store comparisons accurate.\n"
+        "- Do not add new claims, fake urgency, fake stock info, fake resale info, or extra product details.\n"
         "- Mention coupon/code instructions clearly if present.\n"
         "- Mention comparison pricing only if it exists in the input.\n"
+        "\n"
+        "URL rules:\n"
+        "- Keep every URL exactly the same: same characters, same order.\n"
+        "- If the same URL appears more than once, remove duplicate copies when it is clearly the same link repeated.\n"
+        "- Put the main link on its own line when possible.\n"
+        "\n"
+        "Cleanup rules:\n"
+        "- Remove filler, repeated lines, hashtag ad markers, Prime trial promos, and messy sales wording.\n"
+        "- Avoid overhype like 'must cop', 'insane', 'steal', 'don't miss', or 'crazy deal'.\n"
         "- Do not use emojis unless they already exist in the input and fit naturally.\n"
         "- Do not use em dashes or en dashes. Use normal hyphens only.\n"
         "- Output only the rewritten plain text. No markdown fences, no preamble.\n"

@@ -9,9 +9,9 @@ import discord
 # - Imported as a package: `Instorebotforwarder.conversational_deals_forwarder`
 # - Executed/used from the bot folder on Oracle where `Instorebotforwarder/` is on sys.path
 try:
-    from Instorebotforwarder.automatedParaphrase.gemini_paraphraser import minimal_rephrase_keep_urls  # type: ignore
+    from Instorebotforwarder.automatedParaphrase.gemini_paraphraser import rewrite_deal_post_keep_urls  # type: ignore
 except Exception:
-    from automatedParaphrase.gemini_paraphraser import minimal_rephrase_keep_urls  # type: ignore
+    from automatedParaphrase.gemini_paraphraser import rewrite_deal_post_keep_urls  # type: ignore
 
 SOURCE_CHANNEL_ID = 1438970053352751215
 DEST_CHANNEL_ID = 1484473267031904287
@@ -204,7 +204,7 @@ async def rewrite_description(cfg: Dict[str, Any], text: str, *, no_gemini: bool
     except Exception:
         timeout_s = 12.0
 
-    out = await minimal_rephrase_keep_urls(
+    out = await rewrite_deal_post_keep_urls(
         text=raw,
         gemini_api_key=key,
         model=model,
