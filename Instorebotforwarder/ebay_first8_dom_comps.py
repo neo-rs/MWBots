@@ -426,6 +426,7 @@ async def fetch_first8_sold_comps(title: str, cfg: Mapping[str, Any], *, bot_dir
 
     async with async_playwright() as p:
         browser = None
+        page = None
         try:
             if _cfg_bool(cfg, "ebay_first8_connect_cdp", False):
                 browser = await p.chromium.connect_over_cdp(str(cfg.get("ebay_first8_cdp_url") or DEFAULT_CDP_URL))
@@ -460,7 +461,6 @@ async def fetch_first8_sold_comps(title: str, cfg: Mapping[str, Any], *, bot_dir
             )
             if ebay_html_looks_blocked(body_txt):
                 result.update({"status": "blocked", "reason": "ebay returned bot/interstitial page"})
-                await page.close()
                 return result
 
             state = await _wait_for_results_or_empty(page, results_timeout_ms)
@@ -474,8 +474,11 @@ async def fetch_first8_sold_comps(title: str, cfg: Mapping[str, Any], *, bot_dir
             if not listings:
                 status = "no_cards" if detected_cards <= 0 else "no_prices"
                 result.update({"status": status, "reason": f"detected_cards={detected_cards}; prices_above_min=0"})
-                await page.close()
                 return result
+
+            # Mark success BEFORE the screenshot/meta write, so the on-disk JSON
+            # sidecar reflects the real outcome instead of "unknown".
+            result["status"] = "ok"
 
             if screenshot_enabled:
                 boxes, screenshot_total_count = await _get_first_card_boxes(page, limit)
@@ -520,13 +523,20 @@ async def fetch_first8_sold_comps(title: str, cfg: Mapping[str, Any], *, bot_dir
                     meta_path = str(base) + ".json"
                     Path(meta_path).write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
                     result["meta_path"] = meta_path
-            result["status"] = "ok"
-            await page.close()
             return result
         except Exception as exc:
             result.update({"status": "browser_error", "reason": str(exc)[:220]})
             return result
         finally:
+            # Always close the scrape's tab, including the CDP-attach case where
+            # the trusted Chrome must stay alive. This is the only place that
+            # closes `page`, so every code path (ok, blocked, no_cards, exception)
+            # goes through exactly one close.
+            try:
+                if page is not None:
+                    await page.close()
+            except Exception:
+                pass
             try:
                 if browser is not None and not _cfg_bool(cfg, "ebay_first8_connect_cdp", False):
                     await browser.close()
