@@ -33,6 +33,7 @@ from patterns import (
     blob_has_deal_substance_signals,
     passes_deal_substance_gate,
     passes_price_error_routing_gate,
+    blob_has_http_url_for_price_error,
     affiliate_should_suppress_affiliated_links,
     blob_has_dc_comics_publisher_url,
     is_food_promotion_affiliate_noise_blob,
@@ -949,6 +950,7 @@ def select_target_channel_id(
     # Exclude rigid AMZ Price Errors monitor templates (Amazon Sold / eBay Avg / flip lines) — not true "glitch" leads.
     _pe_min = int(getattr(cfg, "PRICE_ERROR_MIN_SUBSTANCE_CHARS", 52) or 52)
     _pe_need_signals = bool(getattr(cfg, "PRICE_ERROR_REQUIRES_DEAL_SUBSTANCE_SIGNALS", True))
+    _pe_need_http = bool(getattr(cfg, "PRICE_ERROR_REQUIRES_HTTP_URL", True))
     if (
         cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID
         and source_group != "instore"
@@ -959,6 +961,7 @@ def select_target_channel_id(
             text_blob,
             min_core_chars=_pe_min,
             require_deal_substance_signals=_pe_need_signals,
+            require_http_url=_pe_need_http,
         ):
             if trace is not None:
                 try:
@@ -973,6 +976,8 @@ def select_target_channel_id(
                     m["price_error_substance_gate"] = "blocked_thin_placeholder"
                 elif _pe_need_signals and not blob_has_deal_substance_signals(text_blob):
                     m["price_error_signal_gate"] = "blocked_no_deal_signals"
+                elif _pe_need_http and not blob_has_http_url_for_price_error(text_blob):
+                    m["price_error_http_gate"] = "blocked_no_http_url"
             except Exception:
                 pass
 
@@ -1329,6 +1334,7 @@ def detect_all_link_types(
     # PRICE_ERROR / glitched (add early for order_link_types priority; online-only + exclude AMZ monitor templates)
     _pe_min_m = int(getattr(cfg, "PRICE_ERROR_MIN_SUBSTANCE_CHARS", 52) or 52)
     _pe_need_signals_m = bool(getattr(cfg, "PRICE_ERROR_REQUIRES_DEAL_SUBSTANCE_SIGNALS", True))
+    _pe_need_http_m = bool(getattr(cfg, "PRICE_ERROR_REQUIRES_HTTP_URL", True))
     if (
         cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID
         and source_group != "instore"
@@ -1339,6 +1345,7 @@ def detect_all_link_types(
             pe_check_blob,
             min_core_chars=_pe_min_m,
             require_deal_substance_signals=_pe_need_signals_m,
+            require_http_url=_pe_need_http_m,
         ):
             results.append((cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID, "PRICE_ERROR"))
             if trace is not None:
@@ -1353,6 +1360,8 @@ def detect_all_link_types(
                     m["price_error_substance_gate"] = "blocked_thin_placeholder"
                 elif _pe_need_signals_m and not blob_has_deal_substance_signals(pe_check_blob):
                     m["price_error_signal_gate"] = "blocked_no_deal_signals"
+                elif _pe_need_http_m and not blob_has_http_url_for_price_error(pe_check_blob):
+                    m["price_error_http_gate"] = "blocked_no_http_url"
             except Exception:
                 pass
 

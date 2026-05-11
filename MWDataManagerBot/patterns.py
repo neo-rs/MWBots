@@ -460,17 +460,34 @@ def passes_deal_substance_gate(blob: str, *, min_core_chars: int) -> bool:
     return deal_substance_core_len(blob) >= mc
 
 
+_HTTP_URL_IN_PRICE_ERROR_BLOB = re.compile(r"https?://[^\s<>\"]+", re.IGNORECASE)
+
+
+def blob_has_http_url_for_price_error(blob: str) -> bool:
+    """True when classification text contains at least one http(s) URL (photo-only glitch posts have none)."""
+    return bool(_HTTP_URL_IN_PRICE_ERROR_BLOB.search(blob or ""))
+
+
 def passes_price_error_routing_gate(
-    blob: str, *, min_core_chars: int, require_deal_substance_signals: bool
+    blob: str,
+    *,
+    min_core_chars: int,
+    require_deal_substance_signals: bool,
+    require_http_url: bool = True,
 ) -> bool:
     """
     PRICE_ERROR destination gate: same as passes_deal_substance_gate, plus optional requirement that the blob
     contain commerce signals (URL, $ / £ / € amounts, %-off, ASIN-ish tokens). When required, blocks meme posts
     that only mention phrases like \"price error\" in prose with no deal substance.
+
+    When require_http_url is True (default via settings), blocks glitch-keyword posts with no checkout/product link,
+    e.g. Divine Helper text + attachment image only.
     """
     if not passes_deal_substance_gate(blob, min_core_chars=min_core_chars):
         return False
     if require_deal_substance_signals and not blob_has_deal_substance_signals(blob):
+        return False
+    if require_http_url and not blob_has_http_url_for_price_error(blob):
         return False
     return True
 

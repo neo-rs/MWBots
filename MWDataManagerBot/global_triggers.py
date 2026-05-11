@@ -241,6 +241,7 @@ def detect_global_triggers(
     price_error_blob = merge_text_and_embed_strings_for_classifier(text_to_check or "", embeds)
     _pe_min_g = int(getattr(cfg, "PRICE_ERROR_MIN_SUBSTANCE_CHARS", 52) or 52)
     _pe_need_signals = bool(getattr(cfg, "PRICE_ERROR_REQUIRES_DEAL_SUBSTANCE_SIGNALS", True))
+    _pe_need_http = bool(getattr(cfg, "PRICE_ERROR_REQUIRES_HTTP_URL", True))
     if (
         cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID
         and source_is_online
@@ -251,6 +252,7 @@ def detect_global_triggers(
             price_error_blob,
             min_core_chars=_pe_min_g,
             require_deal_substance_signals=_pe_need_signals,
+            require_http_url=_pe_need_http,
         )
     ):
         results.append((cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID, "PRICE_ERROR"))
