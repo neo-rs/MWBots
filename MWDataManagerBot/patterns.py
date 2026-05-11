@@ -526,6 +526,22 @@ _AFFILIATE_BLOCKED_MERCHANT_HOSTS: Tuple[str, ...] = (
     "pokemoncenter.com",
 )
 
+# Divine / Tracking Profits–style fast-food promos (noise in affiliated-leads flows).
+_AFFILIATE_NEW_FOOD_PROMOTION_PATTERN = re.compile(r"(?i)new\s+food\s+promotion\s+posted")
+_AFFILIATE_DIVINE_BYLINE_HELPER_OR_TP_PATTERN = re.compile(
+    r"from\s*:\s*divine\b[\s\S]{0,400}?\bby\s*:\s*(?:divine\s+helper|tracking\s+profits)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_AFFILIATE_FOOD_RESTAURANT_OR_PROMO_PATTERN = re.compile(
+    r"(?i)(?:"
+    r"loves\.com|tacojohns\.com|subway\.com|tacobell|chipotle|qdoba|"
+    r"applebee|chili'?s|outback|olive\s+garden|red\s+lobster|wendy'?s|burger\s*king|"
+    r"mcdonald'?s|panera|dunkin|starbucks|"
+    r"7[-\s]?eleven|slurpee|tiff'?s\s+treats|potato\s+ol[eé]s|"
+    r"honey\s+gold\s+bbq|smokehouse\s+turkey|beef\s+taco\s+combo|teacher\s+appreciation"
+    r")",
+)
+
 
 def _affiliate_url_host_blocked_for_leads(host: str) -> bool:
     h = (host or "").lower().strip()
@@ -537,6 +553,89 @@ def _affiliate_url_host_blocked_for_leads(host: str) -> bool:
             continue
         if h == bl or h.endswith("." + bl):
             return True
+    return False
+
+
+def _affiliate_normalize_url_host(host: str) -> str:
+    h = (host or "").lower().strip()
+    if h.startswith("www."):
+        h = h[4:]
+    return h
+
+
+# DC Comics: block the entire publisher domain (#.dc.com = shop, storefront, sweepstakes, news, promos)
+# plus common alternate roots that are still DC Comics–owned surfaces (not generic “Washington DC”).
+_AFFILIATE_DC_COMICS_PUBLISHER_ROOT_HOSTS: Tuple[str, ...] = (
+    "dcuniverseinfinite.com",
+    "dcuniverse.com",
+)
+
+
+def _affiliate_host_is_dc_comics_publisher(host: str) -> bool:
+    """True for dc.com (any subdomain) and configured DC Comics alternate roots."""
+    h = _affiliate_normalize_url_host(host or "")
+    if not h:
+        return False
+    if h == "dc.com" or h.endswith(".dc.com"):
+        return True
+    for root in _AFFILIATE_DC_COMICS_PUBLISHER_ROOT_HOSTS:
+        r = str(root or "").lower().strip()
+        if not r:
+            continue
+        if h == r or h.endswith("." + r):
+            return True
+    return False
+
+
+def blob_has_dc_comics_publisher_url(blob: str) -> bool:
+    """
+    True when any http(s) URL is on the DC Comics publisher web stack:
+    - Any host under `*.dc.com` (storefront, sweepstakes like buildingbad.dc.com, shop, editorial).
+    - Alternate roots listed in `_AFFILIATE_DC_COMICS_PUBLISHER_ROOT_HOSTS` (e.g. DC Universe Infinite).
+
+    Keeps affiliated-leads / conversational-amazon buckets clear of DC Comics promo/sweepstakes/store links.
+    """
+    raw = str(blob or "")
+    if not raw.strip():
+        return False
+    try:
+        urls = re.findall(r"https?://[^\s<>\"]+", raw, flags=re.IGNORECASE)
+    except Exception:
+        urls = []
+    for ul in urls or []:
+        try:
+            ph = _affiliate_normalize_url_host((urlparse(str(ul).strip()).netloc or ""))
+        except Exception:
+            ph = ""
+        if _affiliate_host_is_dc_comics_publisher(ph):
+            return True
+    return False
+
+
+# Back-compat alias (same behavior as `blob_has_dc_comics_publisher_url`).
+def blob_has_dc_com_domain_url(blob: str) -> bool:
+    return blob_has_dc_comics_publisher_url(blob)
+
+
+def is_food_promotion_affiliate_noise_blob(blob: str) -> bool:
+    """
+    Fast-food / restaurant promo templates (Divine, Tracking Profits, etc.) — not reseller affiliate leads.
+    """
+    raw = str(blob or "")
+    if not raw.strip():
+        return False
+    if _AFFILIATE_NEW_FOOD_PROMOTION_PATTERN.search(raw):
+        return True
+    has_free = bool(re.search(r"(?i)\bfree\b", raw))
+    has_link_label = bool(re.search(r"(?i)\blink\s*:", raw))
+    restaurant_hit = bool(_AFFILIATE_FOOD_RESTAURANT_OR_PROMO_PATTERN.search(raw))
+    # "FREE … at Love's / Taco John's" + store link field — common Tracking Profits embed shape.
+    if has_free and has_link_label and restaurant_hit:
+        return True
+    if bool(_AFFILIATE_DIVINE_BYLINE_HELPER_OR_TP_PATTERN.search(raw)) and (
+        restaurant_hit or _AFFILIATE_NEW_FOOD_PROMOTION_PATTERN.search(raw) or (has_free and has_link_label)
+    ):
+        return True
     return False
 
 
@@ -588,6 +687,10 @@ def affiliate_should_suppress_affiliated_links(blob: str, *, min_core_chars: int
     raw = str(blob or "").strip()
     if not raw:
         return "empty"
+    if is_food_promotion_affiliate_noise_blob(raw):
+        return "food_promotion_noise"
+    if blob_has_dc_comics_publisher_url(raw):
+        return "dc_comics_publisher_url"
     core_len = deal_substance_core_len(raw)
     # Very short stubs are usually incomplete edits / placeholder embeds.
     if core_len < 25:

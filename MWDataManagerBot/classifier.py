@@ -34,6 +34,8 @@ from patterns import (
     passes_deal_substance_gate,
     passes_price_error_routing_gate,
     affiliate_should_suppress_affiliated_links,
+    blob_has_dc_comics_publisher_url,
+    is_food_promotion_affiliate_noise_blob,
     CARDS_PATTERN,
     DISCOUNTED_STORE_PATTERN,
     INSTORE_KEYWORDS,
@@ -648,6 +650,10 @@ def _looks_like_conversational_amazon_deal(
 
     if not text_blob:
         return _skip("empty_blob")
+    if is_food_promotion_affiliate_noise_blob(text_blob):
+        return _skip("food_promotion_noise")
+    if blob_has_dc_comics_publisher_url(text_blob):
+        return _skip("dc_comics_publisher_url")
     if source_group != "online":
         return _skip("not_online_source_group")
     # Extra safety: only treat as conversational-amazon when the channel is explicitly
