@@ -1,7 +1,9 @@
 """Discum Command Bot — slash + prefix commands for MWDiscumBot
 
 Slash: `/discum` (channel map UI). Prefix (`!`): fetchall family (`!fetchall`, `!fetchsync`,
-`!fetchcycle`, `!fetchclear`) plus optional quick-map messages (`!g...`).
+`!fetchcycle`, `!fetchclear`), **`!maplookup`** (D2D mapping lookup by channel ID), plus optional
+quick-map messages (`!g...`). In **#mirror-channel-map**, posting only a numeric channel ID (staff)
+runs the same lookup.
 
 Runs in the same process as `discumbot.py` (background thread) or standalone; uses a bot token
 for Discord.py and the user token from config only for fetchall source reads / browse previews.
@@ -880,6 +882,84 @@ def _build_destination_pages(
     for t in items:
         t[3].sort(key=lambda cid: (_source_guild_name_only(bot, cid).lower(), cid))
     return items
+
+
+def _mapping_lookup_embed(bot: commands.Bot, query_id: int) -> Tuple[str, discord.Embed]:
+    """
+    Look up a channel ID against Discum D2D channel_map.json only (not fetchall).
+    If query_id is a source key → show webhook destination.
+    If query_id matches a resolved Mirror destination → list all sources + server names.
+    Returns (kind, embed) where kind is 'source', 'destination', or 'none'.
+    """
+    _load_source_channel_names()
+    channel_map = _load_channel_map()
+    try:
+        qid = int(query_id)
+    except (TypeError, ValueError):
+        qid = 0
+    if qid <= 0:
+        e = discord.Embed(title="Mapping lookup", description="Invalid channel ID.", color=0xED4245)
+        return ("none", e)
+
+    if qid in channel_map:
+        wh = str(channel_map[qid] or "").strip()
+        dest_id, dest_name = resolve_webhook_destination(wh, bot)
+        gname = _source_guild_name_only(bot, qid)
+        gid = _guild_id_from_source_channel(qid)
+        lines = [
+            "**Role:** source channel (`channel_map.json` → webhook)",
+            f"**Source:** {_format_channel_mention(qid)}",
+        ]
+        if gname:
+            lines.append(f"**Source server:** {gname}" + (f" (`{gid}`)" if gid else ""))
+        if dest_id:
+            dn = (dest_name or "").strip()
+            lines.append(
+                f"**Destination:** {_format_channel_mention(int(dest_id))}"
+                + (f" ({dn})" if dn else "")
+            )
+        else:
+            lines.append("**Destination:** could not resolve webhook (check URL token / network).")
+        e = discord.Embed(title="D2D mapping — source channel", description="\n".join(lines), color=0x57F287)
+        e.set_footer(text="Discum D2D only (not fetchall).")
+        return ("source", e)
+
+    pages = _build_destination_pages(channel_map, bot)
+    for _key, dest_id, _disp, sources in pages:
+        if dest_id is not None and int(dest_id) == qid:
+            sources_sorted = sorted(int(s) for s in sources)
+            max_lines = 25
+            chunk = sources_sorted[:max_lines]
+            body_lines: List[str] = []
+            for i, sid in enumerate(chunk, start=1):
+                gn = _source_guild_name_only(bot, sid)
+                suffix = f" — **{gn}**" if gn else ""
+                body_lines.append(f"{i}. {_format_channel_mention(sid)}{suffix}")
+            extra = len(sources_sorted) - len(chunk)
+            if extra > 0:
+                body_lines.append(f"\n_…and {extra} more source channel(s)._")
+            desc = (
+                "**Role:** Mirror destination (webhook target)\n"
+                f"**Destination:** {_format_channel_mention(qid)}\n\n"
+                f"**Sources ({len(sources_sorted)}):**\n"
+                + "\n".join(body_lines)
+            )
+            if len(desc) > 4090:
+                desc = desc[:4087] + "…"
+            e = discord.Embed(title="D2D mapping — destination channel", description=desc, color=0x5865F2)
+            e.set_footer(text="Discum D2D only (not fetchall).")
+            return ("destination", e)
+
+    e = discord.Embed(
+        title="No D2D mapping",
+        description=(
+            f"No **channel_map.json** entry uses {_format_channel_mention(qid)} as a source channel "
+            "or as a resolved webhook destination.\n\n"
+            "_Fetchall-only mirrors are not listed here._"
+        ),
+        color=0xFEE75C,
+    )
+    return ("none", e)
 
 
 # ---- Interaction helpers (used across ALL Views) ----
@@ -1773,7 +1853,7 @@ async def _discum_browse_for_guild(interaction: discord.Interaction, *, source_g
 
 
 class DiscumCommandBot(commands.Bot):
-    """discord.py bot: `/discum` plus prefix fetchall commands (`!fetchall`, `!fetchsync`, `!fetchcycle`, `!fetchclear`)."""
+    """discord.py bot: `/discum` plus prefix commands (`!fetchall`, `!fetchsync`, `!fetchcycle`, `!fetchclear`, `!maplookup`)."""
     
     def __init__(self):
         intents = discord.Intents.default()
@@ -1810,13 +1890,13 @@ class DiscumCommandBot(commands.Bot):
             if isinstance(error, commands.MissingPermissions):
                 await ctx.send(
                     "[FETCHALL] You need **Manage Channels** permission to run "
-                    "!fetchall / !fetchsync / !fetchcycle / !fetchclear."
+                    "!fetchall / !fetchsync / !fetchcycle / !fetchclear / !maplookup."
                 )
                 return
             if isinstance(error, commands.CommandNotFound):
                 return  # ignore wrong prefix / unknown command
             name = getattr(ctx.command, "name", None) if ctx.command else None
-            if name in ("fetchall", "fetchsync", "fetchcycle", "fetchclear"):
+            if name in ("fetchall", "fetchsync", "fetchcycle", "fetchclear", "maplookup"):
                 msg = str(getattr(error, "original", error) or error)
                 await ctx.send(f"[FETCHALL] Command failed: {msg[:400]}")
         except Exception:
@@ -1827,6 +1907,33 @@ class DiscumCommandBot(commands.Bot):
         if message.author.bot:
             await self.process_commands(message)
             return
+        # Plain snowflake in mirror mapping channel → same as !maplookup (staff only).
+        try:
+            ch_own_id = getattr(message.channel, "id", None)
+            if (
+                ch_own_id
+                and int(ch_own_id) == int(MIRROR_CHANNEL_MAP_SUMMARY_CHANNEL_ID)
+                and message.guild
+                and getattr(message.author, "guild_permissions", None)
+                and message.author.guild_permissions.manage_channels
+            ):
+                raw_ch = (message.content or "").strip()
+                if raw_ch.isdigit() and 15 <= len(raw_ch) <= 22:
+                    qid = int(raw_ch)
+                    if qid > 0:
+                        try:
+                            await message.add_reaction("\U0001f50d")
+                        except Exception:
+                            pass
+                        _, embed = _mapping_lookup_embed(self, qid)
+                        await message.reply(embed=embed, mention_author=False)
+                        try:
+                            await message.add_reaction("\u2705")
+                        except Exception:
+                            pass
+                        return
+        except Exception:
+            pass
         parsed = _parse_quick_map_message(message.content or "")
         if parsed is not None:
             guild_id, source_ids, dest_id = parsed
@@ -2255,6 +2362,34 @@ async def _cmd_fetchclear(ctx: commands.Context) -> None:
     except Exception as e:
         await msg.edit(content=f"[FETCHALL] Fetchclear error: {e}")
         raise
+
+
+@bot.command(name="maplookup", aliases=("mapcheck", "mappinglookup"))
+@commands.has_permissions(manage_channels=True)
+async def _cmd_maplookup(ctx: commands.Context, channel_id: int = 0) -> None:
+    """Resolve Discum D2D mapping for one channel ID (source → destination, or destination → all sources)."""
+    if channel_id <= 0:
+        await ctx.send(
+            "Usage: `!maplookup <channel_id>` — looks up **channel_map.json** only. "
+            "If the ID is a **source** channel: shows the Mirror **destination**. "
+            "If the ID is a **Mirror destination**: lists every **source** and server name. "
+            "Aliases: `!mapcheck`, `!mappinglookup`. "
+            f"In <#{MIRROR_CHANNEL_MAP_SUMMARY_CHANNEL_ID}>, posting **only** the numeric ID does the same."
+        )
+        return
+    try:
+        await ctx.message.add_reaction("\U0001f50d")
+    except Exception:
+        pass
+    _, embed = _mapping_lookup_embed(ctx.bot, channel_id)
+    try:
+        await ctx.reply(embed=embed, mention_author=False)
+    except Exception:
+        await ctx.send(embed=embed)
+    try:
+        await ctx.message.add_reaction("\u2705")
+    except Exception:
+        pass
 
 
 def _log_channel_mapping(msg: str, level: str = "INFO") -> None:
