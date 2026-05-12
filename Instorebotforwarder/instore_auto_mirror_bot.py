@@ -1274,6 +1274,82 @@ class InstorebotForwarder:
             return True
         return False
 
+    def _amazon_title_compact_enabled(self) -> bool:
+        """When enabled, the EMBED display title is shortened (eBay search input is untouched)."""
+        v = (self.config or {}).get("amazon_title_compact_enabled", True)
+        if isinstance(v, bool):
+            return v
+        s = str(v or "").strip().lower()
+        if s in {"1", "true", "yes", "y", "on"}:
+            return True
+        if s in {"0", "false", "no", "n", "off"}:
+            return False
+        return True
+
+    def _compact_amazon_title(self, title: str) -> str:
+        """
+        Trim Amazon's long SEO titles down to brand + short product name for
+        embed display. The full title is still used as input for eBay search
+        recall (`_scrape_ebay_first8_comps(title, ...)`), so only display
+        quality changes here.
+
+        Heuristic (single source of truth):
+          1. Split by ` - ` / ` \u2013 ` / ` \u2014 ` (Amazon's most common
+             "category" separator).
+          2. Keep the first segment. While the cumulative length stays under
+             `amazon_title_compact_max_chars` AND we have not consumed
+             `amazon_title_compact_keep_segments` segments yet, append the
+             next segment with ` - `.
+          3. If the resulting string still exceeds the cap, truncate at the
+             last whole word that fits.
+          4. If there are no dash separators, fall back to word-boundary
+             truncation at the cap.
+          5. Strip trailing punctuation (`-`, `:`, `,`, `;`, `|`, space).
+
+        Returns the original title unchanged when the compactor is disabled or
+        the title is already shorter than the cap.
+        """
+        s = (title or "").strip()
+        if not s:
+            return ""
+        if not self._amazon_title_compact_enabled():
+            return s
+        try:
+            max_chars = int(((self.config or {}).get("amazon_title_compact_max_chars") or 80))
+        except Exception:
+            max_chars = 80
+        max_chars = max(20, min(max_chars, 256))
+        try:
+            keep_segments = int(((self.config or {}).get("amazon_title_compact_keep_segments") or 2))
+        except Exception:
+            keep_segments = 2
+        keep_segments = max(1, min(keep_segments, 8))
+
+        sep = " - "
+        parts = re.split(r"\s+[\-\u2013\u2014]\s+", s)
+        if len(parts) > 1:
+            kept = [parts[0].strip()]
+            for p in parts[1:]:
+                if len(kept) >= keep_segments:
+                    break
+                pt = p.strip()
+                if not pt:
+                    continue
+                cand = sep.join(kept + [pt])
+                if len(cand) > max_chars:
+                    break
+                kept.append(pt)
+            s = sep.join(kept).strip()
+
+        if len(s) > max_chars:
+            cut = s[:max_chars]
+            last_space = cut.rfind(" ")
+            if last_space > max_chars // 2:
+                cut = cut[:last_space]
+            s = cut.strip()
+
+        return s.rstrip(" -:,;|")
+
     async def _scrape_amazon_buybox_screenshot(
         self,
         amazon_url: str,
@@ -5431,23 +5507,23 @@ class InstorebotForwarder:
             if str(buybox_result.get("status") or "") == "ok":
                 amazon_buybox_screenshot_path = str(buybox_result.get("screenshot_path") or "")
 
-        # Build the "card body" to match your desired format (no footer/timestamp, one key link).
+        # Build the "card body" to match your desired format (no footer/timestamp).
         #
         # Layout (canonical):
-        #   <Amazon URL>            (first line of description, right under embed title)
-        #   <blank>
         #   Current Price / Before / Discount / CODE [/ How it works + steps]
         #   eBay Comps              (flush under deal info, NOT bold, still a link)
         #   Avg Sold Price: $X
         #   <upside>
         # The eBay gate-failure variant also sits flush under the deal info
         # (no blank line) so the failure note reads as part of the same card.
+        #
+        # The bare Amazon URL is intentionally NOT printed in the description:
+        # the primary embed sets `embed.url = final_url` (required for the
+        # multi-image grid), which turns the title into a clickable link to
+        # the product page. Printing the URL again was redundant.
         card_lines: List[str] = []
         if price_glitch:
             card_lines.append("**Price Glitch!**")
-            card_lines.append("")
-        if key_link:
-            card_lines.append(key_link)
             card_lines.append("")
         card_lines.append(f"Current Price: **{price}**" if price else "Current Price:")
         if before_price and str(before_price).strip() and str(before_price).strip().upper() != "N/A":
@@ -5559,13 +5635,17 @@ class InstorebotForwarder:
         if not source_line:
             source_line = "SOURCE"
 
+        # Embed display title is the compacted version; the raw `title` is
+        # still used as input for the eBay first-8 sold comps scrape above so
+        # search recall is unaffected.
+        display_title = self._compact_amazon_title(title)
         ctx = {
             "asin": asin,
             "final_url": final_url,
             "link": f"<{final_url}>" if final_url else "",
             "key_link": key_link,
             "deal_type": deal_type,
-            "title": title,
+            "title": display_title,
             "price": price,
             "before_price": before_price,
             "discount_pct": discount_pct_str,
