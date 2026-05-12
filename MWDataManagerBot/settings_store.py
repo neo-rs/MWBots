@@ -126,9 +126,10 @@ FALLBACK_CHANNEL_ID: int = 0
 EDIT_COOLDOWN_SECONDS: int = 30
 MAJOR_CLEARANCE_PAIR_TTL_SECONDS: int = 180
 MAJOR_CLEARANCE_SEND_SINGLE_ON_TIMEOUT: bool = False
-# When True, definitive Home Depot "total inventory only" embeds do not post alone to MAJOR_CLEARANCE;
-# they wait for a follow-up with per-store stock lines (or timeout behavior per MAJOR_CLEARANCE_SEND_SINGLE_ON_TIMEOUT).
-MAJOR_CLEARANCE_REQUIRE_FOLLOWUP_FOR_DEFINITIVE_HD: bool = True
+# When True, definitive inventory-style clearance embeds (Home Depot “Store Clearance Deals – New Item” shape:
+# total inventory + internet number + price grid) do not post alone to MAJOR_CLEARANCE; they wait for a follow-up
+# with per-store stock lines (unless MAJOR_CLEARANCE_SEND_SINGLE_ON_TIMEOUT sends after TTL).
+MAJOR_CLEARANCE_REQUIRE_FOLLOWUP_FOR_DEFINITIVE_INVENTORY_EMBED: bool = True
 # When True, format-based instore clearance monitor embeds (any major retailer / merchant URL) classify as
 # major-clearance monitors — same path as HD definitive / Tempo HD (suppress MAJOR_STORES; MAJOR_CLEARANCE elsewhere).
 INSTORE_CLEARANCE_MONITOR_EMBEDS_MAJOR_CLEARANCE: bool = True
@@ -233,7 +234,7 @@ def init(settings: Dict[str, Any]) -> None:
     global FALLBACK_CHANNEL_ID
     global EDIT_COOLDOWN_SECONDS
     global MAJOR_CLEARANCE_PAIR_TTL_SECONDS, MAJOR_CLEARANCE_SEND_SINGLE_ON_TIMEOUT
-    global MAJOR_CLEARANCE_REQUIRE_FOLLOWUP_FOR_DEFINITIVE_HD, INSTORE_CLEARANCE_MONITOR_EMBEDS_MAJOR_CLEARANCE
+    global MAJOR_CLEARANCE_REQUIRE_FOLLOWUP_FOR_DEFINITIVE_INVENTORY_EMBED, INSTORE_CLEARANCE_MONITOR_EMBEDS_MAJOR_CLEARANCE
     global MAJOR_CLEARANCE_SOURCE_CHANNEL_IDS
     global DEBUG_REACTIONS_ENABLED, DEBUG_REACTIONS_ALLOW_CHANNEL_IDS
     global DEBUG_REACTIONS_EMOJI_ALLOWED, DEBUG_REACTIONS_EMOJI_BLOCKED
@@ -452,9 +453,10 @@ def init(settings: Dict[str, Any]) -> None:
     if MAJOR_CLEARANCE_PAIR_TTL_SECONDS < 10:
         MAJOR_CLEARANCE_PAIR_TTL_SECONDS = 10
     MAJOR_CLEARANCE_SEND_SINGLE_ON_TIMEOUT = bool(settings.get("major_clearance_send_single_on_timeout", False))
-    MAJOR_CLEARANCE_REQUIRE_FOLLOWUP_FOR_DEFINITIVE_HD = bool(
-        settings.get("major_clearance_require_followup_for_definitive_hd", True)
-    )
+    _inv_fu = settings.get("major_clearance_require_followup_for_definitive_inventory_embed")
+    if _inv_fu is None:
+        _inv_fu = settings.get("major_clearance_require_followup_for_definitive_hd", True)
+    MAJOR_CLEARANCE_REQUIRE_FOLLOWUP_FOR_DEFINITIVE_INVENTORY_EMBED = bool(_inv_fu)
     INSTORE_CLEARANCE_MONITOR_EMBEDS_MAJOR_CLEARANCE = bool(
         settings.get("instore_clearance_monitor_embeds_major_clearance", True)
     )

@@ -112,7 +112,7 @@ def _dispatch_tag_priority(tag: str) -> int:
 
 def _major_clearance_pairing_source_channel_ids() -> Set[int]:
     """
-    Channels where Tempo/HD major-clearance embeds use the pending-cache pairing flow.
+    Channels where major-clearance monitor embeds use the pending-cache pairing flow (Tempo cards, HD definitive, etc.).
 
     `major_clearance_source_channel_ids` extends the default (`source_channel_ids_clearance` ∪
     `source_channel_ids_instore`); it must not *replace* those sets — otherwise configured Tempos never
@@ -1546,9 +1546,11 @@ class MessageForwarder:
                 ttl_s = 10.0
             send_single_on_timeout = bool(getattr(cfg, "MAJOR_CLEARANCE_SEND_SINGLE_ON_TIMEOUT", False))
             try:
-                require_fu_hd = bool(getattr(cfg, "MAJOR_CLEARANCE_REQUIRE_FOLLOWUP_FOR_DEFINITIVE_HD", True))
+                require_followup_inventory_embed = bool(
+                    getattr(cfg, "MAJOR_CLEARANCE_REQUIRE_FOLLOWUP_FOR_DEFINITIVE_INVENTORY_EMBED", True)
+                )
             except Exception:
-                require_fu_hd = True
+                require_followup_inventory_embed = True
             mc_filtered = self._major_clearance_attachments_without_barcode_noise(
                 attachments if use_files else None,
                 embeds,
@@ -1604,7 +1606,10 @@ class MessageForwarder:
                         # don't send it alone on timeout (it tends to cause false positives).
                         if bool(pending_item.get("from_edit")):
                             continue
-                        if require_fu_hd and bool(pending_item.get("was_definitive_major_clearance")):
+                        _inv_pending = bool(pending_item.get("was_definitive_inventory_embed")) or bool(
+                            pending_item.get("was_definitive_major_clearance")
+                        )
+                        if require_followup_inventory_embed and _inv_pending:
                             continue
                         src_ch = int(pending_item.get("source_channel_id") or 0)
                         src_group = "instore" if src_ch in getattr(cfg, "SMART_SOURCE_CHANNELS_INSTORE", set()) else (
@@ -1650,7 +1655,7 @@ class MessageForwarder:
             is_candidate_embed = is_major_clearance_monitor_embed_blob(text_to_check)
             if is_candidate_embed and not hd_exclusive_dispatch:
                 is_definitive_embed = is_definitive_major_clearance_embed(text_to_check)
-                if is_definitive_embed and not require_fu_hd:
+                if is_definitive_embed and not require_followup_inventory_embed:
                     try:
                         import discord
 
@@ -1760,7 +1765,9 @@ class MessageForwarder:
                     "source_channel_id": source_ch_id,
                     "source_message_id": embed_msg_id,
                     "from_edit": bool(is_edit),
-                    "was_definitive_major_clearance": bool(is_definitive_embed and require_fu_hd),
+                    "was_definitive_inventory_embed": bool(is_definitive_embed and require_followup_inventory_embed),
+                    # Legacy key (same meaning); kept so older pending-cache entries still behave on timeout skip.
+                    "was_definitive_major_clearance": bool(is_definitive_embed and require_followup_inventory_embed),
                 }
                 # Track "latest pending embed" by sender so follow-ups without an explicit link can still pair.
                 try:
@@ -1873,13 +1880,9 @@ class MessageForwarder:
 
         if not dispatch_link_types:
             # Strict clearance mode: do not spam UNCLASSIFIED with monitor-feed fragments.
-            # These are either handled by major-clearance flow or intentionally dropped.
-            text_lower = (text_to_check or "").lower()
-            if source_group == "clearance" and (
-                "home depot store clearance deals" in text_lower
-                or "internet number" in text_lower
-                or "total inventory" in text_lower
-            ):
+            # Any shape matched by the major-clearance monitor detector is handled by pairing / clearance routing,
+            # not UNCLASSIFIED — if it still has no route, skip quietly (misconfig or incomplete fragment).
+            if source_group == "clearance" and is_major_clearance_monitor_embed_blob(text_to_check):
                 trace["decision"] = {"action": "skip", "reason": "clearance_monitor_no_route"}
                 try:
                     write_trace_log(trace)

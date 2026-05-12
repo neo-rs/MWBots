@@ -262,12 +262,14 @@ def qualifies_hd_total_inventory_route(
 
 def is_tempo_monitors_major_clearance_candidate(text: str) -> bool:
     """
-    TempoMonitors-style **Home Depot** stock embed (MSRP / As low as + SKU or UPC + Tempo footer).
+    TempoMonitors-powered retail stock cards (MSRP / As low as + UPC or SKU + Tempo footer).
 
-    Walmart/Target/other Tempo feeds share the same MSRP/As-low/UPC shape; they must NOT use the
-    major-clearance / HD-clearance bucket. Gate the Tempo branch on explicit Home Depot wording
-    (footer copy like "Home Depot Finds" / "Home Depot Leads"). Definitive HD clearance embeds are
-    still accepted via is_definitive_major_clearance_embed below.
+    Deal Soldier and similar bots use the **same embed shape** for Walmart, Target, Home Depot, and
+    other feeds; those cards pair with follow-up `@State ZIP - N stock @ $…` messages and must use the
+    major-clearance monitor path (suppress MAJOR_STORES; MAJOR_CLEARANCE + live_forwarder pairing).
+
+    Definitive Home Depot “Store Clearance Deals – New Item” embeds without this Tempo shape are still
+    handled via is_definitive_major_clearance_embed (evaluated first in is_major_clearance_monitor_embed_blob).
     """
     tl = (text or "").lower()
     if not tl:
@@ -278,17 +280,17 @@ def is_tempo_monitors_major_clearance_candidate(text: str) -> bool:
     has_sku = "sku" in tl and bool(re.search(r"\bsku\b[^\n]{0,50}\b\d{6,}\b", tl))
     has_tempo = "tempomonitors.com" in tl or "powered by tempomonitors" in tl
     if has_msrp and has_as_low and (has_upc or has_sku) and has_tempo:
-        compact = re.sub(r"\s+", "", tl)
-        if "homedepot" not in compact and "home depot" not in tl:
-            return is_definitive_major_clearance_embed(text)
         return True
     return is_definitive_major_clearance_embed(text)
 
 
 def is_major_clearance_monitor_embed_blob(text: str) -> bool:
     """
-    True for definitive HD clearance embeds, Tempo Home Depot stock-monitor shape, or generic
-    instore-clearance retail monitor embeds (multi-retailer feeds sharing the same format).
+    True when the flattened message looks like a **retail stock/clearance monitor card** (not an arbitrage write-up):
+
+    - Home Depot definitive “Store Clearance Deals – New Item” inventory embeds;
+    - Tempo / Deal Soldier-style cards (MSRP, As low as, SKU/UPC, Tempo footer) for any retailer;
+    - Generic instore + clearance + retailer/domain shapes when enabled in settings.
     """
     if not (text or "").strip():
         return False
@@ -904,8 +906,7 @@ def select_target_channel_id(
 
     # CLEARANCE routing policy:
     # Clearance source channels should not participate in general routing (PRICE_ERROR/flips/etc).
-    # They are handled exclusively via the definitive "Home Depot store clearance deals" embed
-    # (MAJOR_CLEARANCE destination).
+    # Monitor-shaped posts use MAJOR_CLEARANCE (see is_major_clearance_monitor_embed_blob).
     if source_group == "clearance":
         mc_id = int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0)
         if mc_id > 0 and is_major_clearance_monitor_embed_blob(pe_sel):
@@ -1303,8 +1304,8 @@ def detect_all_link_types(
             pass
 
     # CLEARANCE routing policy:
-    # Clearance source channels should not participate in general routing.
-    # Definitive HD clearance embeds + Tempo stock-monitor embeds route to MAJOR_CLEARANCE only.
+    # Clearance source channels should not participate in general routing (PRICE_ERROR / flips / etc.).
+    # Monitor-shaped posts route to MAJOR_CLEARANCE only (see is_major_clearance_monitor_embed_blob).
     if source_group == "clearance":
         if mc_id > 0 and is_major_clearance_monitor_embed_blob(pe_check_blob):
             if trace is not None:

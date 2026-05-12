@@ -111,7 +111,7 @@
   "edit_cooldown_seconds": 30,
   "major_clearance_pair_ttl_seconds": 200,
   "major_clearance_send_single_on_timeout": false,
-  "major_clearance_require_followup_for_definitive_hd": true,
+  "major_clearance_require_followup_for_definitive_inventory_embed": true,
   "instore_clearance_monitor_embeds_major_clearance": true,
   "hd_total_inventory_source_channel_id": 1435308770128298044,
   "hd_total_inventory_destination_channel_id": 1484118129402450041,
