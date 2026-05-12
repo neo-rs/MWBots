@@ -291,7 +291,7 @@ class MessageForwarder:
         }
 
     def _is_short_bare_embed_payload(self, payload: Dict[str, Any]) -> bool:
-        """Discum-style guard: wait if embed payload looks like a thin placeholder."""
+        """Defer processing if embed payload looks like a thin placeholder (pending hydration)."""
         try:
             embeds: List[Dict[str, Any]] = payload.get("embeds", []) or []
             if not embeds:
@@ -1132,7 +1132,7 @@ class MessageForwarder:
             return
         if not cfg.is_monitored_source_channel(channel_id, category_id=category_id or None):
             return
-        # In production this bot should only process DiscumBot webhook-forwarded messages.
+        # Optional: only webhook/bot-authored messages from monitored sources (monitor feeds).
         if cfg.MONITOR_WEBHOOK_MESSAGES_ONLY:
             try:
                 is_webhook = getattr(message, "webhook_id", None) is not None
@@ -1156,7 +1156,7 @@ class MessageForwarder:
             return
 
         # Same message id must not be processed twice on CREATE, but MESSAGE_UPDATE edits
-        # (Discum hydration) need a full re-run so classification sees fields/description/image.
+        # Embed hydration edits need a full re-run so classification sees fields/description/image.
         mid = int(getattr(message, "id", 0) or 0)
         if mid in self.processed_ids and not is_edit:
             return
@@ -1426,7 +1426,7 @@ class MessageForwarder:
         replaced = False
 
         embeds_out = format_embeds_for_forwarding(embeds)
-        # Discum-style output: when reuploading attachments as real files, do NOT convert them into embed images.
+        # When reuploading attachments as real files, do NOT convert them into embed images.
         use_files = bool(getattr(cfg, "FORWARD_ATTACHMENTS_AS_FILES", True))
         if not use_files:
             # Render image attachments as embeds for better Discord UX (legacy behavior).
@@ -2145,49 +2145,6 @@ def run_bot(*, settings: Dict[str, Any], token: str) -> Optional[int]:
     except Exception as e:
         log_warn(f"Failed to register commands: {e}")
 
-    # Register /discum on this same bot so one tree.sync() pushes both DataManager commands and /discum.
-    # (DiscumBot is a user-account; only this bot token can register slash commands. Single sync avoids overwriting.)
-    try:
-        import sys
-        import importlib.util
-        from pathlib import Path as _Path
-        _live_dir = _Path(__file__).resolve().parent
-        # Server: ROOT/MWDataManagerBot, ROOT/MWDiscumBot. Local: ROOT/MWBots/MWDataManagerBot, ROOT/MWBots/MWDiscumBot.
-        _candidates = [
-            _live_dir.parent / "MWDiscumBot",
-            _live_dir.parent.parent / "MWBots" / "MWDiscumBot",
-        ]
-        _dcm = None
-        for _mw_discum_dir in _candidates:
-            if not _mw_discum_dir.is_dir():
-                continue
-            _py_file = _mw_discum_dir / "discum_command_bot.py"
-            if not _py_file.exists():
-                continue
-            if str(_mw_discum_dir) not in sys.path:
-                sys.path.insert(0, str(_mw_discum_dir))
-            _spec = importlib.util.spec_from_file_location("discum_command_bot", _py_file)
-            if _spec is None or _spec.loader is None:
-                continue
-            _mod = importlib.util.module_from_spec(_spec)
-            sys.modules["discum_command_bot"] = _mod
-            _spec.loader.exec_module(_mod)
-            _dcm = _mod
-            break
-        if _dcm is not None and hasattr(_dcm, "register_discum_commands_to_bot"):
-            _dcm.register_discum_commands_to_bot(bot)
-            log_info("Registered /discum on this bot (single sync will include /discum).")
-        elif _dcm is None:
-            _tried = [str(p) for p in _candidates]
-            log_warn("Could not register /discum: MWDiscumBot/discum_command_bot.py not found. Tried: " + "; ".join(_tried))
-    except Exception as e:
-        import traceback
-        log_warn(f"Could not register /discum on this bot: {e}")
-        try:
-            log_warn("Traceback: " + "".join(traceback.format_exception(type(e), e, e.__traceback__)).replace("\n", " | ")[:500])
-        except Exception:
-            pass
-
     @bot.event
     async def on_ready() -> None:
         try:
@@ -2246,9 +2203,8 @@ def run_bot(*, settings: Dict[str, Any], token: str) -> Optional[int]:
         except Exception:
             pass
 
-        # Slash commands: copy global (e.g. /discum) into each guild and sync first, then clear global scope.
-        # Order matters: copy_global_to + sync(guild=...) must run before clear_commands(guild=None), otherwise
-        # /discum is removed from the tree before it is copied to the guild.
+        # Slash commands: copy globals into each destination guild and sync first, then clear global scope.
+        # Order matters: copy_global_to + sync(guild=...) must run before clear_commands(guild=None).
         try:
             dest_guild_ids = sorted(int(x) for x in (cfg.DESTINATION_GUILD_IDS or set()) if int(x) > 0)
         except Exception:

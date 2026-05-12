@@ -38,7 +38,7 @@ except Exception:
 _bot_log_write_count = 0
 _trace_log_write_count = 0
 
-# ---------------- Discum-style console colors ----------------
+# ---------------- Tagged console colors (ANSI prefixes per log kind) ----------------
 try:
     _colorama = importlib.import_module("colorama")
     _cinit = getattr(_colorama, "init", lambda **kwargs: None)
@@ -239,7 +239,7 @@ def write_system_log(entry: Dict[str, Any]) -> None:
 def setup_console_logging(*, verbose: bool) -> None:
     global _VERBOSE_CONSOLE
     _VERBOSE_CONSOLE = bool(verbose)
-    # Reset console so ANSI segments color only tagged parts (DiscumBot style)
+    # Reset console so ANSI segments color only tagged parts
     if platform.system().lower().startswith("win"):
         try:
             os.system("color 07")
@@ -285,7 +285,7 @@ def startup_banner(lines: List[str], *, bot_name: str = "MWDataManagerBot") -> N
 
 
 def log_debug(msg: str, *, event: Optional[str] = None, **fields: Any) -> None:
-    # Discum-style: only show debug when verbose-ish (caller can still write file logs)
+    # Only show debug on console when verbose (file logs unaffected)
     if _VERBOSE_CONSOLE:
         print(f"{_F.WHITE}[DEBUG]{_S.RESET_ALL} {_F.WHITE}{msg}{_S.RESET_ALL}", flush=True)
     entry = {"level": "DEBUG", "message": msg}
@@ -347,16 +347,6 @@ def _tag_print(tag: str, color: str, msg: str) -> None:
 def log_forward(msg: str, *, event: Optional[str] = None, **fields: Any) -> None:
     _tag_print("FORWARD", _F.MAGENTA, msg)
     entry = {"level": "INFO", "tag": "FORWARD", "message": msg}
-    if event:
-        entry["event"] = event
-    if fields:
-        entry.update(fields)
-    write_bot_log(entry)
-
-
-def log_fetchall(msg: str, *, event: Optional[str] = None, **fields: Any) -> None:
-    _tag_print("FETCHALL", _F.CYAN, msg)
-    entry = {"level": "INFO", "tag": "FETCHALL", "message": msg}
     if event:
         entry["event"] = event
     if fields:

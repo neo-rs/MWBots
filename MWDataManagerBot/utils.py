@@ -222,7 +222,7 @@ def format_embeds_for_forwarding(embeds: List[Dict[str, Any]]) -> List[Dict[str,
     """
     Trim/clean embeds to a safe dict shape before forwarding.
 
-    This is canonical so fetchall + live forwarding render embeds consistently.
+    Canonical embed shaping for outbound forwarding (consistent rendering across mirrors).
     """
     out: List[Dict[str, Any]] = []
     for e in embeds or []:

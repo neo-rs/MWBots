@@ -6,6 +6,7 @@ Notes:
 - MWDataManagerBot uses **slash commands only**.
 - Slash commands are **guild-scoped** to Mirror World via `destination_guild_ids` and require the bot to be invited with `applications.commands`.
 - Slash commands are admin-only via `manage_guild` permissions unless stated otherwise.
+- **`/discum` is not registered on this bot.** Channel mapping slash UI lives on **MWDiscumBot** (`MWBots/MWDiscumBot/discum_command_bot.py`); see that bot’s `COMMANDS.md`.
 
 ---
 
@@ -97,11 +98,6 @@ Config knobs (`config/settings.json`):
 - **Description**: Remove an ignored source channel id from a mapping.
 - **Permissions**: `manage_guild`
 
-### `/discum` (MWDiscumBot)
-
-- **Canonical owner**: **MWDiscumBot** (see `MWBots/MWDiscumBot/discum_command_bot.py`).
-- `/discum browse` is registered and handled by the Discum Command Bot (view mappings, browse source guilds/channels, map/unmap to webhooks). Run `discum_command_bot.py` in the MWDiscumBot folder to use it.
-
 ### `/fetchsync`
 
 #### `/fetchsync dryrun [source_guild_id]`
@@ -153,4 +149,4 @@ Config knobs (`config/settings.json`):
 ## Command summary
 
 - **Prefix commands**: 0
-- **Slash commands**: 20
+- **Slash commands**: 19 (documented subcommands below; no `/discum` on this application)

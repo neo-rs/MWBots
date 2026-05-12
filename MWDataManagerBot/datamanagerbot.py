@@ -9,7 +9,7 @@ Responsibilities (kept, but modularized for easier debugging):
     - classify messages (local routing) + detect global triggers
     - dedupe and forward to destination channels/webhooks
     - handle edits (on_raw_message_edit) without spam
-  - Commands (kept). Fetch-all/fetchsync run in MWDiscumBot only (single user-token consumer).
+  - Commands (prefix + slash). Channel mapping UI lives on the dedicated mapping bot, not here.
 
 Config (standalone, local-only):
   - config/tokens.env     (secrets only)
@@ -92,7 +92,7 @@ def main() -> int:
     verbose = bool(settings.get("verbose", True))
     setup_console_logging(verbose=verbose)
 
-    # Runtime proof banner (Discum/Ping style)
+    # Runtime proof banner
     proof_lines = build_runtime_proof_lines(
         bot_name="MWDataManagerBot",
         script_path=Path(__file__).resolve(),
@@ -117,7 +117,7 @@ def main() -> int:
     atexit.register(_release_single_instance_lock)
 
     # ---------------- Canonical tokens (standalone) ----------------
-    # DATAMANAGER_BOT only: no user token. Fetchall/fetchsync run in MWDiscumBot only (single user-token consumer).
+    # DATAMANAGER_BOT only (no Discord user token).
     bot_token = str(tokens.get("DATAMANAGER_BOT") or "").strip()
     if not bot_token:
         legacy = str(tokens.get("DISCORD_BOT_DATAMANAGER") or "").strip()

@@ -35,12 +35,6 @@
   "monitor_all_destination_channels": false,
   "monitor_webhook_messages_only": true,
   "use_webhooks_for_forwarding": true,
-  "fetchall_startup_clear_enabled": false,
-  "fetchall_startup_clear_category_ids": [
-    1437856372300451851
-  ],
-  "fetchall_startup_clear_only_mirror_channels": false,
-  "fetchall_startup_clear_delay_seconds": 2,
   "send_min_interval_seconds": 0.75,
   "enable_default_fallback": true,
   "enable_raw_link_unwrap": true,
@@ -105,9 +99,6 @@
   "monitor_embed_ttl_seconds": 300,
   "link_tracking_ttl_seconds": 86400,
   "forward_on_edit": true,
-  "fetchall_default_destination_category_id": 1437856372300451851,
-  "fetchall_max_messages_per_channel": 400,
-  "fetchsync_auto_poll_seconds": 60,
   "edit_cooldown_seconds": 30,
   "major_clearance_pair_ttl_seconds": 200,
   "major_clearance_send_single_on_timeout": false,

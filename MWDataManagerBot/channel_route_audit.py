@@ -15,22 +15,41 @@ Explainable output follows the repo explainable-logging section layout (ELI5 + r
 
 Optional: --mirror-category-id posts a non-destructive *preview copy* of each audited message into
 text channels named `{prefix}{tag}` under that category (see _AUDIT_MIRROR_PREFIX). This does not
-call live_forwarder (no pending-cache pairing simulation); per-message routes include
-MAJOR_CLEARANCE for Tempo/non-HD-exclusive embeds, HD_TOTAL_INVENTORY for configured HD definitive-only source,
-and matching follow-up shapes via classifier only.
+call `live_forwarder` pairing logic — **no pending-cache pairing, TTL expiry, timeout single-send,
+or definitive-inventory follow-up gate simulation**. Tags like MAJOR_CLEARANCE / MAJOR_STORES reflect
+**classifier output only** (same as which bucket would be chosen before the pairing block runs).
+
+Per-message routes include MAJOR_CLEARANCE for Tempo multi-retailer cards, generic instore-clearance
+monitor shapes (when enabled), definitive Home Depot inventory embeds, HD_TOTAL_INVENTORY when that
+1:1 route qualifies, and follow-up shapes recognized by `is_major_clearance_followup_blob`.
 
 By default, when mirroring is enabled, existing `{prefix}*` text channels in that category are deleted
 first (staging reset). Pass --no-mirror-delete-staging to keep them.
 
-Routing parity: this script imports the same `classifier` / `global_triggers` / `patterns` as
-`live_forwarder` (no duplicate route table here). After classifier or settings changes, re-run an
-audit with the same `settings.json` as production; no audit script logic update is required unless
-you add new CLI flags or summary columns.
+Routing parity: imports the same `classifier` / `global_triggers` / `patterns` as `live_forwarder`.
+Re-run audit after classifier changes using the same `settings.json` as production.
+
+**Known parity gaps vs live ingress** (audit still useful for tag selection):
+  - `live_forwarder` may augment `text_to_check` with raw-link unwrap / universal resolver before
+    classification; this script uses message content + `collect_embed_strings(embeds)` only (Discord API
+    snapshot). Rare mismatches if routing depended on unwrapped-only URLs.
+  - Live forwarding applies `_collapse_dispatch_same_destination` after `order_link_types`; audit prints
+    ordered pairs without that collapse when two tags map to the same resolved destination id.
+
+Settings keys related to major-clearance behavior (see `settings_store` / `config/settings.json`):
+  - `major_clearance_pair_ttl_seconds`, `major_clearance_send_single_on_timeout` — affect live pairing only;
+    not simulated here.
+  - `major_clearance_require_followup_for_definitive_inventory_embed` (legacy fallback key:
+    `major_clearance_require_followup_for_definitive_hd`) — live_forwarder single-send vs pending for
+    definitive inventory embeds only; not simulated here.
+  - `instore_clearance_monitor_embeds_major_clearance` — toggles generic instore-clearance monitor branch in
+    `is_major_clearance_monitor_embed_blob`.
 
 Trace / settings knobs that may appear in JSON or `classifier.matches` (examples):
   - `price_error_http_gate` when `price_error_requires_http_url` blocks PRICE_ERROR without http(s).
   - `affiliate_skip` / `affiliate_reason` for AFFILIATED_LINKS gates (e.g. food-promo / dc.comics URL skips).
   - `amz_deals_conversational_skip` for CONVERSATIONAL_DEALS (same strings as `_looks_like_conversational_amazon_deal`).
+  - `major_clearance_monitor_suppress_instore_buckets`, `definitive_major_clearance`, `tempo_major_clearance_candidate`.
 """
 
 from __future__ import annotations
