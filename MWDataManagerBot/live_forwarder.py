@@ -1922,7 +1922,17 @@ class MessageForwarder:
 
             dest_key = (dest_channel_id, f"live-{message.id}-{tag}")
             last_sent = self.sent_to_destinations.get(dest_key, 0.0)
-            if last_sent and (now - last_sent) < self.recent_ttl_seconds:
+            # Same Discord message id must not re-forward to the same destination within the global duplicate
+            # window (RECENT_TTL_SECONDS is only for rapid ingress repeats and is far too short for edits /
+            # slow double-processing). Align with dest_signature_duplicate horizon.
+            try:
+                same_msg_fwd_ttl = max(
+                    10.0,
+                    float(self.global_content_ttl_seconds or 300),
+                )
+            except Exception:
+                same_msg_fwd_ttl = 300.0
+            if last_sent and (now - last_sent) < same_msg_fwd_ttl:
                 dest_trace["decision"] = {
                     "action": "skip",
                     "reason": "dest_message_tag_throttle",

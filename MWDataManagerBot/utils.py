@@ -236,8 +236,10 @@ def format_embeds_for_forwarding(embeds: List[Dict[str, Any]]) -> List[Dict[str,
     Trim/clean embeds to a safe dict shape before forwarding.
 
     Canonical embed shaping for outbound forwarding (consistent rendering across mirrors).
+    Drops successive embeds with the same outbound identity (some monitors emit duplicate rich embeds).
     """
     out: List[Dict[str, Any]] = []
+    seen_keys: Set[str] = set()
     for e in embeds or []:
         if not isinstance(e, dict):
             continue
@@ -273,6 +275,32 @@ def format_embeds_for_forwarding(embeds: List[Dict[str, Any]]) -> List[Dict[str,
         if "footer" in e and isinstance(e.get("footer"), dict) and e["footer"].get("text"):
             embed["footer"] = {"text": e["footer"].get("text")}
         if embed:
+            dedupe_parts: List[str] = []
+            u0 = str(embed.get("url") or "").strip()
+            if u0:
+                dedupe_parts.append(normalize_url(u0))
+            if embed.get("title"):
+                dedupe_parts.append(normalize_message(str(embed.get("title"))))
+            desc0 = str(embed.get("description") or "")
+            if desc0.strip() and desc0.strip() != "\u200b":
+                dedupe_parts.append(normalize_message(desc0)[:800])
+            eflds = embed.get("fields") if isinstance(embed.get("fields"), list) else []
+            for f in eflds[:8]:
+                if not isinstance(f, dict):
+                    continue
+                dedupe_parts.append(
+                    normalize_message(str(f.get("name") or "")) + ":" + normalize_message(str(f.get("value") or ""))[:200]
+                )
+            img0 = ""
+            if isinstance(embed.get("image"), dict):
+                img0 = str(embed["image"].get("url") or "").strip()
+            if img0:
+                dedupe_parts.append(normalize_url(img0))
+            dedupe_k = "||".join(dedupe_parts)
+            if dedupe_k and dedupe_k in seen_keys:
+                continue
+            if dedupe_k:
+                seen_keys.add(dedupe_k)
             out.append(embed)
     return out[:10]
 

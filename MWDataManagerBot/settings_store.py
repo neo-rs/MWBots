@@ -59,7 +59,7 @@ UNIVERSAL_RESOLVER_FALLBACK_WHEN_NO_AMAZON_HINT: bool = True
 AFFILIATE_SKIP_LINK_ONLY_MESSAGES: bool = True
 AFFILIATED_LINKS_MIN_SUBSTANCE_CHARS: int = 80
 # AFFILIATED_LINKS send gates (evaluated only when dispatch includes AFFILIATED_LINKS).
-AFFILIATED_LINKS_DEDUPE_ENABLED: bool = False
+AFFILIATED_LINKS_DEDUPE_ENABLED: bool = True
 AFFILIATED_LINKS_DEDUPE_DOMAINS: Tuple[str, ...] = ("mavely.app.link",)
 # When True (default), duplicate skip applies to every non-Discord external URL in the message.
 # When False, only hosts listed in AFFILIATED_LINKS_DEDUPE_DOMAINS are tracked (legacy mavely-only behavior).
@@ -358,7 +358,7 @@ def init(settings: Dict[str, Any]) -> None:
     STRIP_URL_ONLY_CONTENT_WHEN_EMBEDS = bool(settings.get("strip_url_only_message_content_when_embeds", True))
     STRIP_CHANNEL_MENTIONS_ON_FORWARD = bool(settings.get("strip_channel_mentions_on_forward", True))
 
-    AFFILIATED_LINKS_DEDUPE_ENABLED = bool(settings.get("affiliated_links_dedupe_enabled", False))
+    AFFILIATED_LINKS_DEDUPE_ENABLED = bool(settings.get("affiliated_links_dedupe_enabled", True))
     _dd = settings.get("affiliated_links_dedupe_domains")
     if isinstance(_dd, list) and _dd:
         AFFILIATED_LINKS_DEDUPE_DOMAINS = tuple(
