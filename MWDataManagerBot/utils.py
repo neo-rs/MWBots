@@ -13,6 +13,19 @@ from pathlib import Path
 from patterns import THEATRE_CONTEXT_PATTERN, THEATRE_MERCH_PATTERN, THEATRE_STORE_PATTERN
 
 
+_DISCORD_CHANNEL_MENTION_RE = re.compile(r"<#[0-9]{5,25}>")
+
+
+def strip_discord_channel_mentions(text: str) -> str:
+    """Remove <#channel_id> mentions (often render as #unknown for viewers without access)."""
+    if not (text or "").strip():
+        return text or ""
+    out = _DISCORD_CHANNEL_MENTION_RE.sub("", text)
+    out = re.sub(r"[ \t]+\n", "\n", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
 def normalize_message(text: str) -> str:
     """Normalize message text for keyword scanning and signature generation."""
     if not text:

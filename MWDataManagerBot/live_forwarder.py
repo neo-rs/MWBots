@@ -14,6 +14,7 @@ from classifier import (
     is_major_clearance_monitor_embed_blob,
     order_link_types,
     qualifies_hd_total_inventory_route,
+    qualifies_major_clearance_destination,
     select_target_channel_id,
 )
 from global_triggers import detect_global_triggers
@@ -47,6 +48,7 @@ from utils import (
     is_discord_media_url,
     normalize_url,
     record_link_host_samples_from_text,
+    strip_discord_channel_mentions,
     augment_text_with_universal_resolver_fallback,
 )
 
@@ -714,8 +716,23 @@ class MessageForwarder:
             except Exception:
                 continue
 
+        # Bot `channel.send` path (reply / return_first_message) previously dropped attachments;
+        # mirror webhook_sender behavior: upload CDN attachments as files + append skipped URLs to text.
+        send_via_bot_reply_path = bool(return_first_message or reference is not None or view is not None)
+        files_first: List[Any] = []
+        skipped_attach_urls: List[str] = []
+        base_content = str(content or "")
+        if send_via_bot_reply_path and attachments:
+            from webhook_sender import prepare_attachment_files_for_bot_send
+
+            files_first, skipped_attach_urls = await prepare_attachment_files_for_bot_send(attachments)
+            if skipped_attach_urls and len(base_content) < 1900:
+                extra = "\n".join(skipped_attach_urls[:5]).strip()
+                if extra:
+                    base_content = (base_content + ("\n" if base_content else "") + extra)[:1950]
+
         first_msg = None
-        chunks = chunk_text(content, 2000)
+        chunks = chunk_text(base_content, 2000)
         for i, chunk in enumerate(chunks):
             # Simple per-destination throttle to reduce 429 spam (discord.py will still handle true rate limits).
             try:
@@ -737,13 +754,16 @@ class MessageForwarder:
                 # Use channel.send if we need the message object (return_first_message) or have reference/view
                 if return_first_message or reference is not None or view is not None:
                     # Reference/view/return_message path: use classic send to get message object
-                    first_msg = await channel.send(
+                    send_kw: Dict[str, Any] = dict(
                         content=chunk,
                         embeds=embed_objs[:10],
                         allowed_mentions=allowed_mentions,
                         reference=reference,
                         view=view,
                     )
+                    if files_first:
+                        send_kw["files"] = files_first
+                    first_msg = await channel.send(**send_kw)
                 else:
                     # Plain forward: use webhook for cleaner identity
                     await send_via_webhook_or_bot(
@@ -1466,6 +1486,12 @@ class MessageForwarder:
             except Exception:
                 pass
 
+        if bool(getattr(cfg, "STRIP_CHANNEL_MENTIONS_ON_FORWARD", True)):
+            try:
+                formatted_content = strip_discord_channel_mentions(formatted_content or "")
+            except Exception:
+                pass
+
         # Route maps apply to *destinations* (legacy MirrorWorld routing maps).
         source_group = "unknown"
         try:
@@ -1596,51 +1622,7 @@ class MessageForwarder:
                     except Exception:
                         pass
 
-            if send_single_on_timeout and expired_first_items:
-                try:
-                    import discord
-
-                    allowed_mentions = discord.AllowedMentions.none()
-                    for _k, pending_item in expired_first_items[:20]:
-                        # Safety guard: if the "first embed" match was created purely by an edit,
-                        # don't send it alone on timeout (it tends to cause false positives).
-                        if bool(pending_item.get("from_edit")):
-                            continue
-                        _inv_pending = bool(pending_item.get("was_definitive_inventory_embed")) or bool(
-                            pending_item.get("was_definitive_major_clearance")
-                        )
-                        if require_followup_inventory_embed and _inv_pending:
-                            continue
-                        src_ch = int(pending_item.get("source_channel_id") or 0)
-                        src_group = "instore" if src_ch in getattr(cfg, "SMART_SOURCE_CHANNELS_INSTORE", set()) else (
-                            "clearance" if src_ch in getattr(cfg, "SMART_SOURCE_CHANNELS_CLEARANCE", set()) else "unknown"
-                        )
-                        dest_after_exp = self._apply_route_map(source_group=src_group, dest_channel_id=major_clearance_dest)
-                        if dest_after_exp <= 0:
-                            continue
-                        await self._send_to_destination(
-                            dest_channel_id=dest_after_exp,
-                            content=str(pending_item.get("formatted_content") or ""),
-                            embeds=list(pending_item.get("embeds_out") or []),
-                            attachments=list(pending_item.get("attachments") or []) if isinstance(pending_item.get("attachments"), list) else None,
-                            webhook_username=str(pending_item.get("webhook_username") or ""),
-                            webhook_avatar_url=str(pending_item.get("webhook_avatar_url") or ""),
-                            allowed_mentions=allowed_mentions,
-                        )
-                        if cfg.VERBOSE:
-                            try:
-                                log_explainable_major_clearance_send(
-                                    variant="timeout_fallback",
-                                    message_id=int(pending_item.get("source_message_id") or 0),
-                                    source_channel_id=src_ch,
-                                    dest_channel_id=int(dest_after_exp),
-                                    route_map_applied=int(major_clearance_dest) != int(dest_after_exp),
-                                )
-                            except Exception:
-                                pass
-                except Exception as e:
-                    if cfg.VERBOSE:
-                        log_warn(f"major-clearance timeout fallback failed: {type(e).__name__}: {e}")
+            # Do not timeout-send orphan monitor embeds to MAJOR_CLEARANCE (monitor-only noise).
 
             try:
                 hd_exclusive_dispatch = bool(
@@ -1655,40 +1637,6 @@ class MessageForwarder:
             is_candidate_embed = is_major_clearance_monitor_embed_blob(text_to_check)
             if is_candidate_embed and not hd_exclusive_dispatch:
                 is_definitive_embed = is_definitive_major_clearance_embed(text_to_check)
-                if is_definitive_embed and not require_followup_inventory_embed:
-                    try:
-                        import discord
-
-                        allowed_mentions = discord.AllowedMentions.none()
-                        dest_after = self._apply_route_map(source_group=source_group, dest_channel_id=major_clearance_dest)
-                        if dest_after > 0:
-                            await self._send_to_destination(
-                                dest_channel_id=dest_after,
-                                content=str(formatted_content or ""),
-                                embeds=list(embeds_out or []),
-                                attachments=list(mc_filtered or []) if use_files else None,
-                                webhook_username=wh_username,
-                                webhook_avatar_url=wh_avatar_url,
-                                allowed_mentions=allowed_mentions,
-                            )
-                            trace["decision"] = {"action": "sent_major_clearance_single", "dest": int(dest_after)}
-                            try:
-                                write_trace_log(trace)
-                            except Exception:
-                                pass
-                            if cfg.VERBOSE:
-                                log_explainable_major_clearance_send(
-                                    variant="single_embed",
-                                    message_id=int(message.id),
-                                    source_channel_id=int(channel_id),
-                                    dest_channel_id=int(dest_after),
-                                    route_map_applied=int(major_clearance_dest) != int(dest_after),
-                                )
-                            return
-                    except Exception as e:
-                        if cfg.VERBOSE:
-                            log_warn(f"major-clearance single-send failed (msg={message.id}): {type(e).__name__}: {e}")
-                        # Fall through to paired-flow cache behavior when immediate single-send fails.
 
                 # If a follow-up arrived earlier and included a message-link, it may already be cached under our msg id.
                 followup_cached = (self.pending_major_clearance_followups or {}).get(pair_key)
@@ -1711,12 +1659,6 @@ class MessageForwarder:
                             return_first_message=True,
                         )
 
-                        followup_embed = discord.Embed(title="Follow-up", color=0xE67E22)
-                        # Use first's jump_url when available.
-                        src_jump = str(getattr(message, "jump_url", "") or "").strip()
-                        if src_jump:
-                            followup_embed.add_field(name="Source message", value=f"[Jump to original]({src_jump})", inline=False)
-
                         _fu_att = followup_cached.get("attachments") if use_files else None
                         _fu_att = self._major_clearance_attachments_without_barcode_noise(
                             _fu_att if isinstance(_fu_att, list) else None,
@@ -1725,7 +1667,7 @@ class MessageForwarder:
                         await self._send_to_destination(
                             dest_channel_id=dest_after,
                             content=str(followup_cached.get("formatted_content") or "") or "\u200b",
-                            embeds=[followup_embed.to_dict()] + list(followup_cached.get("embeds_out") or []),
+                            embeds=list(followup_cached.get("embeds_out") or []),
                             attachments=_fu_att,
                             webhook_username=str(followup_cached.get("webhook_username") or ""),
                             webhook_avatar_url=str(followup_cached.get("webhook_avatar_url") or ""),
@@ -1815,14 +1757,10 @@ class MessageForwarder:
                             allowed_mentions=allowed_mentions,
                             return_first_message=True,
                         )
-                        followup_embed = discord.Embed(title="Follow-up", color=0xE67E22)
-                        src_jump = str(pending.get("source_jump_url") or "").strip()
-                        if src_jump:
-                            followup_embed.add_field(name="Source message", value=f"[Jump to original]({src_jump})", inline=False)
                         await self._send_to_destination(
                             dest_channel_id=dest_after,
                             content=formatted_content or "\u200b",
-                            embeds=[followup_embed.to_dict()] + (embeds_out or []),
+                            embeds=list(embeds_out or []),
                             attachments=mc_filtered if use_files else None,
                             webhook_username=wh_username,
                             webhook_avatar_url=wh_avatar_url,
@@ -1882,7 +1820,9 @@ class MessageForwarder:
             # Strict clearance mode: do not spam UNCLASSIFIED with monitor-feed fragments.
             # Any shape matched by the major-clearance monitor detector is handled by pairing / clearance routing,
             # not UNCLASSIFIED — if it still has no route, skip quietly (misconfig or incomplete fragment).
-            if source_group == "clearance" and is_major_clearance_monitor_embed_blob(text_to_check):
+            if source_group == "clearance" and is_major_clearance_monitor_embed_blob(text_to_check) and not qualifies_major_clearance_destination(
+                text_to_check, message_content=content, embeds=embeds
+            ):
                 trace["decision"] = {"action": "skip", "reason": "clearance_monitor_no_route"}
                 try:
                     write_trace_log(trace)

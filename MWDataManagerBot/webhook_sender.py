@@ -436,3 +436,42 @@ async def _download_attachment_files(
             continue
     return files, skipped
 
+
+async def prepare_attachment_files_for_bot_send(
+    attachments: Optional[List[Dict[str, Any]]],
+) -> Tuple[List[Any], List[str]]:
+    """
+    Download Discord CDN attachments into discord.File objects for bot `channel.send`
+    (paired forwards, replies, return_first_message paths). Same limits as webhook sends.
+    """
+    use_files = bool(getattr(cfg, "FORWARD_ATTACHMENTS_AS_FILES", True))
+    if not use_files or not attachments:
+        return [], []
+    try:
+        max_files = int(getattr(cfg, "FORWARD_ATTACHMENTS_MAX_FILES", 10) or 10)
+    except Exception:
+        max_files = 10
+    max_files = max(0, min(10, max_files))
+    try:
+        max_bytes = int(getattr(cfg, "FORWARD_ATTACHMENTS_MAX_BYTES", 7_500_000) or 7_500_000)
+    except Exception:
+        max_bytes = 7_500_000
+    if max_bytes < 0:
+        max_bytes = 0
+    if max_files <= 0 or max_bytes <= 0:
+        return [], []
+    try:
+        import aiohttp  # type: ignore
+    except Exception:
+        return [], []
+    try:
+        async with aiohttp.ClientSession() as session:
+            return await _download_attachment_files(
+                session=session,
+                attachments=attachments,
+                max_files=max_files,
+                max_bytes=max_bytes,
+            )
+    except Exception:
+        return [], []
+

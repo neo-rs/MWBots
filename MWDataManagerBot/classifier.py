@@ -264,12 +264,11 @@ def is_tempo_monitors_major_clearance_candidate(text: str) -> bool:
     """
     TempoMonitors-powered retail stock cards (MSRP / As low as + UPC or SKU + Tempo footer).
 
-    Deal Soldier and similar bots use the **same embed shape** for Walmart, Target, Home Depot, and
-    other feeds; those cards pair with follow-up `@State ZIP - N stock @ $…` messages and must use the
-    major-clearance monitor path (suppress MAJOR_STORES; MAJOR_CLEARANCE + live_forwarder pairing).
+    Those cards pair with follow-up `@State ZIP - N stock @ $…` messages and use the major-clearance
+    monitor path (MAJOR_CLEARANCE + live_forwarder pairing).
 
-    Definitive Home Depot “Store Clearance Deals – New Item” embeds without this Tempo shape are still
-    handled via is_definitive_major_clearance_embed (evaluated first in is_major_clearance_monitor_embed_blob).
+    Plain Home Depot “Store Clearance Deals – New Item” dispatch/embed shapes (Deal Soldier, etc.) are
+    **not** Tempo monitors — they route like normal clearance/in-store leads, not MAJOR_CLEARANCE pairing.
     """
     tl = (text or "").lower()
     if not tl:
@@ -281,21 +280,23 @@ def is_tempo_monitors_major_clearance_candidate(text: str) -> bool:
     has_tempo = "tempomonitors.com" in tl or "powered by tempomonitors" in tl
     if has_msrp and has_as_low and (has_upc or has_sku) and has_tempo:
         return True
-    return is_definitive_major_clearance_embed(text)
+    return False
 
 
 def is_major_clearance_monitor_embed_blob(text: str) -> bool:
     """
-    True when the flattened message looks like a **retail stock/clearance monitor card** (not an arbitrage write-up):
+    True when the flattened message looks like a **Tempo-style retail stock monitor card** that should use
+    MAJOR_CLEARANCE pairing (follow-up stock lists), not generic Home Depot store-clearance “New Item” cards.
 
-    - Home Depot definitive “Store Clearance Deals – New Item” inventory embeds;
-    - Tempo / Deal Soldier-style cards (MSRP, As low as, SKU/UPC, Tempo footer) for any retailer;
-    - Generic instore + clearance + retailer/domain shapes when enabled in settings.
+    - TempoMonitors footer shape (MSRP / As low as + SKU or UPC + tempomonitors.com);
+    - Generic instore clearance monitor shapes when enabled (`INSTORE_CLEARANCE_MONITOR_EMBEDS_MAJOR_CLEARANCE`).
+
+    Plain definitive HD “New Item” inventory embeds (`is_definitive_major_clearance_embed`) are excluded here
+    so routine Deal Soldier / dispatch clearance monitors land in INSTORE_LEADS (clearance fallback) instead
+    of flooding MAJOR_CLEARANCE.
     """
     if not (text or "").strip():
         return False
-    if is_definitive_major_clearance_embed(text):
-        return True
     if is_tempo_monitors_major_clearance_candidate(text):
         return True
     if bool(getattr(cfg, "INSTORE_CLEARANCE_MONITOR_EMBEDS_MAJOR_CLEARANCE", True)) and is_generic_instore_clearance_monitor_blob(
@@ -373,6 +374,62 @@ def is_major_clearance_followup_blob(
     return False
 
 
+_FLIPFLIP_STORE_ARROW_LINE = re.compile(
+    r",\s*[A-Za-z][^,\n]{0,120}\s+\d{5}\s*->\s*\d+",
+    re.IGNORECASE,
+)
+
+
+def is_major_clearance_instore_stock_substance_blob(
+    text_to_check: str,
+    *,
+    message_content: str = "",
+    embeds: Optional[List[Dict[str, Any]]] = None,
+) -> bool:
+    """
+    Single-message major-clearance substance (FlipFlip-style): explicit stock/clearance prose, not bare monitor embeds.
+
+    Examples: “Found as low as” + INSTORE CLEARANCE framing, “Check your local stock”, “Stores that are showing stock”,
+    per-store lines like “Miami, Florida 33133 -> 189”.
+    """
+    try:
+        tl_all = merge_text_and_embed_strings_for_classifier(text_to_check or "", embeds or []).strip().lower()
+    except Exception:
+        tl_all = (text_to_check or "").strip().lower()
+    if not tl_all:
+        return False
+    if "check your local stock" in tl_all:
+        return True
+    if "stores that are showing stock" in tl_all:
+        return True
+    if "found as low as" in tl_all and "instore clearance" in tl_all:
+        return True
+    if "found as low as" in tl_all and "prices vary by location" in tl_all:
+        return True
+    if _FLIPFLIP_STORE_ARROW_LINE.search(tl_all):
+        return True
+    return False
+
+
+def qualifies_major_clearance_destination(
+    text_to_check: str,
+    *,
+    message_content: str = "",
+    embeds: Optional[List[Dict[str, Any]]] = None,
+) -> bool:
+    """
+    True when a message may route to MAJOR_CLEARANCE: stock-list follow-up shapes OR FlipFlip-style substance.
+    Bare Tempo / generic clearance monitor embeds (monitor blob alone) do not qualify.
+    """
+    if is_major_clearance_instore_stock_substance_blob(
+        text_to_check, message_content=message_content, embeds=embeds
+    ):
+        return True
+    if is_major_clearance_followup_blob(text_to_check, message_content=message_content, embeds=embeds):
+        return True
+    return False
+
+
 def classify_instore_destination(
     text_to_check: str,
     where_location: str,
@@ -381,6 +438,9 @@ def classify_instore_destination(
     instore_required: bool,
     instore_context: bool,
     trace: Optional[Dict[str, Any]] = None,
+    *,
+    embeds: Optional[List[Dict[str, Any]]] = None,
+    message_content: str = "",
 ) -> Optional[Tuple[int, str]]:
     """
     Canonical instore classification logic (single source of truth).
@@ -456,15 +516,19 @@ def classify_instore_destination(
         return cfg.SMARTFILTER_INSTORE_SNEAKERS_CHANNEL_ID, "INSTORE_SNEAKERS"
     if theatre_hit and cfg.SMARTFILTER_INSTORE_THEATRE_CHANNEL_ID:
         return cfg.SMARTFILTER_INSTORE_THEATRE_CHANNEL_ID, "INSTORE_THEATRE"
-    # HD clearance monitors + Tempo stock embeds: never MAJOR_STORES / DISCOUNTED / INSTORE_LEADS.
-    # live_forwarder major-clearance pairing + sends own these on configured source channels.
-    if int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0) > 0 and is_major_clearance_monitor_embed_blob(
-        text_to_check or ""
+    # Routed to MAJOR_CLEARANCE (substance or follow-up shape): do not also bucket as generic instore.
+    mc_dest_id = int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0)
+    try:
+        pe_full = merge_text_and_embed_strings_for_classifier(text_to_check or "", embeds or [])
+    except Exception:
+        pe_full = text_to_check or ""
+    if mc_dest_id > 0 and qualifies_major_clearance_destination(
+        pe_full, message_content=message_content or "", embeds=embeds
     ):
         if trace is not None:
             try:
                 trace.setdefault("classifier", {}).setdefault("matches", {})[
-                    "major_clearance_monitor_suppress_instore_buckets"
+                    "major_clearance_route_suppress_instore_buckets"
                 ] = True
             except Exception:
                 pass
@@ -473,9 +537,25 @@ def classify_instore_destination(
         return cfg.SMARTFILTER_MAJOR_STORES_CHANNEL_ID, "MAJOR_STORES"
     if discounted_hit and cfg.SMARTFILTER_DISCOUNTED_STORES_CHANNEL_ID:
         return cfg.SMARTFILTER_DISCOUNTED_STORES_CHANNEL_ID, "DISCOUNTED_STORES"
+    # Bare Tempo / monitor embed with no stock substance — do not dump into INSTORE_LEADS (noise).
+    try:
+        pe_full2 = merge_text_and_embed_strings_for_classifier(text_to_check or "", embeds or [])
+    except Exception:
+        pe_full2 = text_to_check or ""
+    if is_major_clearance_monitor_embed_blob(pe_full2) and not qualifies_major_clearance_destination(
+        pe_full2, message_content=message_content or "", embeds=embeds
+    ):
+        if trace is not None:
+            try:
+                trace.setdefault("classifier", {}).setdefault("matches", {})[
+                    "bare_major_clearance_monitor_skip_instore_leads"
+                ] = True
+            except Exception:
+                pass
+        return None
     if cfg.SMARTFILTER_INSTORE_LEADS_CHANNEL_ID:
         return cfg.SMARTFILTER_INSTORE_LEADS_CHANNEL_ID, "INSTORE_LEADS"
-    
+
     return None
 
 
@@ -904,12 +984,12 @@ def select_target_channel_id(
     ):
         return hd_inv_dest, "HD_TOTAL_INVENTORY"
 
-    # CLEARANCE routing policy:
-    # Clearance source channels should not participate in general routing (PRICE_ERROR/flips/etc).
-    # Monitor-shaped posts use MAJOR_CLEARANCE (see is_major_clearance_monitor_embed_blob).
+    # CLEARANCE routing policy: MAJOR_CLEARANCE only for stock substance or follow-up shapes (not monitor-only).
     if source_group == "clearance":
         mc_id = int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0)
-        if mc_id > 0 and is_major_clearance_monitor_embed_blob(pe_sel):
+        if mc_id > 0 and qualifies_major_clearance_destination(
+            pe_sel, message_content=message_content or "", embeds=embeds
+        ):
             if trace is not None:
                 try:
                     trace.setdefault("classifier", {}).setdefault("matches", {})["definitive_major_clearance"] = bool(
@@ -918,6 +998,11 @@ def select_target_channel_id(
                     trace.setdefault("classifier", {}).setdefault("matches", {})["tempo_major_clearance_candidate"] = bool(
                         is_tempo_monitors_major_clearance_candidate(pe_sel)
                     )
+                    trace.setdefault("classifier", {}).setdefault("matches", {})["major_clearance_substance"] = bool(
+                        is_major_clearance_instore_stock_substance_blob(
+                            pe_sel, message_content=message_content or "", embeds=embeds
+                        )
+                    )
                 except Exception:
                     pass
             return mc_id, "MAJOR_CLEARANCE"
@@ -925,9 +1010,8 @@ def select_target_channel_id(
 
     mc_id = int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0)
     skip_amazon = bool(source_group == "clearance")
-    if mc_id > 0 and is_instore_source and (
-        is_major_clearance_monitor_embed_blob(pe_sel)
-        or is_major_clearance_followup_blob(pe_sel, message_content=message_content or "", embeds=embeds)
+    if mc_id > 0 and is_instore_source and qualifies_major_clearance_destination(
+        pe_sel, message_content=message_content or "", embeds=embeds
     ):
         skip_amazon = True
     if trace is not None:
@@ -1121,12 +1205,12 @@ def select_target_channel_id(
         instore_required=instore_required,
         instore_context=instore_context,
         trace=trace,
+        embeds=embeds,
+        message_content=message_content or "",
     )
     if instore_result:
         return instore_result
-    if mc_id > 0 and is_instore_source and is_major_clearance_monitor_embed_blob(pe_sel):
-        return mc_id, "MAJOR_CLEARANCE"
-    if mc_id > 0 and is_instore_source and is_major_clearance_followup_blob(
+    if mc_id > 0 and is_instore_source and qualifies_major_clearance_destination(
         pe_sel, message_content=message_content or "", embeds=embeds
     ):
         return mc_id, "MAJOR_CLEARANCE"
@@ -1290,9 +1374,9 @@ def detect_all_link_types(
 
     mc_id = int(getattr(cfg, "SMARTFILTER_MAJOR_CLEARANCE_CHANNEL_ID", 0) or 0)
     skip_amazon = bool(source_group == "clearance")
-    if mc_id > 0 and is_instore_source and (
-        is_major_clearance_monitor_embed_blob(pe_check_blob)
-        or is_major_clearance_followup_blob(
+    if mc_id > 0 and (
+        (is_instore_source or source_group == "clearance")
+        and qualifies_major_clearance_destination(
             pe_check_blob, message_content=message_content or "", embeds=embeds
         )
     ):
@@ -1303,11 +1387,11 @@ def detect_all_link_types(
         except Exception:
             pass
 
-    # CLEARANCE routing policy:
-    # Clearance source channels should not participate in general routing (PRICE_ERROR / flips / etc.).
-    # Monitor-shaped posts route to MAJOR_CLEARANCE only (see is_major_clearance_monitor_embed_blob).
+    # CLEARANCE routing policy: MAJOR_CLEARANCE only when substance / follow-up qualifies (see qualifies_major_clearance_destination).
     if source_group == "clearance":
-        if mc_id > 0 and is_major_clearance_monitor_embed_blob(pe_check_blob):
+        if mc_id > 0 and qualifies_major_clearance_destination(
+            pe_check_blob, message_content=message_content or "", embeds=embeds
+        ):
             if trace is not None:
                 try:
                     trace.setdefault("classifier", {}).setdefault("matches", {})["definitive_major_clearance"] = bool(
@@ -1504,6 +1588,8 @@ def detect_all_link_types(
         instore_required=instore_required,
         instore_context=instore_context,
         trace=trace,
+        embeds=embeds,
+        message_content=message_content or "",
     )
     if instore_selection:
         results.append(instore_selection)
@@ -1511,17 +1597,10 @@ def detect_all_link_types(
     if (
         mc_id > 0
         and is_instore_source
-        and is_major_clearance_monitor_embed_blob(pe_check_blob)
-        and not instore_selection
-    ):
-        results.append((mc_id, "MAJOR_CLEARANCE"))
-
-    if (
-        mc_id > 0
-        and is_instore_source
-        and is_major_clearance_followup_blob(
+        and qualifies_major_clearance_destination(
             pe_check_blob, message_content=message_content or "", embeds=embeds
         )
+        and not instore_selection
         and not any(tag == "MAJOR_CLEARANCE" for _, tag in results)
     ):
         results.append((mc_id, "MAJOR_CLEARANCE"))

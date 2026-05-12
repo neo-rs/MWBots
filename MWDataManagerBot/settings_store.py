@@ -70,6 +70,8 @@ AFFILIATED_LINKS_REQUIRE_EXTERNAL_HTTP_LINK: bool = False
 
 # Forwarding: if message content is URL-only and we are sending embeds, drop content (no duplicate top line).
 STRIP_URL_ONLY_CONTENT_WHEN_EMBEDS: bool = True
+# Remove <#channel_id> from outbound text (often shows as #unknown for viewers without access).
+STRIP_CHANNEL_MENTIONS_ON_FORWARD: bool = True
 
 # Local destinations
 SMARTFILTER_AMAZON_CHANNEL_ID: int = 0
@@ -217,6 +219,7 @@ def init(settings: Dict[str, Any]) -> None:
     global AFFILIATED_LINKS_DEDUPE_ALL_EXTERNAL_URLS, AFFILIATED_LINKS_DEDUPE_TTL_SECONDS
     global AFFILIATED_LINKS_REQUIRE_IMAGE, AFFILIATED_LINKS_REQUIRE_EXTERNAL_HTTP_LINK
     global STRIP_URL_ONLY_CONTENT_WHEN_EMBEDS
+    global STRIP_CHANNEL_MENTIONS_ON_FORWARD
     global SMARTFILTER_AMAZON_CHANNEL_ID, SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID, SMARTFILTER_CONVERSATIONAL_DEALS_CHANNEL_ID, SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID
     global SMARTFILTER_UPCOMING_CHANNEL_ID, SMARTFILTER_INSTORE_LEADS_CHANNEL_ID, SMARTFILTER_MAJOR_STORES_CHANNEL_ID
     global SMARTFILTER_DISCOUNTED_STORES_CHANNEL_ID, SMARTFILTER_INSTORE_SEASONAL_CHANNEL_ID, SMARTFILTER_INSTORE_SNEAKERS_CHANNEL_ID
@@ -353,6 +356,7 @@ def init(settings: Dict[str, Any]) -> None:
     if AFFILIATED_LINKS_MIN_SUBSTANCE_CHARS > 600:
         AFFILIATED_LINKS_MIN_SUBSTANCE_CHARS = 600
     STRIP_URL_ONLY_CONTENT_WHEN_EMBEDS = bool(settings.get("strip_url_only_message_content_when_embeds", True))
+    STRIP_CHANNEL_MENTIONS_ON_FORWARD = bool(settings.get("strip_channel_mentions_on_forward", True))
 
     AFFILIATED_LINKS_DEDUPE_ENABLED = bool(settings.get("affiliated_links_dedupe_enabled", False))
     _dd = settings.get("affiliated_links_dedupe_domains")
