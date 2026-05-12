@@ -695,6 +695,89 @@ def _affiliate_blob_is_raffle_release_monitor(blob: str) -> bool:
     return False
 
 
+def _affiliate_url_host_is_twitter_or_x(host: str) -> bool:
+    """Hosts used for X/Twitter posts and short links — not merchant checkout for affiliated-leads."""
+    h = (host or "").lower().strip()
+    if h.startswith("www."):
+        h = h[4:]
+    if not h:
+        return False
+    if h in ("twitter.com", "x.com", "t.co", "mobile.twitter.com"):
+        return True
+    if h.endswith(".twitter.com") or h.endswith(".x.com"):
+        return True
+    if h == "twimg.com" or h.endswith(".twimg.com"):
+        return True
+    return False
+
+
+def _blob_has_real_outbound_deal_url(blob: str) -> bool:
+    """
+    True when the blob includes at least one http(s) URL that is not only:
+    Discord CDN / Discord app links, or FlipFluence / RingInTheDeals brand surfaces.
+
+    Used so AFFILIATED_LINKS does not fire on Rerouter \"breaking\" cards where the only URLs are
+    preview CDN links or author/homepage links that do not render as an obvious deal link.
+
+    When ``flipfluence`` appears in the blob, X/Twitter post URLs (twitter.com / x.com / t.co / twimg)
+    are ignored so tweet + X embed mirrors do not count as affiliate merchant links.
+    """
+    raw = str(blob or "")
+    sl = raw.lower()
+    ff_ctx = "flipfluence" in sl
+    cdn_hosts = frozenset({"cdn.discordapp.com", "media.discordapp.net", "cdn.discordapp.net"})
+    try:
+        found = re.findall(r"https?://[^\s<>\"]+", raw, flags=re.IGNORECASE)
+    except Exception:
+        found = []
+    for u in found or []:
+        ul = str(u or "").strip()
+        if not ul or "..." in ul:
+            continue
+        try:
+            h = (urlparse(ul).netloc or "").lower()
+            if h.startswith("www."):
+                h = h[4:]
+        except Exception:
+            h = ""
+        if not h or "." not in h:
+            continue
+        if h in cdn_hosts:
+            continue
+        if h in ("discord.com", "discordapp.com", "discord.gg", "discord.me") or h.endswith(".discord.com"):
+            continue
+        if h == "flipfluence.com" or h.endswith(".flipfluence.com"):
+            continue
+        if h == "ringinthedeals.com" or h.endswith(".ringinthedeals.com"):
+            continue
+        if ff_ctx and _affiliate_url_host_is_twitter_or_x(h):
+            continue
+        return True
+    return False
+
+
+_DRAW_LIVE_AFFILIATE_NOISE_PATTERN = re.compile(r"(?i)\bdraw\s+live\b")
+_PRODUCT_LINK_TILE_PATTERN = re.compile(r"(?i)\bproduct\s+link\b")
+
+
+def is_flipfluence_draw_live_product_link_affiliate_noise(blob: str) -> bool:
+    """
+    FlipFluence live-drop tiles: DRAW LIVE + hyperlink label \"Product Link\" (minimal tile, not a write-up lead).
+    """
+    raw = str(blob or "")
+    sl = raw.lower()
+    if "flipfluence" not in sl:
+        return False
+    if not _DRAW_LIVE_AFFILIATE_NOISE_PATTERN.search(raw):
+        return False
+    if _PRODUCT_LINK_TILE_PATTERN.search(raw):
+        return True
+    # Same live-drop ping with raw mavely short link in body (no "Product Link" label).
+    if "mavely.app" in sl:
+        return True
+    return False
+
+
 def _affiliate_text_strip_markdown_noise(blob: str) -> str:
     """So **Retail:** $12 embed fields match price-grid guards."""
     s = str(blob or "")
@@ -713,6 +796,20 @@ def affiliate_should_suppress_affiliated_links(blob: str, *, min_core_chars: int
         return "empty"
     if is_food_promotion_affiliate_noise_blob(raw):
         return "food_promotion_noise"
+    # FlipFluence + Rerouter embeds: skip conversational deals, but they still carry author.url / CDN
+    # previews that matched AFFILIATED_LINKS "non-Discord URL" heuristics without a real deal link.
+    try:
+        _ff_rr = _FLIPFLUENCE_REROUTER_BYLINE_PATTERN.search(raw)
+    except Exception:
+        _ff_rr = None
+    if _ff_rr and not _blob_has_real_outbound_deal_url(raw):
+        return "flipfluence_rerouter_no_deal_url"
+    # FlipFluence + X/Twitter mirror (tweet in body + \"From: … | By: … | X\" embed) — not merchant affiliate leads.
+    if "flipfluence" in raw.lower() and not _blob_has_real_outbound_deal_url(raw):
+        if re.search(r"(?i)from:\s*flipfluence\s*\|\s*by:\s*flipfluence\s*\|\s*x\b", raw):
+            return "flipfluence_x_embed_no_merchant_url"
+    if is_flipfluence_draw_live_product_link_affiliate_noise(raw):
+        return "flipfluence_draw_live_product_link"
     if blob_has_dc_comics_publisher_url(raw):
         return "dc_comics_publisher_url"
     core_len = deal_substance_core_len(raw)
