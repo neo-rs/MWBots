@@ -1665,6 +1665,45 @@ STORE_DOMAINS = {
     "gamestop.com": "gamestop",
 }
 
+
+_CLEARANCE_MONITOR_EMBED_SIGNAL_RE = re.compile(
+    r"\$|\bmsrp\b|\bas\s+low\s+as\b|\bsku\b|\bupc\b|\binternet\s+number\b|\btotal\s+inventory\b|"
+    r"\bpercentage\s+off\b|\bdollar\s+off\b|\boriginal\s+price\b|\bfound\s+as\s+low\b|\bwas\b\s*[:\-]",
+    re.IGNORECASE,
+)
+
+
+def is_generic_instore_clearance_monitor_blob(text: str) -> bool:
+    """
+    Retail clearance monitor embed shape (not tied to one retailer): instore/in-store + clearance +
+    a named store or merchant URL + typical monitor/deal tokens.
+
+    Feed bots often rotate Walmart / Target / Lowe's / Home Depot / others while keeping the same layout;
+    this avoids treating those as generic MAJOR_STORES arbitrage leads.
+    Excludes Retail:/Resell:/Where: arbitrage write-ups (INSTORE_LEADS / other buckets).
+    """
+    tl = (text or "").lower()
+    if not tl.strip():
+        return False
+    if "clearance" not in tl:
+        return False
+    if not re.search(r"\b(in\s*store|instore|in-store)\b", tl):
+        return False
+    if re.search(r"\bretail\s*[:\-]|\bresell\s*[:\-]|\bwhere\s*[:\-]|\blocation\s*[:\-]", tl):
+        return False
+    retail_anchor = bool(ALL_STORE_PATTERN.search(tl))
+    if not retail_anchor:
+        for dom in (STORE_DOMAINS or {}).keys():
+            if str(dom).lower() in tl:
+                retail_anchor = True
+                break
+    if not retail_anchor:
+        return False
+    if not _CLEARANCE_MONITOR_EMBED_SIGNAL_RE.search(tl):
+        return False
+    return True
+
+
 # Label/header detection (used for in-store style messages)
 LABEL_PATTERN = re.compile(r"(?im)^\s*(retail|resell|where|location|store)\s*[:\-]\s*.+$")
 

@@ -21,6 +21,16 @@ and matching follow-up shapes via classifier only.
 
 By default, when mirroring is enabled, existing `{prefix}*` text channels in that category are deleted
 first (staging reset). Pass --no-mirror-delete-staging to keep them.
+
+Routing parity: this script imports the same `classifier` / `global_triggers` / `patterns` as
+`live_forwarder` (no duplicate route table here). After classifier or settings changes, re-run an
+audit with the same `settings.json` as production; no audit script logic update is required unless
+you add new CLI flags or summary columns.
+
+Trace / settings knobs that may appear in JSON or `classifier.matches` (examples):
+  - `price_error_http_gate` when `price_error_requires_http_url` blocks PRICE_ERROR without http(s).
+  - `affiliate_skip` / `affiliate_reason` for AFFILIATED_LINKS gates (e.g. food-promo / dc.comics URL skips).
+  - `amz_deals_conversational_skip` for CONVERSATIONAL_DEALS (same strings as `_looks_like_conversational_amazon_deal`).
 """
 
 from __future__ import annotations

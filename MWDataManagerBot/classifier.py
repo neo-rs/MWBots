@@ -40,6 +40,7 @@ from patterns import (
     CARDS_PATTERN,
     DISCOUNTED_STORE_PATTERN,
     INSTORE_KEYWORDS,
+    is_generic_instore_clearance_monitor_blob,
     LABEL_PATTERN,
     MAJOR_STORE_PATTERN,
     PRICE_ERROR_PATTERN,
@@ -285,12 +286,21 @@ def is_tempo_monitors_major_clearance_candidate(text: str) -> bool:
 
 
 def is_major_clearance_monitor_embed_blob(text: str) -> bool:
-    """True for definitive HD clearance embeds OR Tempo **Home Depot** stock-monitor embed shape."""
+    """
+    True for definitive HD clearance embeds, Tempo Home Depot stock-monitor shape, or generic
+    instore-clearance retail monitor embeds (multi-retailer feeds sharing the same format).
+    """
     if not (text or "").strip():
         return False
     if is_definitive_major_clearance_embed(text):
         return True
-    return is_tempo_monitors_major_clearance_candidate(text)
+    if is_tempo_monitors_major_clearance_candidate(text):
+        return True
+    if bool(getattr(cfg, "INSTORE_CLEARANCE_MONITOR_EMBEDS_MAJOR_CLEARANCE", True)) and is_generic_instore_clearance_monitor_blob(
+        text
+    ):
+        return True
+    return False
 
 
 _DISCORD_MESSAGE_LINK_ONLY = re.compile(
@@ -354,6 +364,9 @@ def is_major_clearance_followup_blob(
         return True
 
     if re.search(r"\bstock\s*@\s*\$?\s*\d+", tl_all):
+        return True
+    # Per-store breakdown lines: "@Alabama 35034 - 4 stock @ $20"
+    if re.search(r"@\s*.+?\s+\d{5}\s*-\s*\d+\s+stock\s*@", tl_all):
         return True
     return False
 

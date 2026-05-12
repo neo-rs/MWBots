@@ -100,7 +100,7 @@
     "AMAZON_PROFITABLE_LEADS": 1438969997178306661,
     "MAJOR_CLEARANCE": 1493123870465720440
   },
-  "recent_ttl_seconds": 10,
+  "recent_ttl_seconds": 20,
   "global_duplicate_ttl_seconds": 300,
   "monitor_embed_ttl_seconds": 300,
   "link_tracking_ttl_seconds": 86400,
@@ -111,6 +111,8 @@
   "edit_cooldown_seconds": 30,
   "major_clearance_pair_ttl_seconds": 200,
   "major_clearance_send_single_on_timeout": false,
+  "major_clearance_require_followup_for_definitive_hd": true,
+  "instore_clearance_monitor_embeds_major_clearance": true,
   "hd_total_inventory_source_channel_id": 1435308770128298044,
   "hd_total_inventory_destination_channel_id": 1484118129402450041,
   "hd_total_inventory_min_total": 500,

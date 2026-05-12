@@ -126,6 +126,12 @@ FALLBACK_CHANNEL_ID: int = 0
 EDIT_COOLDOWN_SECONDS: int = 30
 MAJOR_CLEARANCE_PAIR_TTL_SECONDS: int = 180
 MAJOR_CLEARANCE_SEND_SINGLE_ON_TIMEOUT: bool = False
+# When True, definitive Home Depot "total inventory only" embeds do not post alone to MAJOR_CLEARANCE;
+# they wait for a follow-up with per-store stock lines (or timeout behavior per MAJOR_CLEARANCE_SEND_SINGLE_ON_TIMEOUT).
+MAJOR_CLEARANCE_REQUIRE_FOLLOWUP_FOR_DEFINITIVE_HD: bool = True
+# When True, format-based instore clearance monitor embeds (any major retailer / merchant URL) classify as
+# major-clearance monitors — same path as HD definitive / Tempo HD (suppress MAJOR_STORES; MAJOR_CLEARANCE elsewhere).
+INSTORE_CLEARANCE_MONITOR_EMBEDS_MAJOR_CLEARANCE: bool = True
 
 # Optional: explicit allowlist of source channels that should use the major-clearance paired-flow.
 # If empty, the bot falls back to `source_channel_ids_clearance`.
@@ -227,6 +233,7 @@ def init(settings: Dict[str, Any]) -> None:
     global FALLBACK_CHANNEL_ID
     global EDIT_COOLDOWN_SECONDS
     global MAJOR_CLEARANCE_PAIR_TTL_SECONDS, MAJOR_CLEARANCE_SEND_SINGLE_ON_TIMEOUT
+    global MAJOR_CLEARANCE_REQUIRE_FOLLOWUP_FOR_DEFINITIVE_HD, INSTORE_CLEARANCE_MONITOR_EMBEDS_MAJOR_CLEARANCE
     global MAJOR_CLEARANCE_SOURCE_CHANNEL_IDS
     global DEBUG_REACTIONS_ENABLED, DEBUG_REACTIONS_ALLOW_CHANNEL_IDS
     global DEBUG_REACTIONS_EMOJI_ALLOWED, DEBUG_REACTIONS_EMOJI_BLOCKED
@@ -445,6 +452,12 @@ def init(settings: Dict[str, Any]) -> None:
     if MAJOR_CLEARANCE_PAIR_TTL_SECONDS < 10:
         MAJOR_CLEARANCE_PAIR_TTL_SECONDS = 10
     MAJOR_CLEARANCE_SEND_SINGLE_ON_TIMEOUT = bool(settings.get("major_clearance_send_single_on_timeout", False))
+    MAJOR_CLEARANCE_REQUIRE_FOLLOWUP_FOR_DEFINITIVE_HD = bool(
+        settings.get("major_clearance_require_followup_for_definitive_hd", True)
+    )
+    INSTORE_CLEARANCE_MONITOR_EMBEDS_MAJOR_CLEARANCE = bool(
+        settings.get("instore_clearance_monitor_embeds_major_clearance", True)
+    )
     MAJOR_CLEARANCE_SOURCE_CHANNEL_IDS = _parse_int_set(settings.get("major_clearance_source_channel_ids"))
 
     # Debug reactions (disabled by default).

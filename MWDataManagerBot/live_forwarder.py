@@ -114,9 +114,9 @@ def _major_clearance_pairing_source_channel_ids() -> Set[int]:
     """
     Channels where Tempo/HD major-clearance embeds use the pending-cache pairing flow.
 
-    `major_clearance_source_channel_ids` extends the default (all `source_channel_ids_clearance`);
-    it must not *replace* clearance — otherwise clearance Tempos never enter pairing and MAJOR_CLEARANCE
-    is sent immediately by the normal dispatch loop (single embed, no follow-up).
+    `major_clearance_source_channel_ids` extends the default (`source_channel_ids_clearance` ∪
+    `source_channel_ids_instore`); it must not *replace* those sets — otherwise configured Tempos never
+    enter pairing and MAJOR_CLEARANCE can be sent immediately by the normal dispatch loop (single embed).
     """
     try:
         explicit = set(getattr(cfg, "MAJOR_CLEARANCE_SOURCE_CHANNEL_IDS", set()) or set())
@@ -126,9 +126,13 @@ def _major_clearance_pairing_source_channel_ids() -> Set[int]:
         clearance = set(getattr(cfg, "SMART_SOURCE_CHANNELS_CLEARANCE", set()) or set())
     except Exception:
         clearance = set()
+    try:
+        instore = set(getattr(cfg, "SMART_SOURCE_CHANNELS_INSTORE", set()) or set())
+    except Exception:
+        instore = set()
     if not explicit:
-        return clearance
-    return explicit | clearance
+        return clearance | instore
+    return explicit | clearance | instore
 
 
 def _should_filter_message(payload: Dict[str, Any]) -> bool:
@@ -1541,6 +1545,10 @@ class MessageForwarder:
             if ttl_s < 10:
                 ttl_s = 10.0
             send_single_on_timeout = bool(getattr(cfg, "MAJOR_CLEARANCE_SEND_SINGLE_ON_TIMEOUT", False))
+            try:
+                require_fu_hd = bool(getattr(cfg, "MAJOR_CLEARANCE_REQUIRE_FOLLOWUP_FOR_DEFINITIVE_HD", True))
+            except Exception:
+                require_fu_hd = True
             mc_filtered = self._major_clearance_attachments_without_barcode_noise(
                 attachments if use_files else None,
                 embeds,
@@ -1596,6 +1604,8 @@ class MessageForwarder:
                         # don't send it alone on timeout (it tends to cause false positives).
                         if bool(pending_item.get("from_edit")):
                             continue
+                        if require_fu_hd and bool(pending_item.get("was_definitive_major_clearance")):
+                            continue
                         src_ch = int(pending_item.get("source_channel_id") or 0)
                         src_group = "instore" if src_ch in getattr(cfg, "SMART_SOURCE_CHANNELS_INSTORE", set()) else (
                             "clearance" if src_ch in getattr(cfg, "SMART_SOURCE_CHANNELS_CLEARANCE", set()) else "unknown"
@@ -1640,7 +1650,7 @@ class MessageForwarder:
             is_candidate_embed = is_major_clearance_monitor_embed_blob(text_to_check)
             if is_candidate_embed and not hd_exclusive_dispatch:
                 is_definitive_embed = is_definitive_major_clearance_embed(text_to_check)
-                if is_definitive_embed:
+                if is_definitive_embed and not require_fu_hd:
                     try:
                         import discord
 
@@ -1750,6 +1760,7 @@ class MessageForwarder:
                     "source_channel_id": source_ch_id,
                     "source_message_id": embed_msg_id,
                     "from_edit": bool(is_edit),
+                    "was_definitive_major_clearance": bool(is_definitive_embed and require_fu_hd),
                 }
                 # Track "latest pending embed" by sender so follow-ups without an explicit link can still pair.
                 try:
