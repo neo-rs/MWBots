@@ -1265,6 +1265,12 @@ MAJOR_STORES = [
     "bloomingdales",
     "barneys",
     "barney's",
+    # Fashion / beauty / sports retail (flip-template "Where:" / "Location:" lines)
+    "bath & body works",
+    "bath and body works",
+    "h&m",
+    "mlb store",
+    "mlb shop",
     "lord & taylor",
     "nordstrom rack",
     "saks off 5th",
