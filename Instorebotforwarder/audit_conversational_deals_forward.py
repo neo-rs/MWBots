@@ -70,19 +70,39 @@ def _parse_discord_message_link(link: str) -> Tuple[Optional[int], int, int]:
 
 
 def repo_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    """
+    Resolve the mirror-world repo root from this file's location.
+
+    Two real layouts are in use:
+      - Local Windows checkout:  `<repo>/MWBots/Instorebotforwarder/<this>.py`
+        -> parents[2] is the repo root.
+      - Oracle live tree (flat): `<repo>/Instorebotforwarder/<this>.py`
+        -> parents[1] is the repo root.
+    We pick the first parent that contains the canonical `MWBots/` directory
+    OR a tracked top-level marker (`RSAdminBot/`); falling back to parents[2]
+    keeps backward-compat with anything that previously relied on it.
+    """
+    here = Path(__file__).resolve().parent
+    for p in (here.parents[0], here.parents[1] if len(here.parents) > 1 else here, here.parents[2] if len(here.parents) > 2 else here):
+        if (p / "MWBots").is_dir() or (p / "RSAdminBot").is_dir():
+            return p
+    return Path(__file__).resolve().parents[2] if len(Path(__file__).resolve().parents) > 2 else Path(__file__).resolve().parent
 
 
 def load_instore_config() -> Dict[str, Any]:
     """
     Canonical loader for Instorebotforwarder runtime config + secrets.
 
-    Reads `MWBots/Instorebotforwarder/config.json` and overlays
-    `MWBots/Instorebotforwarder/config.secrets.json` (latter wins, e.g. bot_token,
-    gemini_api_key). Returned dict is what every standalone Instore CLI tool consumes.
+    Reads `config.json` and overlays `config.secrets.json` (latter wins, e.g.
+    bot_token, gemini_api_key). The files are resolved relative to THIS file's
+    directory, which works for both layouts:
+      - Local:  `<repo>/MWBots/Instorebotforwarder/config*.json`
+      - Oracle: `<repo>/Instorebotforwarder/config*.json`
+    so every standalone Instore CLI tool gets the right config in either spot.
     """
-    cfg_path = repo_root() / "MWBots" / "Instorebotforwarder" / "config.json"
-    sec_path = repo_root() / "MWBots" / "Instorebotforwarder" / "config.secrets.json"
+    here = Path(__file__).resolve().parent
+    cfg_path = here / "config.json"
+    sec_path = here / "config.secrets.json"
     cfg: Dict[str, Any] = {}
     try:
         cfg = json.loads(cfg_path.read_text(encoding="utf-8"))

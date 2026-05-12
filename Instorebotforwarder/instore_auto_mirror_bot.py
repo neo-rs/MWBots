@@ -67,6 +67,16 @@ except Exception:
     )
 try:
     # Oracle live tree (module sits alongside this file).
+    from amazon_buybox_dom_screenshot import (  # type: ignore
+        capture_amazon_buybox_screenshot,
+    )
+except Exception:
+    # MWBots repo layout / package import.
+    from Instorebotforwarder.amazon_buybox_dom_screenshot import (  # type: ignore
+        capture_amazon_buybox_screenshot,
+    )
+try:
+    # Oracle live tree (module sits alongside this file).
     from retail_product_link_listener import maybe_reply_retail_product_links  # type: ignore
 except Exception:
     # MWBots repo layout / package import.
@@ -1253,6 +1263,62 @@ class InstorebotForwarder:
             )
         if str(result.get("status") or "") == "ok":
             self._ebay_scrape_cache_put(q, result)
+        return result
+
+    def _amazon_buybox_screenshot_enabled(self) -> bool:
+        v = (self.config or {}).get("amazon_buybox_screenshot_enabled", None)
+        if isinstance(v, bool):
+            return v
+        s = str(v or "").strip().lower()
+        if s in {"1", "true", "yes", "y", "on"}:
+            return True
+        return False
+
+    async def _scrape_amazon_buybox_screenshot(
+        self,
+        amazon_url: str,
+        *,
+        dest_channel_id: Optional[int] = None,
+        source_channel_id: Optional[int] = None,
+        source_label: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Capture a clipped PNG of the Amazon product page price/coupon block and
+        the buybox column (canonical: `#apex_desktop` + `form#addToCart`) using
+        the same trusted CDP Chrome the eBay scraper attaches to.
+
+        Returns a dict with at least: status, screenshot_path, reason, targets.
+        Never raises - any browser/playwright failure is captured in the result.
+        """
+        u = (amazon_url or "").strip()
+        if not u:
+            return {"status": "no_url", "reason": "missing amazon url", "screenshot_path": ""}
+        _log_flow(
+            "AMAZON_BUYBOX_START",
+            url=u[:140],
+            dest_channel_id=dest_channel_id,
+            source_channel_id=source_channel_id,
+            source_label=source_label,
+        )
+        try:
+            result = await capture_amazon_buybox_screenshot(u, self.config or {}, bot_dir=Path(__file__).parent)
+        except Exception as exc:
+            _log_flow("AMAZON_BUYBOX_EXC", err=str(exc)[:160])
+            return {"status": "browser_error", "reason": str(exc)[:200], "screenshot_path": ""}
+        _log_flow(
+            "AMAZON_BUYBOX_DONE",
+            status=str(result.get("status") or ""),
+            connected_via=str(result.get("connected_via") or "")[:80],
+            targets=",".join(
+                f"{t.get('selector')}={'1' if t.get('found') else '0'}"
+                for t in (result.get("targets") or [])
+            )[:200],
+            screenshot=str(result.get("screenshot_path") or "")[:140],
+            reason=str(result.get("reason") or "")[:160],
+            dest_channel_id=dest_channel_id,
+            source_channel_id=source_channel_id,
+            source_label=source_label,
+        )
         return result
 
     def _extract_amazon_before_price_from_html(self, html_txt: str, *, current_price: str = "") -> str:
@@ -5349,6 +5415,22 @@ class InstorebotForwarder:
                 original_dest_id=(original_dest_id or ""),
             )
 
+        # Amazon buybox screenshot: optional second/third image for the multi-image
+        # grid. Always attempted (config-gated) so the FAIL embed has the Amazon
+        # deal economics for review even when the eBay screenshot is suppressed.
+        amazon_buybox_screenshot_path = ""
+        amazon_buybox_trace: Dict[str, Any] = {}
+        if final_url and self._amazon_buybox_screenshot_enabled():
+            buybox_result = await self._scrape_amazon_buybox_screenshot(
+                final_url,
+                dest_channel_id=(int(dest_id) if dest_id else None),
+                source_channel_id=(src_id or None),
+                source_label=source_label,
+            )
+            amazon_buybox_trace = dict(buybox_result or {})
+            if str(buybox_result.get("status") or "") == "ok":
+                amazon_buybox_screenshot_path = str(buybox_result.get("screenshot_path") or "")
+
         # Build the "card body" to match your desired format (no footer/timestamp, one key link).
         #
         # Layout (canonical):
@@ -5384,7 +5466,12 @@ class InstorebotForwarder:
         # eBay Comps block: required first-8 DOM sold prices. Flush under the
         # deal info (no leading blank line) and the label is a plain link,
         # not bold, per the canonical layout above.
-        if ebay_comps_url:
+        #
+        # On the FAIL path (`use_enrich_failed_template`) we deliberately OMIT
+        # the eBay Comps / Avg Sold Price lines. The review embed there focuses
+        # on the Amazon buybox screenshot plus the single `eBay Gate: ...`
+        # reason line, so operators see Amazon deal economics first.
+        if ebay_comps_url and not use_enrich_failed_template:
             card_lines.append(f"[eBay Comps]({ebay_comps_url})")
             if ebay_first8_avg_line:
                 card_lines.append(ebay_first8_avg_line)
@@ -5516,25 +5603,62 @@ class InstorebotForwarder:
         }
 
         embed = _embed_from_template(tpl or {}, ctx) if tpl else None
+        # Multi-image embed grid (Discord client quirk): when several embeds in
+        # a single message share the SAME `url`, Discord groups them into one
+        # visual card with up to 4 images. We use this to show:
+        #   PASS path  -> [product image] + [eBay sold comps] + [Amazon buybox]
+        #   FAIL path  -> [product image] + [Amazon buybox]   (eBay screenshot
+        #                 and eBay description lines are dropped)
+        # The primary embed keeps its title/description and the Amazon product
+        # image (already set by the template); the extra embeds carry only the
+        # shared url and one image each. The legacy thumbnail is dropped.
+        file_payload: List[Dict[str, str]] = []
+        extra_embeds: List[discord.Embed] = []
         if embed:
-            ebay_file_payload: List[Dict[str, str]] = []
-            if ebay_first8_screenshot_path:
-                shot_path = Path(ebay_first8_screenshot_path)
-                if shot_path.exists() and shot_path.is_file():
-                    shot_name = _discord_attachment_name(ebay_first8_screenshot_path)
-                    ebay_file_payload.append({"path": str(shot_path), "filename": shot_name})
-                    try:
-                        # Main card image becomes the eBay sold-comps screenshot.
-                        embed.set_image(url=f"attachment://{shot_name}")
-                        if image_url:
-                            embed.set_thumbnail(url=image_url)
-                    except Exception:
-                        pass
-                else:
-                    _log_flow("EBAY_FIRST8_SCREENSHOT_MISSING", path=str(shot_path)[:160])
-            _log_flow("RENDER", ok="1", title=(embed.title or "")[:80], fields=len(embed.fields))
+            shared_url = (final_url or "").strip()
+            if shared_url:
+                try:
+                    embed.url = shared_url
+                except Exception:
+                    pass
+
+            def _append_image_embed(shot_path_str: str, label: str) -> None:
+                if not shot_path_str:
+                    return
+                p = Path(shot_path_str)
+                if not (p.exists() and p.is_file()):
+                    _log_flow(f"{label}_SCREENSHOT_MISSING", path=str(p)[:160])
+                    return
+                fname = _discord_attachment_name(shot_path_str)
+                file_payload.append({"path": str(p), "filename": fname})
+                if not shared_url:
+                    # Without a shared url Discord cannot group additional
+                    # embeds. Skip extras and let the single primary embed
+                    # render normally (the attachment will still upload but
+                    # without a host embed, which is the safest fallback).
+                    return
+                extra = discord.Embed(url=shared_url)
+                extra.set_image(url=f"attachment://{fname}")
+                extra_embeds.append(extra)
+
+            if will_post_ebay and ebay_first8_screenshot_path:
+                _append_image_embed(ebay_first8_screenshot_path, "EBAY_FIRST8")
+            if amazon_buybox_screenshot_path:
+                _append_image_embed(amazon_buybox_screenshot_path, "AMAZON_BUYBOX")
+
+            _log_flow(
+                "RENDER",
+                ok="1",
+                title=(embed.title or "")[:80],
+                fields=len(embed.fields),
+                extra_embeds=len(extra_embeds),
+                files=len(file_payload),
+                grid=("ebay+buybox" if (will_post_ebay and ebay_first8_screenshot_path and amazon_buybox_screenshot_path)
+                      else "buybox_only" if amazon_buybox_screenshot_path
+                      else "ebay_only" if (will_post_ebay and ebay_first8_screenshot_path)
+                      else "single"),
+            )
         else:
-            ebay_file_payload = []
             _log_flow("RENDER", ok="0")
             if dedupe_reserved and asin:
                 self._dedupe_release(asin)
@@ -5548,7 +5672,9 @@ class InstorebotForwarder:
             "route_reason": route_reason,
             "template_key": tpl_key,
             "ctx": ctx,
-            "discord_files": ebay_file_payload,
+            "discord_files": file_payload,
+            "extra_embeds": extra_embeds,
+            "amazon_buybox": amazon_buybox_trace,
             "dedupe_reserved": bool(dedupe_reserved),
         }
         return embed, meta
@@ -5669,11 +5795,20 @@ class InstorebotForwarder:
                         if fpath and Path(fpath).exists():
                             files.append(discord.File(fpath, filename=fname))
                         elif fpath:
-                            _log_flow("EBAY_FIRST8_SCREENSHOT_MISSING", path=fpath[:160])
+                            _log_flow("EMBED_FILE_MISSING", path=fpath[:160])
+
+                # Multi-image embed grid: primary embed + image-only extras that
+                # share the same `embed.url`. Discord groups them visually into
+                # one card. Falls back to a single embed when no extras exist.
+                extra_embeds = meta.get("extra_embeds") if isinstance(meta, dict) else None
+                embeds_to_send: List[discord.Embed] = [embed]
+                if isinstance(extra_embeds, list):
+                    embeds_to_send.extend([e for e in extra_embeds if isinstance(e, discord.Embed)])
+
                 if files:
-                    await ch.send(embed=embed, files=files, allowed_mentions=discord.AllowedMentions.none())
+                    await ch.send(embeds=embeds_to_send, files=files, allowed_mentions=discord.AllowedMentions.none())
                 else:
-                    await ch.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+                    await ch.send(embeds=embeds_to_send, allowed_mentions=discord.AllowedMentions.none())
                 if self._verbose_flow_logs():
                     _log_flow("SEND_OK", dest_id=dest_id, message_id=str(message.id))
                 ex = f"asin={asin}" if asin else ""
