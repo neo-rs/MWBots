@@ -1247,7 +1247,8 @@ def select_target_channel_id(
     # 10) AFFILIATED_LINKS / other stores (online only — not clearance or instore sources)
     if (source_group == "online") and cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID:
         att_text = " ".join([str(a.get("url", "")) for a in (attachments or []) if isinstance(a, dict)])
-        blob = (text_to_check or "") + " " + att_text
+        affiliate_blob = merge_text_and_embed_strings_for_classifier(text_to_check or "", embeds)
+        blob = affiliate_blob + " " + att_text
         # Hard suppressions: keep AFFILIATED_LINKS focused (exclude flip templates / pokemon / comics / stubs).
         try:
             sup = affiliate_should_suppress_affiliated_links(blob, min_core_chars=int(getattr(cfg, "AFFILIATED_LINKS_MIN_SUBSTANCE_CHARS", 80) or 80))
@@ -1642,7 +1643,8 @@ def detect_all_link_types(
     ):
         if cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID and (source_group == "online"):
             att_text = " ".join([str(a.get("url", "")) for a in (attachments or []) if isinstance(a, dict)])
-            blob = (text_to_check or "") + " " + att_text
+            affiliate_blob = merge_text_and_embed_strings_for_classifier(text_to_check or "", embeds)
+            blob = affiliate_blob + " " + att_text
             # Same hard suppressions as single-target classifier (flip templates / pokemon / comics / stubs / discord links).
             try:
                 sup2 = affiliate_should_suppress_affiliated_links(

@@ -498,8 +498,8 @@ _AFFILIATE_FLIP_FIELDS_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _AFFILIATE_QUICK_LINKS_PATTERN = re.compile(r"(?im)^\s*quick\s+links?\b", re.IGNORECASE)
-# Pokemon: use substring match so pokemoncenter.com / URLs match (word-boundary \bpokemon\b misses those).
-_AFFILIATE_POKEMON_SUBSTRING_PATTERN = re.compile(r"pokemon", re.IGNORECASE)
+# Pokemon: substring match for pokemoncenter.com etc.; include accented spellings (e.g. "Pokémon" — ASCII-only "pokemon" misses).
+_AFFILIATE_POKEMON_SUBSTRING_PATTERN = re.compile(r"pok[eéèêëēėę]mon", re.IGNORECASE)
 # TCG stock-update style posts (ETB / booster / blister + SKU/available-stock/restock language) are not generic
 # affiliate drops and should not route to AFFILIATED_LINKS even when "pokemon" is not present.
 _AFFILIATE_TCG_GENERIC_TERMS_PATTERN = re.compile(
@@ -555,7 +555,8 @@ _AFFILIATE_FOOD_RESTAURANT_OR_PROMO_PATTERN = re.compile(
     r"applebee|chili'?s|outback|olive\s+garden|red\s+lobster|wendy'?s|burger\s*king|"
     r"mcdonald'?s|panera|dunkin|starbucks|"
     r"7[-\s]?eleven|slurpee|tiff'?s\s+treats|potato\s+ol[eé]s|"
-    r"honey\s+gold\s+bbq|smokehouse\s+turkey|beef\s+taco\s+combo|teacher\s+appreciation"
+    r"honey\s+gold\s+bbq|smokehouse\s+turkey|beef\s+taco\s+combo|teacher\s+appreciation|"
+    r"habitburger\.com|\bmyhabit\b|(?:the\s+)?habit\s+burger|\bdouble\s+char\b|\bdodgers26\b|\bdodgers\b"
     r")",
 )
 
@@ -652,6 +653,12 @@ def is_food_promotion_affiliate_noise_blob(blob: str) -> bool:
     if bool(_AFFILIATE_DIVINE_BYLINE_HELPER_OR_TP_PATTERN.search(raw)) and (
         restaurant_hit or _AFFILIATE_NEW_FOOD_PROMOTION_PATTERN.search(raw) or (has_free and has_link_label)
     ):
+        return True
+    # Habit Burger / stadium tie-in promos (Game Date + Region fields; MyHabit / Dodgers).
+    if re.search(r"(?i)\bgame\s+date\b", raw) and re.search(r"(?i)\bregion\b", raw):
+        if re.search(r"(?i)(?:habit|myhabit|double\s+char|dodgers|dodgers26|promo\s+code)", raw):
+            return True
+    if re.search(r"(?i)habitburger\.com", raw):
         return True
     return False
 
