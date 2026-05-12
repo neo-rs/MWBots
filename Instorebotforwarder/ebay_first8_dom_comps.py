@@ -369,7 +369,16 @@ async def _get_first_card_boxes(page: Any, limit: int) -> Tuple[List[Dict[str, f
     return boxes, int(total_count or 0)
 
 
-def _merge_boxes(boxes: List[Dict[str, float]], padding: int) -> Dict[str, float]:
+def merge_boxes(boxes: List[Dict[str, float]], padding: int) -> Dict[str, float]:
+    """
+    Merge a list of bounding boxes (`x`, `y`, `width`, `height`) into a single
+    enclosing rectangle, expanded by `padding` pixels on every side. The result
+    is clamped to non-negative origin so it is safe to pass directly to
+    Playwright's `page.screenshot(clip=...)`.
+
+    Public API: imported by sibling DOM-screenshot scrapers (e.g. the Amazon
+    buybox screenshot module) so we don't duplicate the merging math.
+    """
     x = min(b["x"] for b in boxes) - padding
     y = min(b["y"] for b in boxes) - padding
     right = max(b["x"] + b["width"] for b in boxes) + padding
@@ -483,7 +492,7 @@ async def fetch_first8_sold_comps(title: str, cfg: Mapping[str, Any], *, bot_dir
             if screenshot_enabled:
                 boxes, screenshot_total_count = await _get_first_card_boxes(page, limit)
                 if boxes:
-                    clip_try = _merge_boxes(boxes, padding)
+                    clip_try = merge_boxes(boxes, padding)
                     try:
                         vh = int(await page.evaluate("() => window.innerHeight"))
                         need_h = int(clip_try["y"] + clip_try["height"]) + 24
@@ -504,7 +513,7 @@ async def fetch_first8_sold_comps(title: str, cfg: Mapping[str, Any], *, bot_dir
                         out_dir = bot_dir / out_dir
                     out_dir.mkdir(parents=True, exist_ok=True)
                     base = out_dir / f"{safe_name(url)}_{int(time.time())}"
-                    clip = _merge_boxes(boxes, padding)
+                    clip = merge_boxes(boxes, padding)
                     dims = await page.evaluate(
                         """
                         () => ({
