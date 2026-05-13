@@ -1350,6 +1350,82 @@ class InstorebotForwarder:
 
         return s.rstrip(" -:,;|")
 
+    def _apply_buybox_price_override(
+        self,
+        *,
+        buybox_result: Optional[Dict[str, Any]],
+        current_price: str,
+        before_price: str,
+        discount_pct_str: str,
+    ) -> Tuple[str, str, str, List[str]]:
+        """
+        Replace (current_price, before_price, discount_pct_str) with values
+        read off the live Amazon page during the buybox capture.
+
+        The buybox screenshot is the canonical source of truth for the deal
+        economics shown in the embed - this prevents the embed text and the
+        screenshot disagreeing when the source-message price is stale.
+
+        Rules (no silent mismatches):
+          - Override applies only when buybox status == "ok" AND a usable
+            current price was extracted from the page DOM.
+          - Before/discount move WITH current. We never mix source `Before`
+            with page `Current` - that would still be a misleading delta.
+          - If the page no longer shows a strike-through "list" price, the
+            embed shows just `Current Price` with no `Before` / `Discount`
+            lines. That's honest: Amazon is no longer marketing it as a deal.
+          - If page list <= page current (no real discount), we treat list as
+            absent (same outcome as above).
+
+        Returns: (price, before_price, discount_pct_str, override_notes).
+        `override_notes` is empty when nothing changed.
+        """
+        if not isinstance(buybox_result, dict):
+            return current_price, before_price, discount_pct_str, []
+        if str(buybox_result.get("status") or "") != "ok":
+            return current_price, before_price, discount_pct_str, []
+        prices = buybox_result.get("prices") or {}
+        if not isinstance(prices, dict):
+            return current_price, before_price, discount_pct_str, []
+
+        new_current_text = str(prices.get("current_price_text") or "").strip()
+        try:
+            new_current_val = float(prices.get("current_price_value")) if prices.get("current_price_value") is not None else None
+        except Exception:
+            new_current_val = None
+        if not new_current_text or new_current_val is None or new_current_val <= 0:
+            return current_price, before_price, discount_pct_str, []
+
+        new_list_text = str(prices.get("list_price_text") or "").strip()
+        try:
+            new_list_val = float(prices.get("list_price_value")) if prices.get("list_price_value") is not None else None
+        except Exception:
+            new_list_val = None
+
+        if new_list_val is not None and new_list_val <= new_current_val:
+            new_list_text = ""
+            new_list_val = None
+
+        new_discount = ""
+        try:
+            pct_val_raw = prices.get("discount_pct_value")
+            pct_val = float(pct_val_raw) if pct_val_raw is not None else None
+        except Exception:
+            pct_val = None
+        if pct_val and pct_val > 0:
+            new_discount = f"{int(round(pct_val))}% OFF"
+        elif new_list_val is not None and new_list_val > new_current_val and new_list_val > 0:
+            pct = int(round(((new_list_val - new_current_val) / new_list_val) * 100.0))
+            if pct > 0:
+                new_discount = f"{pct}% OFF"
+
+        notes: List[str] = [
+            f"current: {current_price or 'none'} -> {new_current_text}",
+            f"before:  {before_price or 'none'} -> {new_list_text or 'none'}",
+            f"discount: {discount_pct_str or 'none'} -> {new_discount or 'none'}",
+        ]
+        return new_current_text, new_list_text, new_discount, notes
+
     async def _scrape_amazon_buybox_screenshot(
         self,
         amazon_url: str,
@@ -5425,13 +5501,69 @@ class InstorebotForwarder:
                     ebay_sold_new_near = f"${low_val:,.2f}"
                     ebay_sold_new = f"${low_val:,.2f} - ${high_val:,.2f}" if low_val != high_val else f"${low_val:,.2f}"
                     ebay_first8_avg_line = f"Avg Sold Price: ${avg_val:,.2f}"
-                    try:
-                        cur_val, _ = self._price_to_float(price)
-                        if cur_val is not None and low_val > cur_val:
-                            upside = round(low_val - cur_val, 2)
-                            ebay_upside_str = f"Roughly ${upside:,.0f} in upside per unit"
-                    except Exception:
-                        pass
+
+        # Amazon buybox capture (price + screenshot, single Playwright session).
+        # MUST run BEFORE the eBay gate so the gate compares the eBay average
+        # against the price the page is actually showing right now - not the
+        # potentially-stale price the source lead carried. The screenshot then
+        # backs the buybox image embed in the multi-image grid downstream.
+        amazon_buybox_screenshot_path = ""
+        amazon_buybox_trace: Dict[str, Any] = {}
+        if final_url and self._amazon_buybox_screenshot_enabled():
+            buybox_result = await self._scrape_amazon_buybox_screenshot(
+                final_url,
+                dest_channel_id=(int(dest_id) if dest_id else None),
+                source_channel_id=(src_id or None),
+                source_label=source_label,
+            )
+            amazon_buybox_trace = dict(buybox_result or {})
+            if str(buybox_result.get("status") or "") == "ok":
+                amazon_buybox_screenshot_path = str(buybox_result.get("screenshot_path") or "")
+            new_price, new_before, new_discount, override_notes = self._apply_buybox_price_override(
+                buybox_result=buybox_result,
+                current_price=price,
+                before_price=before_price,
+                discount_pct_str=discount_pct_str,
+            )
+            if override_notes:
+                price = new_price
+                before_price = new_before
+                discount_pct_str = new_discount
+                _log_flow(
+                    "PRICE_OVERRIDE",
+                    source="amazon_buybox_dom",
+                    changes=" | ".join(override_notes)[:300],
+                )
+                # Recompute price_glitch with the authoritative page values so
+                # the "Price Glitch!" banner stays consistent with the embed.
+                try:
+                    cur_val_post, cur_sym_post = self._price_to_float(price)
+                    bef_val_post, bef_sym_post = self._price_to_float(before_price)
+                except Exception:
+                    cur_val_post, cur_sym_post = None, ""
+                    bef_val_post, bef_sym_post = None, ""
+                price_glitch = False
+                if (cur_val_post is not None) and (bef_val_post is not None) and bef_val_post > 0 and cur_val_post < bef_val_post:
+                    if (not cur_sym_post) or (not bef_sym_post) or (cur_sym_post == bef_sym_post):
+                        pct_post = int(round(((bef_val_post - cur_val_post) / bef_val_post) * 100.0))
+                        if pct_post >= 90:
+                            price_glitch = True
+                if cur_val_post is not None and cur_val_post < 1.0:
+                    price_glitch = True
+
+        # eBay upside hint uses the (now possibly overridden) page price so the
+        # "Roughly $X in upside per unit" line matches the displayed Current.
+        if ebay_avg_sold_price_val is not None and ebay_sold_new_near and ebay_sold_new_near != "N/A":
+            try:
+                cur_val_for_upside, _ = self._price_to_float(price)
+                low_for_upside = self._price_to_float(ebay_sold_new_near)[0]
+                if cur_val_for_upside is not None and low_for_upside is not None and low_for_upside > cur_val_for_upside:
+                    upside = round(low_for_upside - cur_val_for_upside, 2)
+                    ebay_upside_str = f"Roughly ${upside:,.0f} in upside per unit"
+                else:
+                    ebay_upside_str = ""
+            except Exception:
+                ebay_upside_str = ""
 
         will_post_ebay = bool(ebay_comps_url and ebay_avg_sold_price_val is not None)
         cur_val_for_ebay_gate, _ = self._price_to_float(price)
@@ -5490,22 +5622,6 @@ class InstorebotForwarder:
                 reason=route_reason,
                 original_dest_id=(original_dest_id or ""),
             )
-
-        # Amazon buybox screenshot: optional second/third image for the multi-image
-        # grid. Always attempted (config-gated) so the FAIL embed has the Amazon
-        # deal economics for review even when the eBay screenshot is suppressed.
-        amazon_buybox_screenshot_path = ""
-        amazon_buybox_trace: Dict[str, Any] = {}
-        if final_url and self._amazon_buybox_screenshot_enabled():
-            buybox_result = await self._scrape_amazon_buybox_screenshot(
-                final_url,
-                dest_channel_id=(int(dest_id) if dest_id else None),
-                source_channel_id=(src_id or None),
-                source_label=source_label,
-            )
-            amazon_buybox_trace = dict(buybox_result or {})
-            if str(buybox_result.get("status") or "") == "ok":
-                amazon_buybox_screenshot_path = str(buybox_result.get("screenshot_path") or "")
 
         # Build the "card body" to match your desired format (no footer/timestamp).
         #

@@ -386,6 +386,76 @@ def merge_boxes(boxes: List[Dict[str, float]], padding: int) -> Dict[str, float]
     return {"x": max(0, x), "y": max(0, y), "width": max(1, right - max(0, x)), "height": max(1, bottom - max(0, y))}
 
 
+def prune_screenshot_dir(
+    out_dir: Path,
+    *,
+    keep_files: int = 100,
+    max_age_days: float = 7.0,
+    max_total_mb: float = 200.0,
+) -> Dict[str, Any]:
+    """
+    Single canonical owner of retention for any DOM-screenshot output folder
+    (eBay sold-comps, Amazon buybox, etc.). Called by each scraper right after
+    it saves a new PNG + sidecar pair so the directory never grows unbounded.
+
+    Strategy (any limit triggers prune):
+      - `keep_files`     : keep at most N most-recent files (by mtime).
+                           `0` disables this dimension.
+      - `max_age_days`   : delete anything older than this. `0` disables.
+      - `max_total_mb`   : keep newest files only while cumulative size stays
+                           under this cap. `0` disables.
+
+    The file we just wrote is the newest, so it is always kept (unless a
+    cap is set so tight that even a single screenshot exceeds it - in which
+    case the caller's limits are wrong, not the prune logic).
+
+    Returns: {"kept", "deleted", "deleted_bytes", "errors"}.
+    Never raises. Filesystem errors are caught and counted in `errors`.
+    """
+    out = {"kept": 0, "deleted": 0, "deleted_bytes": 0, "errors": 0}
+    try:
+        if not out_dir.exists() or not out_dir.is_dir():
+            return out
+    except Exception:
+        return out
+
+    files: List[Tuple[float, int, Path]] = []
+    try:
+        for p in out_dir.iterdir():
+            if not p.is_file():
+                continue
+            try:
+                st = p.stat()
+                files.append((float(st.st_mtime), int(st.st_size), p))
+            except Exception:
+                continue
+    except Exception:
+        return out
+
+    files.sort(key=lambda t: t[0], reverse=True)
+
+    cutoff_ts = (time.time() - (max_age_days * 86400.0)) if max_age_days > 0 else None
+    max_bytes = int(max_total_mb * 1024 * 1024) if max_total_mb > 0 else 0
+    keep_n = keep_files if keep_files > 0 else 0
+
+    running_bytes = 0
+    for idx, (mt, sz, p) in enumerate(files):
+        too_old = (cutoff_ts is not None) and (mt < cutoff_ts)
+        over_count = (keep_n > 0) and (idx >= keep_n)
+        over_size = (max_bytes > 0) and ((running_bytes + sz) > max_bytes) and idx > 0
+        if too_old or over_count or over_size:
+            try:
+                p.unlink()
+                out["deleted"] += 1
+                out["deleted_bytes"] += sz
+            except Exception:
+                out["errors"] += 1
+        else:
+            out["kept"] += 1
+            running_bytes += sz
+    return out
+
+
 async def fetch_first8_sold_comps(title: str, cfg: Mapping[str, Any], *, bot_dir: Path) -> Dict[str, Any]:
     keyword = ebay_keyword_from_title(
         title,
@@ -532,6 +602,19 @@ async def fetch_first8_sold_comps(title: str, cfg: Mapping[str, Any], *, bot_dir
                     meta_path = str(base) + ".json"
                     Path(meta_path).write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
                     result["meta_path"] = meta_path
+                    # Retention sweep on this directory so screenshot output
+                    # never grows unbounded. Canonical owner is prune_screenshot_dir
+                    # in this same module; Amazon buybox scraper uses the same helper.
+                    try:
+                        prune_stats = prune_screenshot_dir(
+                            out_dir,
+                            keep_files=_cfg_int(cfg, "ebay_first8_keep_files", 100, lo=0, hi=100000),
+                            max_age_days=_cfg_float(cfg, "ebay_first8_max_age_days", 7.0, lo=0.0, hi=365.0),
+                            max_total_mb=_cfg_float(cfg, "ebay_first8_max_total_mb", 200.0, lo=0.0, hi=100000.0),
+                        )
+                        result["prune"] = prune_stats
+                    except Exception:
+                        pass
             return result
         except Exception as exc:
             result.update({"status": "browser_error", "reason": str(exc)[:220]})
