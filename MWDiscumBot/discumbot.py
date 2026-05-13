@@ -1584,12 +1584,31 @@ def _cleanup_lock_file():
 # Was causing PowerShell windows to pop up repeatedly.
 # DiscumBot typically runs in the background (service/manager), so terminal closing is not needed.
 
+def _linux_proc_cmdline(pid: int) -> Optional[str]:
+    """Best-effort command line for pid from /proc (Linux). None if unavailable."""
+    try:
+        if platform.system().lower() != "linux":
+            return None
+        path = f"/proc/{int(pid)}/cmdline"
+        with open(path, "rb") as f:
+            raw = f.read() or b""
+        if not raw:
+            return None
+        parts = [x.decode("utf-8", errors="replace") for x in raw.split(b"\0") if x]
+        return " ".join(parts).strip() or None
+    except Exception:
+        return None
+
+
 def _pid_is_running(pid: int, *, expected_cmd_substring: Optional[str] = None) -> bool:
     """Best-effort PID existence check (cross-platform).
 
     If expected_cmd_substring is provided, only returns True when the process
     appears to be running with a command line containing that substring.
     This avoids Windows PID reuse false-positives for stale lock files.
+
+    On Linux, /proc/<pid>/cmdline is used when filtering so other Python bots
+    (e.g. instore_auto_mirror_bot.py) are not mistaken for discumbot.py.
     """
     try:
         pid = int(pid)
@@ -1602,7 +1621,13 @@ def _pid_is_running(pid: int, *, expected_cmd_substring: Optional[str] = None) -
 
     expected = (expected_cmd_substring or "").strip().lower()
 
-    # Prefer psutil if present (works well on Windows)
+    # Linux first when we must match cmdline: works without psutil (common on Oracle venv).
+    if expected:
+        joined_linux = _linux_proc_cmdline(pid)
+        if joined_linux is not None:
+            return expected in joined_linux.lower()
+
+    # Prefer psutil if present (works well on Windows and non-Linux Unix)
     try:
         import psutil  # type: ignore
 
@@ -1616,7 +1641,11 @@ def _pid_is_running(pid: int, *, expected_cmd_substring: Optional[str] = None) -
             joined = " ".join(str(x) for x in (cmdline or []))
             return expected in joined.lower()
         except Exception:
-            # If we can't inspect cmdline, fall back to PID existence.
+            if expected:
+                joined2 = _linux_proc_cmdline(pid)
+                if joined2 is not None:
+                    return expected in joined2.lower()
+                return False
             return True
     except Exception:
         pass
@@ -1656,13 +1685,10 @@ def _pid_is_running(pid: int, *, expected_cmd_substring: Optional[str] = None) -
     except Exception:
         pass
 
-    # POSIX fallback: signal 0
+    # POSIX fallback: signal 0 — only trust "alive" without cmdline filter.
     try:
         os.kill(pid, 0)
-        if not expected:
-            return True
-        # Can't inspect cmdline without psutil; treat as running.
-        return True
+        return not bool(expected)
     except Exception:
         return False
 
@@ -1704,8 +1730,8 @@ def _acquire_single_instance_lock() -> None:
                                 time.sleep(0.5)
                                 os._exit(0)
 
-                            # Process doesn't exist - stale lock, try to remove with retry
-                            print(f"[INFO] Process {pid} not found - stale lock detected")
+                            # PID dead, or alive but not discumbot.py (e.g. stale lock after PID reuse) — remove lock
+                            print(f"[INFO] Lock holder pid={pid} is not an active discumbot.py (or not running) — stale lock")
                             print("[INFO] Attempting to remove stale lock file...")
                                 
                             # Retry removing lock file with multiple strategies
