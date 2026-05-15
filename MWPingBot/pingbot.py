@@ -37,7 +37,10 @@ from typing import Any, Dict, List, Optional
 import discord
 from discord.ext import commands
 
-from dm_notify_embeds import send_ping_dm_notifications
+try:
+    from dm_notify_embeds import send_ping_dm_notifications
+except ImportError:
+    send_ping_dm_notifications = None  # type: ignore[misc, assignment]
 
 
 # ---------------- Console / runtime helpers ----------------
@@ -655,7 +658,7 @@ async def on_message(message: discord.Message) -> None:
                 }
             )
             log_ping("Sent @everyone", channel_label=_fmt_channel(bot, channel_id))
-            if DM_NOTIFY_USER_IDS:
+            if DM_NOTIFY_USER_IDS and send_ping_dm_notifications is not None:
                 asyncio.create_task(
                     send_ping_dm_notifications(
                         bot,
@@ -666,6 +669,11 @@ async def on_message(message: discord.Message) -> None:
                         log_error=log_error,
                         write_log=write_pingbot_log,
                     )
+                )
+            elif DM_NOTIFY_USER_IDS and send_ping_dm_notifications is None:
+                log_warn(
+                    "dm_notify_user_ids configured but dm_notify_embeds.py is missing; "
+                    "deploy MWPingBot/dm_notify_embeds.py and restart"
                 )
         except Exception as e:
             log_error(f"Failed to send @everyone in channel {channel_id}", error=e)
