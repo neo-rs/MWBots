@@ -42,7 +42,24 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "cooldown_seconds": 30,
     "dedupe_ttl_seconds": 30,
     "verbose": True,
+    "dm_notify_user_ids": [],
 }
+
+
+def _parse_user_id_list(raw: Any) -> List[int]:
+    if isinstance(raw, str):
+        raw_list = [x.strip() for x in raw.split(",") if x.strip()]
+    elif isinstance(raw, list):
+        raw_list = raw
+    else:
+        raw_list = []
+    out: List[int] = []
+    for x in raw_list:
+        try:
+            out.append(int(str(x).strip()))
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 def load_env_file(path: str) -> Dict[str, str]:
@@ -95,6 +112,8 @@ def load_settings(path: str | None = None) -> Dict[str, Any]:
     if "verbose" in data:
         v = data["verbose"]
         out["verbose"] = bool(v) if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on")
+    if "dm_notify_user_ids" in data:
+        out["dm_notify_user_ids"] = _parse_user_id_list(data.get("dm_notify_user_ids"))
     return out
 
 
@@ -102,12 +121,17 @@ def save_settings(settings: Dict[str, Any], path: str | None = None) -> bool:
     """Write settings.json. Preserves keys the main pingbot expects."""
     p = path or SETTINGS_PATH
     try:
+        prior = load_settings(p)
+        dm_ids = settings.get("dm_notify_user_ids")
+        if dm_ids is None:
+            dm_ids = prior.get("dm_notify_user_ids") or []
         data = {
             "verbose": settings.get("verbose", True),
             "mirrorworld_server_id": str(settings.get("mirrorworld_server_id") or "").strip() or "0",
             "cooldown_seconds": max(0, int(settings.get("cooldown_seconds", 30))),
             "dedupe_ttl_seconds": max(0, int(settings.get("dedupe_ttl_seconds", 30))),
             "ping_channel_ids": list(settings.get("ping_channel_ids") or []),
+            "dm_notify_user_ids": _parse_user_id_list(dm_ids),
         }
         os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
         with open(p, "w", encoding="utf-8") as f:

@@ -12,6 +12,7 @@ PingBot for Mirror World: pings in configured channels with cooldown and dedupe.
   - `ping_channel_ids` (list) – channel IDs where the bot pings
   - `cooldown_seconds` – per-channel cooldown before next ping
   - `dedupe_ttl_seconds` – TTL for content dedupe
+  - `dm_notify_user_ids` (list) – Discord user IDs to DM after each successful `@everyone` ping (embed summary + embed images)
   - `verbose` (optional bool)
 - **Token:** `PING_BOT` in `config/tokens.env`
 
@@ -45,7 +46,8 @@ Ensure **config/settings.json** on the server has at least:
   "mirrorworld_server_id": "1431314516364230689",
   "cooldown_seconds": 30,
   "dedupe_ttl_seconds": 30,
-  "ping_channel_ids": []
+  "ping_channel_ids": [],
+  "dm_notify_user_ids": [971528709876113478]
 }
 ```
 

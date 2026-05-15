@@ -37,6 +37,8 @@ from typing import Any, Dict, List, Optional
 import discord
 from discord.ext import commands
 
+from dm_notify_embeds import send_ping_dm_notifications
+
 
 # ---------------- Console / runtime helpers ----------------
 
@@ -431,6 +433,23 @@ except Exception:
 
 PING_BOT_TOKEN: str = str(_TOKENS.get("PING_BOT") or "").strip()
 
+DM_NOTIFY_USER_IDS: List[int] = []
+try:
+    raw_dm = _SETTINGS.get("dm_notify_user_ids") or []
+    if isinstance(raw_dm, str):
+        raw_dm_list = [x.strip() for x in raw_dm.split(",") if x.strip()]
+    elif isinstance(raw_dm, list):
+        raw_dm_list = raw_dm
+    else:
+        raw_dm_list = []
+    for x in raw_dm_list:
+        try:
+            DM_NOTIFY_USER_IDS.append(int(str(x).strip()))
+        except Exception:
+            continue
+except Exception:
+    DM_NOTIFY_USER_IDS = []
+
 
 # ---------------- Canonical ping state ----------------
 
@@ -444,8 +463,8 @@ _last_ping_channels_mtime: float = 0.0
 
 
 def _reload_ping_channels_from_file() -> None:
-    """Re-read settings.json and update PING_CHANNEL_IDS and _PING_CHANNEL_SET so /ping settings changes apply without restart."""
-    global PING_CHANNEL_IDS, _PING_CHANNEL_SET, _last_ping_channels_mtime
+    """Re-read settings.json and update ping channels + DM notify user ids without restart."""
+    global PING_CHANNEL_IDS, _PING_CHANNEL_SET, DM_NOTIFY_USER_IDS, _last_ping_channels_mtime
     try:
         mtime = _SETTINGS_JSON_PATH.stat().st_mtime if _SETTINGS_JSON_PATH.exists() else 0.0
         if mtime <= _last_ping_channels_mtime:
@@ -467,6 +486,21 @@ def _reload_ping_channels_from_file() -> None:
                 continue
         PING_CHANNEL_IDS = new_ids
         _PING_CHANNEL_SET = set(PING_CHANNEL_IDS)
+
+        raw_dm = data.get("dm_notify_user_ids") or []
+        if isinstance(raw_dm, str):
+            raw_dm_list = [x.strip() for x in raw_dm.split(",") if x.strip()]
+        elif isinstance(raw_dm, list):
+            raw_dm_list = raw_dm
+        else:
+            raw_dm_list = []
+        new_dm: List[int] = []
+        for x in raw_dm_list:
+            try:
+                new_dm.append(int(str(x).strip()))
+            except Exception:
+                continue
+        DM_NOTIFY_USER_IDS = new_dm
     except Exception:
         pass
 
@@ -551,6 +585,7 @@ async def on_ready() -> None:
                 f"ping_channels: {len(PING_CHANNEL_IDS)}",
                 f"cooldown_seconds: {COOLDOWN_SECONDS}",
                 f"dedupe_ttl_seconds: {DEDUPE_TTL_SECONDS}",
+                f"dm_notify_user_ids: {len(DM_NOTIFY_USER_IDS)}",
                 "",
                 "Monitored Channels (preview):",
                 *preview_lines,
@@ -620,6 +655,18 @@ async def on_message(message: discord.Message) -> None:
                 }
             )
             log_ping("Sent @everyone", channel_label=_fmt_channel(bot, channel_id))
+            if DM_NOTIFY_USER_IDS:
+                asyncio.create_task(
+                    send_ping_dm_notifications(
+                        bot,
+                        message,
+                        DM_NOTIFY_USER_IDS,
+                        log_info=log_info,
+                        log_warn=log_warn,
+                        log_error=log_error,
+                        write_log=write_pingbot_log,
+                    )
+                )
         except Exception as e:
             log_error(f"Failed to send @everyone in channel {channel_id}", error=e)
 
@@ -635,6 +682,11 @@ def _main() -> None:
         log_warn(f"mirrorworld_server_id is not set in {str(_SETTINGS_JSON_PATH)} (bot will run but ignore all guilds)")
     if not PING_CHANNEL_IDS:
         log_warn(f"ping_channel_ids is empty in {str(_SETTINGS_JSON_PATH)} (bot will run but never ping)")
+    if not DM_NOTIFY_USER_IDS:
+        log_warn(
+            f"dm_notify_user_ids is empty in {str(_SETTINGS_JSON_PATH)} "
+            "(no DM alerts after @everyone; add user IDs to enable)"
+        )
 
     # Register /ping slash command (same bot, same token) and sync to guild
     try:
