@@ -390,10 +390,37 @@ def generate_content_signature(
 ) -> str:
     """Create a normalized signature for content + embeds + attachments.
 
-    ``for_cross_post_dedupe``: omit per-bot embed footers/authors and add a sorted URL multiset
-    so the same deal mirrored by two apps (different footers) still dedupes within TTL.
+    ``for_cross_post_dedupe``: omit per-bot embed footers/authors; URL-stripped ``DEALBODY`` so the same
+    product with different wrapper links (walmrt.us vs mavely.app.link) still dedupes within TTL.
     """
     components: List[str] = []
+
+    if for_cross_post_dedupe:
+        try:
+            deal_body = generate_semantic_duplicate_signature(content, embeds, attachments)
+        except Exception:
+            deal_body = ""
+        if deal_body:
+            components.append("DEALBODY:" + deal_body)
+            attachment_urls: List[str] = []
+            for attachment in attachments or []:
+                if not isinstance(attachment, dict):
+                    continue
+                url = attachment.get("url") or attachment.get("proxy_url")
+                if url:
+                    attachment_urls.append(normalize_url(str(url)))
+            attachment_urls.sort()
+            components.extend(attachment_urls)
+            signature_source = "||".join(components).strip()
+            return hashlib.md5(signature_source.encode("utf-8")).hexdigest()
+        ext_urls = collect_external_affiliate_urls(content, embeds, attachments)
+        if ext_urls:
+            components.append("EXTURLSET:" + "|".join(ext_urls))
+        url_blob = (content or "") + "\n" + "\n".join(collect_embed_strings(embeds or []))
+        url_set = sorted({u for u in extract_urls_from_text(url_blob) if u})
+        if url_set and "EXTURLSET:" not in "|".join(components):
+            components.append("URLSET:" + "|".join(url_set))
+
     components.append(normalize_message(content or ""))
 
     embed_strings = sorted(
@@ -403,7 +430,7 @@ def generate_content_signature(
     )
     components.extend(embed_strings)
 
-    attachment_urls: List[str] = []
+    attachment_urls = []
     for attachment in attachments or []:
         if not isinstance(attachment, dict):
             continue
@@ -412,17 +439,6 @@ def generate_content_signature(
             attachment_urls.append(normalize_url(str(url)))
     attachment_urls.sort()
     components.extend(attachment_urls)
-
-    if for_cross_post_dedupe:
-        ext_urls = collect_external_affiliate_urls(content, embeds, attachments)
-        if ext_urls:
-            # Same merchant short link in plain chat vs bot embed (different unfurl metadata) → one signature.
-            components.append("EXTURLSET:" + "|".join(ext_urls))
-        else:
-            url_blob = (content or "") + "\n" + "\n".join(collect_embed_strings(embeds or []))
-            url_set = sorted({u for u in extract_urls_from_text(url_blob) if u})
-            if url_set:
-                components.append("URLSET:" + "|".join(url_set))
 
     signature_source = "||".join(components).strip()
     return hashlib.md5(signature_source.encode("utf-8")).hexdigest()

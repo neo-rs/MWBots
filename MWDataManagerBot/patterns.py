@@ -810,6 +810,8 @@ def affiliate_should_suppress_affiliated_links(blob: str, *, min_core_chars: int
             return "flipfluence_x_embed_no_merchant_url"
     if is_flipfluence_draw_live_product_link_affiliate_noise(raw):
         return "flipfluence_draw_live_product_link"
+    if is_affiliate_role_mention_noise_blob(raw):
+        return "affiliate_role_mention_noise"
     if blob_has_dc_comics_publisher_url(raw):
         return "dc_comics_publisher_url"
     core_len = deal_substance_core_len(raw)
@@ -1827,6 +1829,26 @@ _DISCORD_STRUCTURAL_TOKEN_RE = re.compile(
     r"|<t:[0-9]{6,22}:[RrDdFfTt]>",
     re.IGNORECASE,
 )
+_AFFILIATE_DISCORD_ROLE_MENTION_PATTERN = re.compile(r"<@&[0-9]{15,22}>")
+_AFFILIATE_LITERAL_POTENTIAL_PING_PATTERN = re.compile(r"(?i)@potential\s+sports\b|@potential\b")
+
+
+def is_affiliate_role_mention_noise_blob(blob: str) -> bool:
+    """
+    Dealer / collectibles routing posts that ping roles after a product link — not clean affiliated leads.
+
+    Examples: literal ``@Potential Sports @Potential`` after a slamgoods link, or Discord ``<@&role_id>`` pings.
+    """
+    raw = str(blob or "").strip()
+    if not raw:
+        return False
+    if not re.search(r"https?://", raw, re.IGNORECASE):
+        return False
+    if _AFFILIATE_DISCORD_ROLE_MENTION_PATTERN.search(raw):
+        return True
+    if _AFFILIATE_LITERAL_POTENTIAL_PING_PATTERN.search(raw):
+        return True
+    return False
 
 
 def is_mention_format_noise_blob(text_blob: str, attachments: Optional[List[Dict[str, Any]]] = None) -> bool:

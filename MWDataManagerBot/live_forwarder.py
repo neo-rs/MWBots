@@ -176,6 +176,8 @@ class MessageForwarder:
         self.global_content_cache: Dict[str, float] = {}
         self.global_content_ttl_seconds: int = int(cfg.GLOBAL_DUPLICATE_TTL_SECONDS or 300)
         self._affiliate_url_dedupe: Dict[str, float] = {}
+        # URL-stripped deal body (title/hashtags) — same product, different wrapper links (walmrt.us vs mavely.app.link).
+        self._affiliate_deal_body_dedupe: Dict[str, float] = {}
         # Major-clearance pairing cache:
         # - key is (source_channel_id, embed_message_id) so interleaving messages from the same sender do not overwrite.
         # - follow-ups without a message-link will pair to the most recent pending embed for the same sender in that channel.
@@ -450,9 +452,7 @@ class MessageForwarder:
                 return True
         return False
 
-    def _prune_affiliate_url_dedupe(self, now: float, ttl_seconds: float) -> None:
-        if not self._affiliate_url_dedupe:
-            return
+    def _prune_affiliate_dedupe_caches(self, now: float, ttl_seconds: float) -> None:
         try:
             ttl = float(ttl_seconds or 0.0)
         except Exception:
@@ -460,12 +460,14 @@ class MessageForwarder:
         if ttl <= 0:
             return
         cutoff = now - ttl * 2
-        if len(self._affiliate_url_dedupe) <= 4000:
-            return
-        try:
-            self._affiliate_url_dedupe = {k: v for k, v in self._affiliate_url_dedupe.items() if v >= cutoff}
-        except Exception:
-            pass
+        for attr in ("_affiliate_url_dedupe", "_affiliate_deal_body_dedupe"):
+            cache = getattr(self, attr, None)
+            if not isinstance(cache, dict) or not cache or len(cache) <= 4000:
+                continue
+            try:
+                setattr(self, attr, {k: v for k, v in cache.items() if v >= cutoff})
+            except Exception:
+                pass
 
     def _evaluate_affiliated_links_send_gates(
         self,
@@ -474,16 +476,15 @@ class MessageForwarder:
         embeds: List[Dict[str, Any]],
         attachments: List[Dict[str, Any]],
         now: float,
-    ) -> Tuple[Optional[str], List[str]]:
+    ) -> Tuple[Optional[str], List[str], str]:
         """
         AFFILIATED_LINKS-only gates before sending.
 
         Returns:
-          (skip_reason, normalized_url_keys_to_register_after_successful_send)
+          (skip_reason, normalized_url_keys_to_register, deal_body_sig_for_dedupe)
 
-        Dedupe keys use utils.normalize_url() (query stripped). By default every non-Discord external URL
-        is tracked (see `affiliated_links_dedupe_all_external_urls`); legacy mode limits to
-        `affiliated_links_dedupe_domains` only.
+        URL dedupe: utils.normalize_url() per link. Deal-body dedupe: URL-stripped semantic signature
+        (same title/hashtags, different mavely vs merchant short links).
         """
         try:
             att_txt = " ".join([str(a.get("url", "")) for a in (attachments or []) if isinstance(a, dict)])
@@ -501,26 +502,38 @@ class MessageForwarder:
         except Exception:
             sup_gate = ""
         if sup_gate:
-            return sup_gate, []
+            return sup_gate, [], ""
 
         if bool(getattr(cfg, "AFFILIATED_LINKS_REQUIRE_IMAGE", False)):
             if not self._message_has_embed_or_attachment_image(embeds, attachments):
-                return "affiliated_links_missing_image", []
+                return "affiliated_links_missing_image", [], ""
 
         vis_urls = self._visible_http_urls_for_affiliate_gate(content, embeds)
 
         if bool(getattr(cfg, "AFFILIATED_LINKS_REQUIRE_EXTERNAL_HTTP_LINK", False)):
             external = [u for u in vis_urls if u.startswith("http") and not self._is_discord_cdn_or_chat_url(u)]
             if not external:
-                return "affiliated_links_missing_external_link", []
+                return "affiliated_links_missing_external_link", [], ""
+
+        deal_body_sig = ""
+        try:
+            deal_body_sig = generate_semantic_duplicate_signature(content, embeds, attachments) or ""
+        except Exception:
+            deal_body_sig = ""
 
         if not bool(getattr(cfg, "AFFILIATED_LINKS_DEDUPE_ENABLED", True)):
-            return None, []
+            return None, [], deal_body_sig
 
         try:
             ttl = float(getattr(cfg, "AFFILIATED_LINKS_DEDUPE_TTL_SECONDS", 86400) or 86400)
         except Exception:
             ttl = 86400.0
+
+        if deal_body_sig:
+            last_body = float(self._affiliate_deal_body_dedupe.get(deal_body_sig, 0.0) or 0.0)
+            if last_body and (now - last_body) < ttl:
+                return "affiliated_links_duplicate_deal_body", [], deal_body_sig
+
         domains = getattr(cfg, "AFFILIATED_LINKS_DEDUPE_DOMAINS", ()) or ()
         dedupe_all_external = bool(getattr(cfg, "AFFILIATED_LINKS_DEDUPE_ALL_EXTERNAL_URLS", True))
         keys_to_register: List[str] = []
@@ -551,10 +564,10 @@ class MessageForwarder:
             seen_k.add(nk)
             last = float(self._affiliate_url_dedupe.get(nk, 0.0) or 0.0)
             if last and (now - last) < ttl:
-                return "affiliated_links_duplicate_url", []
+                return "affiliated_links_duplicate_url", [], deal_body_sig
             keys_to_register.append(nk)
 
-        return None, keys_to_register
+        return None, keys_to_register, deal_body_sig
 
     def _major_clearance_attachments_without_barcode_noise(
         self,
@@ -1847,18 +1860,20 @@ class MessageForwarder:
             if str(tag or "") == "AFFILIATED_LINKS":
                 try:
                     async with self._ingress_dedupe_lock:
-                        skip_aff, aff_reg = self._evaluate_affiliated_links_send_gates(
+                        skip_aff, aff_reg, aff_body_sig = self._evaluate_affiliated_links_send_gates(
                             content=content,
                             embeds=embeds,
                             attachments=attachments,
                             now=now,
                         )
-                        if not skip_aff and aff_reg:
-                            for nk in aff_reg:
+                        if not skip_aff:
+                            for nk in aff_reg or []:
                                 if nk:
                                     self._affiliate_url_dedupe[str(nk)] = now
+                            if aff_body_sig:
+                                self._affiliate_deal_body_dedupe[str(aff_body_sig)] = now
                 except Exception as e:
-                    skip_aff, aff_reg = None, []
+                    skip_aff, aff_reg, aff_body_sig = None, [], ""
                     if cfg.VERBOSE:
                         try:
                             log_warn(f"affiliated_links gates error msg={message.id}: {type(e).__name__}: {e}")
@@ -1875,11 +1890,33 @@ class MessageForwarder:
                         pass
                     continue
                 dest_trace["_affiliate_dedupe_keys"] = list(aff_reg or [])
+                dest_trace["_affiliate_deal_body_sig"] = str(aff_body_sig or "")
                 try:
                     ttl_ad = float(getattr(cfg, "AFFILIATED_LINKS_DEDUPE_TTL_SECONDS", 86400) or 86400)
                 except Exception:
                     ttl_ad = 86400.0
                 dup_dest_url = False
+                aff_body_sig_dest = str(dest_trace.get("_affiliate_deal_body_sig") or "")
+                if aff_body_sig_dest:
+                    body_dest_key = (dest_channel_id, f"affbody-{aff_body_sig_dest}")
+                    last_bd = float(self.sent_to_destinations.get(body_dest_key, 0.0) or 0.0)
+                    if last_bd and (now - last_bd) < ttl_ad:
+                        dup_dest_url = True
+                        dest_trace["decision"] = {
+                            "action": "skip",
+                            "reason": "affiliated_links_duplicate_deal_body_dest",
+                            "age_seconds": round(now - last_bd, 3),
+                        }
+                        dest_traces.append(dest_trace)
+                        try:
+                            trace.setdefault("forwarder", {}).setdefault("affiliate_gates", []).append(
+                                {
+                                    "reason": "affiliated_links_duplicate_deal_body_dest",
+                                    "dest": int(dest_channel_id or 0),
+                                }
+                            )
+                        except Exception:
+                            pass
                 for nk in dest_trace.get("_affiliate_dedupe_keys") or []:
                     if not nk:
                         continue
@@ -1959,7 +1996,10 @@ class MessageForwarder:
                         for nk in dest_trace.get("_affiliate_dedupe_keys") or []:
                             if nk:
                                 self.sent_to_destinations[(dest_channel_id, f"affurl-{nk}")] = now
-                        self._prune_affiliate_url_dedupe(
+                        abs_dest = str(dest_trace.get("_affiliate_deal_body_sig") or "")
+                        if abs_dest:
+                            self.sent_to_destinations[(dest_channel_id, f"affbody-{abs_dest}")] = now
+                        self._prune_affiliate_dedupe_caches(
                             now,
                             float(getattr(cfg, "AFFILIATED_LINKS_DEDUPE_TTL_SECONDS", 86400) or 86400),
                         )
