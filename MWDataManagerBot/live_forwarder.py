@@ -39,6 +39,7 @@ from utils import (
     append_image_attachments_as_embeds,
     chunk_text,
     collect_embed_strings,
+    collect_external_affiliate_urls,
     extract_all_raw_links_from_text,
     extract_urls_from_text,
     format_embeds_for_forwarding,
@@ -46,6 +47,7 @@ from utils import (
     generate_semantic_duplicate_signature,
     is_image_attachment,
     is_discord_media_url,
+    is_discord_chat_or_media_url,
     normalize_url,
     record_link_host_samples_from_text,
     strip_discord_channel_mentions,
@@ -431,46 +433,10 @@ class MessageForwarder:
         return False
 
     def _is_discord_cdn_or_chat_url(self, url: str) -> bool:
-        u = str(url or "").strip()
-        if not u:
-            return True
-        try:
-            if is_discord_media_url(u):
-                return True
-        except Exception:
-            pass
-        try:
-            h = (urlparse(u).netloc or "").lower()
-            if h.startswith("www."):
-                h = h[4:]
-            if h in ("discord.com", "discordapp.com", "discord.gg"):
-                return True
-            if h.endswith(".discord.com"):
-                return True
-        except Exception:
-            pass
-        return False
+        return bool(is_discord_chat_or_media_url(url))
 
     def _visible_http_urls_for_affiliate_gate(self, content: str, embeds: List[Dict[str, Any]]) -> List[str]:
-        blob = (str(content or "") + " " + " ".join(collect_embed_strings(embeds or []))).strip()
-        found = list(extract_urls_from_text(blob))
-        for ed in embeds or []:
-            if not isinstance(ed, dict):
-                continue
-            u = str(ed.get("url") or "").strip()
-            if u.startswith(("http://", "https://")):
-                nu = normalize_url(u)
-                if nu:
-                    found.append(nu)
-        out: List[str] = []
-        seen: Set[str] = set()
-        for u in found:
-            s = str(u or "").strip()
-            if not s or s in seen:
-                continue
-            seen.add(s)
-            out.append(s)
-        return out
+        return collect_external_affiliate_urls(content, embeds, None)
 
     def _host_matches_dedupe_domains(self, host: str, domains: Tuple[str, ...]) -> bool:
         h = (host or "").lower().strip()
@@ -548,7 +514,7 @@ class MessageForwarder:
             if not external:
                 return "affiliated_links_missing_external_link", []
 
-        if not bool(getattr(cfg, "AFFILIATED_LINKS_DEDUPE_ENABLED", False)):
+        if not bool(getattr(cfg, "AFFILIATED_LINKS_DEDUPE_ENABLED", True)):
             return None, []
 
         try:
@@ -1880,12 +1846,17 @@ class MessageForwarder:
 
             if str(tag or "") == "AFFILIATED_LINKS":
                 try:
-                    skip_aff, aff_reg = self._evaluate_affiliated_links_send_gates(
-                        content=content,
-                        embeds=embeds,
-                        attachments=attachments,
-                        now=now,
-                    )
+                    async with self._ingress_dedupe_lock:
+                        skip_aff, aff_reg = self._evaluate_affiliated_links_send_gates(
+                            content=content,
+                            embeds=embeds,
+                            attachments=attachments,
+                            now=now,
+                        )
+                        if not skip_aff and aff_reg:
+                            for nk in aff_reg:
+                                if nk:
+                                    self._affiliate_url_dedupe[str(nk)] = now
                 except Exception as e:
                     skip_aff, aff_reg = None, []
                     if cfg.VERBOSE:
@@ -1904,6 +1875,34 @@ class MessageForwarder:
                         pass
                     continue
                 dest_trace["_affiliate_dedupe_keys"] = list(aff_reg or [])
+                try:
+                    ttl_ad = float(getattr(cfg, "AFFILIATED_LINKS_DEDUPE_TTL_SECONDS", 86400) or 86400)
+                except Exception:
+                    ttl_ad = 86400.0
+                dup_dest_url = False
+                for nk in dest_trace.get("_affiliate_dedupe_keys") or []:
+                    if not nk:
+                        continue
+                    url_dest_key = (dest_channel_id, f"affurl-{nk}")
+                    last_u = float(self.sent_to_destinations.get(url_dest_key, 0.0) or 0.0)
+                    if last_u and (now - last_u) < ttl_ad:
+                        dup_dest_url = True
+                        dest_trace["decision"] = {
+                            "action": "skip",
+                            "reason": "affiliated_links_duplicate_url_dest",
+                            "affurl": str(nk),
+                            "age_seconds": round(now - last_u, 3),
+                        }
+                        dest_traces.append(dest_trace)
+                        try:
+                            trace.setdefault("forwarder", {}).setdefault("affiliate_gates", []).append(
+                                {"reason": "affiliated_links_duplicate_url_dest", "dest": int(dest_channel_id or 0)}
+                            )
+                        except Exception:
+                            pass
+                        break
+                if dup_dest_url:
+                    continue
 
             # Destination+content dedupe (prevents rerouter/webhook reposts from re-forwarding).
             try:
@@ -1955,22 +1954,20 @@ class MessageForwarder:
                     self.sent_to_destinations[(dest_channel_id, f"sig-{content_sig}")] = now
                 except Exception:
                     pass
-                forwarded += 1
-                dest_trace["decision"] = {"action": "sent"}
-                dest_traces.append(dest_trace)
-
                 if str(tag or "") == "AFFILIATED_LINKS":
                     try:
                         for nk in dest_trace.get("_affiliate_dedupe_keys") or []:
                             if nk:
-                                self._affiliate_url_dedupe[str(nk)] = now
-                        try:
-                            ttl_ad = float(getattr(cfg, "AFFILIATED_LINKS_DEDUPE_TTL_SECONDS", 86400) or 86400)
-                        except Exception:
-                            ttl_ad = 86400.0
-                        self._prune_affiliate_url_dedupe(now, ttl_ad)
+                                self.sent_to_destinations[(dest_channel_id, f"affurl-{nk}")] = now
+                        self._prune_affiliate_url_dedupe(
+                            now,
+                            float(getattr(cfg, "AFFILIATED_LINKS_DEDUPE_TTL_SECONDS", 86400) or 86400),
+                        )
                     except Exception:
                         pass
+                forwarded += 1
+                dest_trace["decision"] = {"action": "sent"}
+                dest_traces.append(dest_trace)
 
                 # Optional: after a successful HD_TOTAL_INVENTORY forward, delete the source message
                 # so the same monitor embed doesn't remain visible in both channels.

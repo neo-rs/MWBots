@@ -398,7 +398,7 @@ PRICE_ERROR_PATTERN = re.compile(
     r"price\s+error|"
     # "messed up" alone is too noisy (process/signup/admin text). Require a commerce/price adjacency.
     r"(?:price|checkout|cart|listing|sku)\s+messed\s+up|messed\s+up\s+(?:price|checkout|cart|listing)|"
-    r"mispriced|glitched\s+price|stack(?:ed|ing)\s+glitch|glitch(?:ed)?)\b",
+    r"mispriced|glitched\s+price|stack(?:ed|ing)\s+glitch|glitch(?:ing|ed)?)\b",
     re.IGNORECASE,
 )
 

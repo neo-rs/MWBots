@@ -64,6 +64,82 @@ def extract_urls_from_text(text: str) -> List[str]:
     return [normalize_url(u) for u in urls]
 
 
+def is_discord_chat_or_media_url(url: str) -> bool:
+    """True for Discord CDN attachments and discord.com / discordapp chat links (not merchant URLs)."""
+    u = str(url or "").strip()
+    if not u:
+        return True
+    try:
+        if is_discord_media_url(u):
+            return True
+    except Exception:
+        pass
+    try:
+        h = (urlparse(u).netloc or "").lower()
+        if h.startswith("www."):
+            h = h[4:]
+        if h in ("discord.com", "discordapp.com", "discord.gg", "discord.me"):
+            return True
+        if h.endswith(".discord.com"):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def collect_external_affiliate_urls(
+    content: str,
+    embeds: Optional[List[Dict[str, Any]]],
+    attachments: Optional[List[Dict[str, Any]]] = None,
+) -> List[str]:
+    """
+    Sorted unique normalized external http(s) URLs from visible message body + embeds + attachments.
+    Used for AFFILIATED_LINKS duplicate detection (plain-text + link unfurl vs bot embed shapes).
+    """
+    blob = (str(content or "") + " " + " ".join(collect_embed_strings(embeds or []))).strip()
+    found: List[str] = list(extract_urls_from_text(blob))
+    for ed in embeds or []:
+        if not isinstance(ed, dict):
+            continue
+        u = str(ed.get("url") or "").strip()
+        if u.startswith(("http://", "https://")):
+            nu = normalize_url(u)
+            if nu:
+                found.append(nu)
+    for a in attachments or []:
+        if not isinstance(a, dict):
+            continue
+        u = str(a.get("url") or a.get("proxy_url") or "").strip()
+        if u.startswith(("http://", "https://")):
+            nu = normalize_url(u)
+            if nu:
+                found.append(nu)
+    out: List[str] = []
+    seen: Set[str] = set()
+    for u in found:
+        s = str(u or "").strip()
+        if not s or s in seen:
+            continue
+        if is_discord_chat_or_media_url(s):
+            continue
+        seen.add(s)
+        out.append(s)
+    out.sort()
+    return out
+
+
+def generate_affiliate_external_url_signature(
+    content: str,
+    embeds: Optional[List[Dict[str, Any]]],
+    attachments: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """MD5 of sorted external deal URLs — same link in chat vs embed-only posts hashes identically."""
+    urls = collect_external_affiliate_urls(content, embeds, attachments)
+    if not urls:
+        return ""
+    return hashlib.md5("|".join(urls).encode("utf-8")).hexdigest()
+
+
 def collect_embed_strings(
     embeds: Optional[List[Dict[str, Any]]], *, omit_embed_identity: bool = False
 ) -> List[str]:
@@ -338,10 +414,15 @@ def generate_content_signature(
     components.extend(attachment_urls)
 
     if for_cross_post_dedupe:
-        url_blob = (content or "") + "\n" + "\n".join(collect_embed_strings(embeds or []))
-        url_set = sorted({u for u in extract_urls_from_text(url_blob) if u})
-        if url_set:
-            components.append("URLSET:" + "|".join(url_set))
+        ext_urls = collect_external_affiliate_urls(content, embeds, attachments)
+        if ext_urls:
+            # Same merchant short link in plain chat vs bot embed (different unfurl metadata) → one signature.
+            components.append("EXTURLSET:" + "|".join(ext_urls))
+        else:
+            url_blob = (content or "") + "\n" + "\n".join(collect_embed_strings(embeds or []))
+            url_set = sorted({u for u in extract_urls_from_text(url_blob) if u})
+            if url_set:
+                components.append("URLSET:" + "|".join(url_set))
 
     signature_source = "||".join(components).strip()
     return hashlib.md5(signature_source.encode("utf-8")).hexdigest()
