@@ -1436,7 +1436,7 @@ class InstorebotForwarder:
     ) -> Dict[str, Any]:
         """
         Capture a clipped PNG of the Amazon product page price/coupon block and
-        the buybox column (canonical: `#apex_desktop` + `form#addToCart`) using
+        the buybox column (canonical: `#apex_desktop` + right column from In Stock) using
         the same trusted CDP Chrome the eBay scraper attaches to.
 
         Returns a dict with at least: status, screenshot_path, reason, targets.
