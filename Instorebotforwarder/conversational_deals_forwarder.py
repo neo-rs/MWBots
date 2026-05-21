@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import discord
 
@@ -29,17 +29,16 @@ __all__ = ["gemini_status", "rewrite_deal_post_keep_urls"]
 SOURCE_CHANNEL_ID = 1438970053352751215
 DEST_CHANNEL_ID = 1484473267031904287
 
-# Canonical mapping: multiple sources may share the same "conversational" rewrite+embed pipeline.
-# Keep this as the single source of truth so InstorebotForwarder doesn't need a parallel forwarder.
+# Mavely Leads — affiliated rewrite+embed pipeline with food vs personal routing (config-driven).
+AFFILIATED_LEADS_SOURCE_CHANNEL_ID = 1435308472639160522
+
+# Canonical 1:1 conversational mapping only. Affiliated leads use `affiliated_leads` in config.json.
 CHANNEL_MAP: Dict[int, int] = {
-    # Conversational deals (existing)
     int(SOURCE_CHANNEL_ID): int(DEST_CHANNEL_ID),
-    # Mavely Leads (affiliated_leads) — run the same conversational pipeline
-    1435308472639160522: 1484599902863622195,
 }
 
 # Canonical multi-source export for the caller hard-stop (so these channels never fall back to Amazon routing).
-SOURCE_CHANNEL_IDS = sorted(CHANNEL_MAP.keys())
+SOURCE_CHANNEL_IDS = sorted({int(SOURCE_CHANNEL_ID), int(AFFILIATED_LEADS_SOURCE_CHANNEL_ID)})
 
 
 _RE_URL = re.compile(r"(?i)\bhttps?://\S+")
@@ -81,6 +80,87 @@ def _strip_source_artifacts(text: str) -> str:
     s = re.sub(r"[ \t]+\n", "\n", s)
     s = re.sub(r"\n{3,}", "\n\n", s).strip()
     return s
+
+
+def _safe_channel_id(raw: Any) -> Optional[int]:
+    try:
+        v = int(raw)
+    except Exception:
+        return None
+    return v if v > 0 else None
+
+
+def load_affiliated_leads_routes(cfg: Mapping[str, Any]) -> Optional[Dict[str, int]]:
+    """
+    Config block `affiliated_leads`: source_channel_id, dest_personal, dest_food.
+    Returns None when misconfigured so affiliated messages are not half-routed.
+    """
+    raw = (cfg or {}).get("affiliated_leads")
+    if not isinstance(raw, dict):
+        return None
+    src = _safe_channel_id(raw.get("source_channel_id") or AFFILIATED_LEADS_SOURCE_CHANNEL_ID)
+    personal = _safe_channel_id(raw.get("dest_personal"))
+    food = _safe_channel_id(raw.get("dest_food"))
+    if not src or not personal or not food:
+        return None
+    return {"source_channel_id": src, "dest_personal": personal, "dest_food": food}
+
+
+def _affiliated_food_keywords(cfg: Mapping[str, Any]) -> List[str]:
+    raw = (cfg or {}).get("affiliated_food_keywords")
+    if isinstance(raw, list) and raw:
+        return [str(k).strip() for k in raw if str(k).strip()]
+    # Fallback: reuse Amazon grocery keyword list when affiliated list is absent.
+    raw2 = (cfg or {}).get("amazon_grocery_keywords")
+    if isinstance(raw2, list):
+        return [str(k).strip() for k in raw2 if str(k).strip()]
+    return []
+
+
+def classify_affiliated_food(text: str, cfg: Mapping[str, Any]) -> Tuple[bool, str]:
+    """
+    True when the lead is primarily human-consumable food (edible / grocery).
+
+    Default is personal (batteries, games, electronics, etc.) unless a configured
+    keyword matches. This is intentionally separate from Amazon department scraping.
+    """
+    low = (text or "").lower()
+    if not low.strip():
+        return False, "empty_text:personal"
+    for kw in _affiliated_food_keywords(cfg):
+        k = kw.strip().lower()
+        if not k:
+            continue
+        if " " in k or "&" in k:
+            if k in low:
+                return True, f"keyword:{k}"
+        else:
+            if re.search(rf"(?<![a-z0-9]){re.escape(k)}(?![a-z0-9])", low):
+                return True, f"keyword:{k}"
+    return False, "default:personal"
+
+
+def resolve_destination_channel_id(
+    src_id: int,
+    cfg: Mapping[str, Any],
+    *,
+    message_text: str,
+) -> Tuple[Optional[int], str]:
+    """
+    Pick destination channel for conversational or affiliated sources.
+    """
+    fixed = CHANNEL_MAP.get(int(src_id))
+    if fixed:
+        return int(fixed), "conversational:fixed"
+
+    routes = load_affiliated_leads_routes(cfg)
+    if routes and int(src_id) == int(routes["source_channel_id"]):
+        is_food, why = classify_affiliated_food(message_text, cfg)
+        if is_food:
+            return int(routes["dest_food"]), f"affiliated:food:{why}"
+        return int(routes["dest_personal"]), f"affiliated:personal:{why}"
+
+    return None, ""
 
 
 def first_url_in_text(text: str) -> str:
@@ -283,13 +363,21 @@ async def forward_runtime_message(inst: Any, message: discord.Message) -> bool:
         src_id = int(getattr(message.channel, "id", 0) or 0)
     except Exception:
         return False
-    dest_id = CHANNEL_MAP.get(int(src_id))
-    if not dest_id:
-        return False
 
     cfg = getattr(inst, "config", None) or {}
     bot = getattr(inst, "bot", None)
     if bot is None:
+        return False
+
+    src_block = simple_message_block_from_discord_message(message)
+    if not src_block:
+        # Nothing usable to forward (no content, no embed text, no attachments).
+        return True
+
+    dest_id, route_reason = resolve_destination_channel_id(
+        int(src_id), cfg, message_text=src_block
+    )
+    if not dest_id:
         return False
 
     ch = bot.get_channel(int(dest_id))
@@ -301,10 +389,15 @@ async def forward_runtime_message(inst: Any, message: discord.Message) -> bool:
     if not isinstance(ch, (discord.TextChannel, discord.Thread, discord.DMChannel)):
         return True
 
-    src_block = simple_message_block_from_discord_message(message)
-    if not src_block:
-        # Nothing usable to forward (no content, no embed text, no attachments).
-        return True
+    try:
+        _log.info(
+            "conversational_deals_forwarder route: src=%s dest=%s reason=%s",
+            int(src_id),
+            int(dest_id),
+            route_reason[:120],
+        )
+    except Exception:
+        pass
 
     desc = await rewrite_description(cfg, src_block, no_gemini=False)
     desc = str(desc or "").strip()
@@ -317,9 +410,10 @@ async def forward_runtime_message(inst: Any, message: discord.Message) -> bool:
         try:
             _log.info(
                 "conversational_deals_forwarder fallback: posting cleaned original "
-                "(gemini=unavailable) src_channel=%s dest_channel=%s",
+                "(gemini=unavailable) src_channel=%s dest_channel=%s route=%s",
                 int(src_id),
                 int(dest_id),
+                route_reason[:80],
             )
         except Exception:
             pass
