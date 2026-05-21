@@ -69,11 +69,13 @@ try:
     # Oracle live tree (module sits alongside this file).
     from amazon_buybox_dom_screenshot import (  # type: ignore
         capture_amazon_buybox_screenshot,
+        evaluate_amazon_buybox_price_gate,
     )
 except Exception:
     # MWBots repo layout / package import.
     from Instorebotforwarder.amazon_buybox_dom_screenshot import (  # type: ignore
         capture_amazon_buybox_screenshot,
+        evaluate_amazon_buybox_price_gate,
     )
 try:
     # Oracle live tree (module sits alongside this file).
@@ -1274,6 +1276,43 @@ class InstorebotForwarder:
             return True
         return False
 
+    def _amazon_price_strict_enabled(self) -> bool:
+        v = (self.config or {}).get("amazon_price_strict_enabled", True)
+        if isinstance(v, bool):
+            return v
+        s = str(v or "").strip().lower()
+        if s in {"0", "false", "no", "n", "off"}:
+            return False
+        return True
+
+    def _promo_discount_pct_for_gate(self, raw_discount: str, scraped: Optional[Dict[str, Any]]) -> Optional[int]:
+        blobs: List[str] = [str(raw_discount or "")]
+        if scraped:
+            blobs.append(str((scraped or {}).get("discount_notes") or ""))
+        for blob in blobs:
+            for m in re.finditer(r"(\d{1,2})\s*%", blob):
+                try:
+                    return int(m.group(1))
+                except Exception:
+                    continue
+            m2 = re.search(r"save\s+(\d{1,2})\s*%", blob.lower())
+            if m2:
+                try:
+                    return int(m2.group(1))
+                except Exception:
+                    pass
+        return None
+
+    def _price_value_for_gate(self, price_str: str) -> Optional[float]:
+        norm = self._normalize_price_str(price_str) or (price_str or "").strip()
+        if not norm:
+            return None
+        try:
+            val, _ = self._price_to_float(norm)
+            return val
+        except Exception:
+            return None
+
     def _amazon_title_compact_enabled(self) -> bool:
         """When enabled, the EMBED display title is shortened (eBay search input is untouched)."""
         v = (self.config or {}).get("amazon_title_compact_enabled", True)
@@ -1356,8 +1395,7 @@ class InstorebotForwarder:
         buybox_result: Optional[Dict[str, Any]],
         current_price: str,
         before_price: str,
-        discount_pct_str: str,
-    ) -> Tuple[str, str, str, List[str]]:
+    ) -> Tuple[str, str, List[str]]:
         """
         Replace (current_price, before_price, discount_pct_str) with values
         read off the live Amazon page during the buybox capture.
@@ -1367,26 +1405,23 @@ class InstorebotForwarder:
         screenshot disagreeing when the source-message price is stale.
 
         Rules (no silent mismatches):
-          - Override applies only when buybox status == "ok" AND a usable
-            current price was extracted from the page DOM.
-          - Before/discount move WITH current. We never mix source `Before`
-            with page `Current` - that would still be a misleading delta.
-          - If the page no longer shows a strike-through "list" price, the
-            embed shows just `Current Price` with no `Before` / `Discount`
-            lines. That's honest: Amazon is no longer marketing it as a deal.
-          - If page list <= page current (no real discount), we treat list as
-            absent (same outcome as above).
+          - Live page **current** price wins when buybox capture succeeds.
+          - Live page **list/before** wins only when the page shows a real
+            strike-through list price above current.
+          - If the page omits list price (common on limited-time / coupon SKUs),
+            keep message/scrape `before_price` so the card still shows
+            Before / Discount when the source lead had them.
+          - Caller recomputes `discount_pct_str` and Price Glitch after merge.
 
-        Returns: (price, before_price, discount_pct_str, override_notes).
-        `override_notes` is empty when nothing changed.
+        Returns: (current_price, before_price, override_notes).
         """
         if not isinstance(buybox_result, dict):
-            return current_price, before_price, discount_pct_str, []
+            return current_price, before_price, []
         if str(buybox_result.get("status") or "") != "ok":
-            return current_price, before_price, discount_pct_str, []
+            return current_price, before_price, []
         prices = buybox_result.get("prices") or {}
         if not isinstance(prices, dict):
-            return current_price, before_price, discount_pct_str, []
+            return current_price, before_price, []
 
         new_current_text = str(prices.get("current_price_text") or "").strip()
         try:
@@ -1394,7 +1429,9 @@ class InstorebotForwarder:
         except Exception:
             new_current_val = None
         if not new_current_text or new_current_val is None or new_current_val <= 0:
-            return current_price, before_price, discount_pct_str, []
+            return current_price, before_price, []
+
+        new_current_text = self._normalize_price_str(new_current_text) or new_current_text
 
         new_list_text = str(prices.get("list_price_text") or "").strip()
         try:
@@ -1402,29 +1439,48 @@ class InstorebotForwarder:
         except Exception:
             new_list_val = None
 
-        if new_list_val is not None and new_list_val <= new_current_val:
-            new_list_text = ""
-            new_list_val = None
+        out_before = before_price
+        if new_list_val is not None and new_list_val > new_current_val:
+            out_before = self._normalize_price_str(new_list_text) or new_list_text
 
-        new_discount = ""
+        notes: List[str] = []
+        if new_current_text != (current_price or "").strip():
+            notes.append(f"current: {current_price or 'none'} -> {new_current_text}")
+        if out_before != (before_price or "").strip():
+            notes.append(f"before: {before_price or 'none'} -> {out_before or 'kept'}")
+
+        return new_current_text, out_before, notes
+
+    def _finalize_card_prices(self, price: str, before_price: str) -> Tuple[str, str, str, bool]:
+        """
+        Canonical display prices for the Amazon embed after any buybox merge.
+
+        Returns: (current, before, discount_pct_str, price_glitch).
+        """
+        price = self._normalize_price_str(price) or (price or "").strip()
+        before_price = self._normalize_price_str(before_price) or (before_price or "").strip()
+
+        discount_pct_str = ""
+        price_glitch = False
         try:
-            pct_val_raw = prices.get("discount_pct_value")
-            pct_val = float(pct_val_raw) if pct_val_raw is not None else None
+            cur_val, cur_sym = self._price_to_float(price)
+            bef_val, bef_sym = self._price_to_float(before_price)
         except Exception:
-            pct_val = None
-        if pct_val and pct_val > 0:
-            new_discount = f"{int(round(pct_val))}% OFF"
-        elif new_list_val is not None and new_list_val > new_current_val and new_list_val > 0:
-            pct = int(round(((new_list_val - new_current_val) / new_list_val) * 100.0))
-            if pct > 0:
-                new_discount = f"{pct}% OFF"
+            cur_val, cur_sym = None, ""
+            bef_val, bef_sym = None, ""
 
-        notes: List[str] = [
-            f"current: {current_price or 'none'} -> {new_current_text}",
-            f"before:  {before_price or 'none'} -> {new_list_text or 'none'}",
-            f"discount: {discount_pct_str or 'none'} -> {new_discount or 'none'}",
-        ]
-        return new_current_text, new_list_text, new_discount, notes
+        if (cur_val is not None) and (bef_val is not None) and bef_val > 0 and cur_val < bef_val:
+            if (not cur_sym) or (not bef_sym) or (cur_sym == bef_sym):
+                pct = int(round(((bef_val - cur_val) / bef_val) * 100.0))
+                if pct > 0:
+                    discount_pct_str = f"{pct}% OFF"
+                    _log_flow("PCT_OFF", pct=str(pct), current=str(price), before=str(before_price))
+                    if pct >= 90:
+                        price_glitch = True
+        if cur_val is not None and cur_val < 1.0:
+            price_glitch = True
+
+        return price, before_price, discount_pct_str, price_glitch
 
     async def _scrape_amazon_buybox_screenshot(
         self,
@@ -5217,11 +5273,7 @@ class InstorebotForwarder:
         except Exception:
             avail = ""
         if avail in {"oos", "out_of_stock", "unavailable"}:
-            _log_flow("SKIP_OOS", asin=(asin or ""), url=final_url)
-            if dedupe_reserved and asin:
-                self._dedupe_release(asin)
-                dedupe_reserved = False
-            return None, {"urls": urls, "amazon": {"asin": asin, "final_url": final_url, "url_used": det.url_used}, "skip_reason": "oos"}
+            _log_flow("SCRAPE_OOS_HINT", asin=(asin or ""), url=final_url)
 
         # Final fields:
         # - Title: prefer Amazon product name when available, else message reconstruction.
@@ -5278,8 +5330,6 @@ class InstorebotForwarder:
             img_src = "none"
         _log_flow("IMAGE", source=img_src, has=("1" if bool(image_url) else "0"))
 
-        # Percent off (only when both prices are known and Before > Current).
-        discount_pct_str = ""
         try:
             cur_val, cur_sym = self._price_to_float(price)
             bef_val, bef_sym = self._price_to_float(before_price)
@@ -5309,22 +5359,8 @@ class InstorebotForwarder:
                 return None, {"urls": urls, "amazon": {"asin": asin, "final_url": final_url, "url_used": det.url_used}, "skip_reason": "current_gt_before"}
 
         _log_flow("PRICES", current_src=price_src, before_src=before_src, has_current=("1" if bool(price) else "0"), has_before=("1" if bool(before_price) else "0"))
-        price_glitch = False
-        if (cur_val is not None) and (bef_val is not None) and bef_val > 0 and cur_val < bef_val:
-            # Only show when symbols match (or one is missing).
-            if (not cur_sym) or (not bef_sym) or (cur_sym == bef_sym):
-                pct = int(round(((bef_val - cur_val) / bef_val) * 100.0))
-                if pct > 0:
-                    discount_pct_str = f"{pct}% OFF"
-                    _log_flow("PCT_OFF", pct=str(pct), current=str(price), before=str(before_price))
-                    # Price Glitch: 90% OFF or more
-                    if pct >= 90:
-                        price_glitch = True
-        # Price Glitch: current price below $1
-        if cur_val is not None and cur_val < 1.0:
-            price_glitch = True
 
-        # Deal notes (coupon/sub&save/limited time deal) from scrape, rendered in your preferred wording.
+        # Deal notes (coupon/sub&save/limited time deal) from scrape — journal/trace only, not embed body.
         raw_discount = str((scraped or {}).get("discount_notes") or "").strip()
         discount_lines: List[str] = []
         if raw_discount:
@@ -5456,6 +5492,103 @@ class InstorebotForwarder:
         dest_id, route_reason = self._pick_dest_channel_id(source_channel_id=(src_id or None), category=category, enrich_failed=False)
         _log_flow("ROUTE", dest_id=(dest_id or ""), reason=route_reason)
 
+        # Amazon buybox capture + strict price gate MUST run before eBay value
+        # checks so upside/gates use the live page item price, not source scrape.
+        amazon_buybox_screenshot_path = ""
+        amazon_buybox_trace: Dict[str, Any] = {}
+        amazon_price_gate_ok = True
+        amazon_gate_failure_line = ""
+        source_price_for_gate = price
+        if self._amazon_price_strict_enabled():
+            if not (final_url and self._amazon_buybox_screenshot_enabled()):
+                amazon_price_gate_ok = False
+                amazon_gate_failure_line = (
+                    "Amazon Gate: buybox capture required but disabled or missing URL; sent to review."
+                )
+                _log_flow("AMAZON_PRICE_GATE_FAIL", reason="buybox_required_missing")
+            else:
+                buybox_result = await self._scrape_amazon_buybox_screenshot(
+                    final_url,
+                    dest_channel_id=(int(dest_id) if dest_id else None),
+                    source_channel_id=(src_id or None),
+                    source_label=source_label,
+                )
+                amazon_buybox_trace = dict(buybox_result or {})
+                if str(buybox_result.get("status") or "") == "ok":
+                    amazon_buybox_screenshot_path = str(buybox_result.get("screenshot_path") or "")
+                promo_pct = self._promo_discount_pct_for_gate(raw_discount, scraped)
+                gate = evaluate_amazon_buybox_price_gate(
+                    buybox_result or {},
+                    source_current_value=self._price_value_for_gate(source_price_for_gate),
+                    source_before_value=self._price_value_for_gate(before_price),
+                    promo_discount_pct=promo_pct,
+                    cfg=self.config or {},
+                )
+                amazon_price_gate_ok = bool(gate.get("ok"))
+                if not amazon_price_gate_ok:
+                    amazon_gate_failure_line = str(gate.get("failure_line") or "").strip()
+                    _log_flow(
+                        "AMAZON_PRICE_GATE_FAIL",
+                        reason=str(gate.get("reason") or ""),
+                        detail=" | ".join(gate.get("notes") or [])[:220],
+                    )
+                else:
+                    new_price, new_before, override_notes = self._apply_buybox_price_override(
+                        buybox_result=buybox_result,
+                        current_price=price,
+                        before_price=before_price,
+                    )
+                    if override_notes:
+                        price = new_price
+                        before_price = new_before
+                        _log_flow(
+                            "PRICE_OVERRIDE",
+                            source="amazon_buybox_dom",
+                            changes=" | ".join(override_notes)[:300],
+                        )
+        elif final_url and self._amazon_buybox_screenshot_enabled():
+            buybox_result = await self._scrape_amazon_buybox_screenshot(
+                final_url,
+                dest_channel_id=(int(dest_id) if dest_id else None),
+                source_channel_id=(src_id or None),
+                source_label=source_label,
+            )
+            amazon_buybox_trace = dict(buybox_result or {})
+            if str(buybox_result.get("status") or "") == "ok":
+                amazon_buybox_screenshot_path = str(buybox_result.get("screenshot_path") or "")
+                new_price, new_before, override_notes = self._apply_buybox_price_override(
+                    buybox_result=buybox_result,
+                    current_price=price,
+                    before_price=before_price,
+                )
+                if override_notes:
+                    price = new_price
+                    before_price = new_before
+                    _log_flow(
+                        "PRICE_OVERRIDE",
+                        source="amazon_buybox_dom",
+                        changes=" | ".join(override_notes)[:300],
+                    )
+
+        if not amazon_price_gate_ok:
+            price = ""
+            before_price = ""
+            gate_prices = amazon_buybox_trace.get("prices") if isinstance(amazon_buybox_trace.get("prices"), dict) else {}
+            if gate_prices and not gate_prices.get("unit_price_rejected") and not gate_prices.get("out_of_stock"):
+                pt = str(gate_prices.get("current_price_text") or "").strip()
+                if pt:
+                    price = self._normalize_price_str(pt) or pt
+                lt = str(gate_prices.get("list_price_text") or "").strip()
+                try:
+                    lv = float(gate_prices.get("list_price_value"))
+                    cv = float(gate_prices.get("current_price_value"))
+                except Exception:
+                    lv = cv = None
+                if lt and lv is not None and cv is not None and lv > cv:
+                    before_price = self._normalize_price_str(lt) or lt
+
+        price, before_price, discount_pct_str, price_glitch = self._finalize_card_prices(price, before_price)
+
         # eBay first-8 sold comps are a hard posting gate for Amazon cards.
         ebay_comps_url = ""
         ebay_sold_new = "N/A"
@@ -5502,55 +5635,6 @@ class InstorebotForwarder:
                     ebay_sold_new = f"${low_val:,.2f} - ${high_val:,.2f}" if low_val != high_val else f"${low_val:,.2f}"
                     ebay_first8_avg_line = f"Avg Sold Price: ${avg_val:,.2f}"
 
-        # Amazon buybox capture (price + screenshot, single Playwright session).
-        # MUST run BEFORE the eBay gate so the gate compares the eBay average
-        # against the price the page is actually showing right now - not the
-        # potentially-stale price the source lead carried. The screenshot then
-        # backs the buybox image embed in the multi-image grid downstream.
-        amazon_buybox_screenshot_path = ""
-        amazon_buybox_trace: Dict[str, Any] = {}
-        if final_url and self._amazon_buybox_screenshot_enabled():
-            buybox_result = await self._scrape_amazon_buybox_screenshot(
-                final_url,
-                dest_channel_id=(int(dest_id) if dest_id else None),
-                source_channel_id=(src_id or None),
-                source_label=source_label,
-            )
-            amazon_buybox_trace = dict(buybox_result or {})
-            if str(buybox_result.get("status") or "") == "ok":
-                amazon_buybox_screenshot_path = str(buybox_result.get("screenshot_path") or "")
-            new_price, new_before, new_discount, override_notes = self._apply_buybox_price_override(
-                buybox_result=buybox_result,
-                current_price=price,
-                before_price=before_price,
-                discount_pct_str=discount_pct_str,
-            )
-            if override_notes:
-                price = new_price
-                before_price = new_before
-                discount_pct_str = new_discount
-                _log_flow(
-                    "PRICE_OVERRIDE",
-                    source="amazon_buybox_dom",
-                    changes=" | ".join(override_notes)[:300],
-                )
-                # Recompute price_glitch with the authoritative page values so
-                # the "Price Glitch!" banner stays consistent with the embed.
-                try:
-                    cur_val_post, cur_sym_post = self._price_to_float(price)
-                    bef_val_post, bef_sym_post = self._price_to_float(before_price)
-                except Exception:
-                    cur_val_post, cur_sym_post = None, ""
-                    bef_val_post, bef_sym_post = None, ""
-                price_glitch = False
-                if (cur_val_post is not None) and (bef_val_post is not None) and bef_val_post > 0 and cur_val_post < bef_val_post:
-                    if (not cur_sym_post) or (not bef_sym_post) or (cur_sym_post == bef_sym_post):
-                        pct_post = int(round(((bef_val_post - cur_val_post) / bef_val_post) * 100.0))
-                        if pct_post >= 90:
-                            price_glitch = True
-                if cur_val_post is not None and cur_val_post < 1.0:
-                    price_glitch = True
-
         # eBay upside hint uses the (now possibly overridden) page price so the
         # "Roughly $X in upside per unit" line matches the displayed Current.
         if ebay_avg_sold_price_val is not None and ebay_sold_new_near and ebay_sold_new_near != "N/A":
@@ -5586,6 +5670,10 @@ class InstorebotForwarder:
                     f"(${cur_val_for_ebay_gate:,.2f} > ${ebay_avg_sold_price_val:,.2f}); sent to review."
                 )
         failed_ebay_dest_id = self._route_to_dest_id("enrich_failed") if not will_post_ebay else None
+        if not amazon_price_gate_ok:
+            will_post_ebay = False
+            if not failed_ebay_dest_id:
+                failed_ebay_dest_id = self._route_to_dest_id("enrich_failed")
         self._explain_ebay_first8_gate(
             trace_acc=ebay_trace,
             message_id=str(message.id),
@@ -5599,7 +5687,16 @@ class InstorebotForwarder:
         if not will_post_ebay:
             status = str(ebay_trace.get("status") or "unknown")
             reason = str(ebay_trace.get("reason") or "")[:140]
-            _log_flow("FILTER_SKIP", channel=dest_id, reason=f"ebay_first8_required_{status}", detail=reason)
+            if not amazon_price_gate_ok:
+                gate_reason = str((amazon_buybox_trace or {}).get("status") or "amazon_price_gate")
+                _log_flow(
+                    "FILTER_SKIP",
+                    channel=dest_id,
+                    reason=f"amazon_price_gate_{gate_reason}",
+                    detail=(amazon_gate_failure_line or reason)[:180],
+                )
+            else:
+                _log_flow("FILTER_SKIP", channel=dest_id, reason=f"ebay_first8_required_{status}", detail=reason)
             if not failed_ebay_dest_id and dedupe_reserved and asin:
                 self._dedupe_release(asin)
             if not failed_ebay_dest_id:
@@ -5611,9 +5708,14 @@ class InstorebotForwarder:
                 }
             original_dest_id = dest_id
             dest_id = failed_ebay_dest_id
-            route_reason = f"ebay_gate_failed:{status}"
+            if not amazon_price_gate_ok:
+                route_reason = f"amazon_price_gate:{str(amazon_buybox_trace.get('status') or 'failed')}"
+            else:
+                route_reason = f"ebay_gate_failed:{status}"
             use_enrich_failed_template = True
-            if not ebay_gate_failure_line:
+            if not amazon_price_gate_ok and amazon_gate_failure_line:
+                ebay_gate_failure_line = amazon_gate_failure_line
+            elif not ebay_gate_failure_line:
                 detail = f": {reason}" if reason else ""
                 ebay_gate_failure_line = f"eBay Gate: Required comps/value check failed ({status}{detail}); sent to review."
             _log_flow(
@@ -5626,10 +5728,9 @@ class InstorebotForwarder:
         # Build the "card body" to match your desired format (no footer/timestamp).
         #
         # Layout (canonical):
-        #   Current Price / Before / Discount / CODE [/ How it works + steps]
-        #   eBay Comps              (flush under deal info, NOT bold, still a link)
-        #   Avg Sold Price: $X
-        #   <upside>
+        #   [Price Glitch!] / Current Price / Before / Discount
+        #   eBay Comps (link) / Avg Sold Price / upside
+        # Scrape deal notes and source "How it works" steps stay in journal only.
         # The eBay gate-failure variant also sits flush under the deal info
         # (no blank line) so the failure note reads as part of the same card.
         #
@@ -5646,15 +5747,6 @@ class InstorebotForwarder:
             card_lines.append(f"Before: **{before_price}**")
         if discount_pct_str:
             card_lines.append(f"Discount: **{discount_pct_str}**")
-        if discount_lines:
-            card_lines.append("")
-            card_lines.extend([str(x) for x in discount_lines if str(x).strip()])
-        if promo_codes:
-            card_lines.append(f"CODE: {promo_codes}")
-        if steps_rephrased:
-            card_lines.append("")
-            card_lines.append("How it works:")
-            card_lines.append(steps_rephrased)
         # eBay Comps block: required first-8 DOM sold prices. Flush under the
         # deal info (no leading blank line) and the label is a plain link,
         # not bold, per the canonical layout above.
