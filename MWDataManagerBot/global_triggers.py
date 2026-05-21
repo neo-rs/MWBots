@@ -7,7 +7,7 @@ import settings_store as cfg
 from logging_utils import log_smartfilter
 from patterns import (
     AMAZON_LINK_PATTERN,
-    PRICE_ERROR_PATTERN,
+    price_error_lead_pattern_matches,
     passes_price_error_routing_gate,
     PROFITABLE_FLIP_PATTERN,
     is_amazon_deal_complicated_monitor_blob,
@@ -246,7 +246,7 @@ def detect_global_triggers(
         cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID
         and source_is_online
         and not source_is_instore
-        and PRICE_ERROR_PATTERN.search(normalize_message(price_error_blob))
+        and price_error_lead_pattern_matches(price_error_blob)
         and not is_amz_price_errors_monitor_blob(price_error_blob)
         and passes_price_error_routing_gate(
             price_error_blob,

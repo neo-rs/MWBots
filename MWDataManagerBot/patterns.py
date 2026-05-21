@@ -402,6 +402,20 @@ PRICE_ERROR_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+
+def price_error_lead_pattern_matches(blob: str) -> bool:
+    """
+    True when PRICE_ERROR keywords appear in deal body text, not only monitor footers.
+
+    FlipFlip / Glitch Incorporated posts include ``By: Glitch Incorporated`` in the footer; the bare
+    word ``glitch`` must not route those Amazon coupon deals to PRICE_ERROR.
+    """
+    raw = str(blob or "").strip()
+    if not raw:
+        return False
+    core = deal_substance_core_text(raw) or raw
+    return bool(PRICE_ERROR_PATTERN.search(core))
+
 # URL / money / %-off signals so we do not route (or treat as "complete") monitor stubs that only
 # carry a glitch headline + "…" + footer before MESSAGE_UPDATE fills the body.
 _DEAL_SUBSTANCE_SIGNAL_PATTERN = re.compile(

@@ -43,7 +43,7 @@ from patterns import (
     is_generic_instore_clearance_monitor_blob,
     LABEL_PATTERN,
     MAJOR_STORE_PATTERN,
-    PRICE_ERROR_PATTERN,
+    price_error_lead_pattern_matches,
     PROFITABLE_FLIP_PATTERN,
     SEASONAL_PATTERN,
     SNEAKERS_PATTERN,
@@ -1053,7 +1053,7 @@ def select_target_channel_id(
         cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID
         and source_group != "instore"
         and not is_amz_price_errors_monitor_blob(text_blob)
-        and PRICE_ERROR_PATTERN.search(text_blob)
+        and price_error_lead_pattern_matches(text_blob)
     ):
         if passes_price_error_routing_gate(
             text_blob,
@@ -1438,7 +1438,7 @@ def detect_all_link_types(
         cfg.SMARTFILTER_PRICE_ERROR_GLITCHED_CHANNEL_ID
         and source_group != "instore"
         and not is_amz_price_errors_monitor_blob(pe_check_blob)
-        and PRICE_ERROR_PATTERN.search(pe_check_blob)
+        and price_error_lead_pattern_matches(pe_check_blob)
     ):
         if passes_price_error_routing_gate(
             pe_check_blob,
