@@ -70,12 +70,14 @@ try:
     from amazon_buybox_dom_screenshot import (  # type: ignore
         capture_amazon_buybox_screenshot,
         evaluate_amazon_buybox_price_gate,
+        format_amazon_gate_review_lines,
     )
 except Exception:
     # MWBots repo layout / package import.
     from Instorebotforwarder.amazon_buybox_dom_screenshot import (  # type: ignore
         capture_amazon_buybox_screenshot,
         evaluate_amazon_buybox_price_gate,
+        format_amazon_gate_review_lines,
     )
 try:
     # Oracle live tree (module sits alongside this file).
@@ -5498,12 +5500,32 @@ class InstorebotForwarder:
         amazon_buybox_trace: Dict[str, Any] = {}
         amazon_price_gate_ok = True
         amazon_gate_failure_line = ""
+        amazon_gate_review_lines: List[str] = []
+        amazon_price_gate_meta: Dict[str, Any] = {}
         source_price_for_gate = price
+        source_before_for_gate = before_price
         if self._amazon_price_strict_enabled():
             if not (final_url and self._amazon_buybox_screenshot_enabled()):
                 amazon_price_gate_ok = False
                 amazon_gate_failure_line = (
                     "Amazon Gate: buybox capture required but disabled or missing URL; sent to review."
+                )
+                amazon_price_gate_meta = {
+                    "ok": False,
+                    "reason": "buybox_required_missing",
+                    "failure_line": amazon_gate_failure_line,
+                    "notes": ["strict_mode_requires_buybox"],
+                }
+                amazon_gate_review_lines = format_amazon_gate_review_lines(
+                    gate=amazon_price_gate_meta,
+                    buybox_result={},
+                    source_current=source_price_for_gate,
+                    source_before=source_before_for_gate,
+                    price_src=price_src,
+                    before_src=before_src,
+                    source_channel_label=(source_label or (f"<#{src_id}>" if src_id else "")),
+                    asin=asin or "",
+                    final_url=final_url or "",
                 )
                 _log_flow("AMAZON_PRICE_GATE_FAIL", reason="buybox_required_missing")
             else:
@@ -5525,8 +5547,20 @@ class InstorebotForwarder:
                     cfg=self.config or {},
                 )
                 amazon_price_gate_ok = bool(gate.get("ok"))
+                amazon_price_gate_meta = dict(gate or {})
                 if not amazon_price_gate_ok:
                     amazon_gate_failure_line = str(gate.get("failure_line") or "").strip()
+                    amazon_gate_review_lines = format_amazon_gate_review_lines(
+                        gate=gate,
+                        buybox_result=buybox_result or {},
+                        source_current=source_price_for_gate,
+                        source_before=source_before_for_gate,
+                        price_src=price_src,
+                        before_src=before_src,
+                        source_channel_label=(source_label or (f"<#{src_id}>" if src_id else "")),
+                        asin=asin or "",
+                        final_url=final_url or "",
+                    )
                     _log_flow(
                         "AMAZON_PRICE_GATE_FAIL",
                         reason=str(gate.get("reason") or ""),
@@ -5713,7 +5747,9 @@ class InstorebotForwarder:
             else:
                 route_reason = f"ebay_gate_failed:{status}"
             use_enrich_failed_template = True
-            if not amazon_price_gate_ok and amazon_gate_failure_line:
+            if not amazon_price_gate_ok and amazon_gate_review_lines:
+                ebay_gate_failure_line = ""
+            elif not amazon_price_gate_ok and amazon_gate_failure_line:
                 ebay_gate_failure_line = amazon_gate_failure_line
             elif not ebay_gate_failure_line:
                 detail = f": {reason}" if reason else ""
@@ -5763,7 +5799,9 @@ class InstorebotForwarder:
                 card_lines.append(f"Recent eBay sales near {ebay_sold_new_near}")
             if ebay_upside_str:
                 card_lines.append(ebay_upside_str)
-        if ebay_gate_failure_line:
+        if amazon_gate_review_lines:
+            card_lines.extend(amazon_gate_review_lines)
+        elif ebay_gate_failure_line:
             card_lines.append(ebay_gate_failure_line)
         card_body = "\n".join(card_lines).strip()
         
@@ -5963,6 +6001,7 @@ class InstorebotForwarder:
             "discord_files": file_payload,
             "extra_embeds": extra_embeds,
             "amazon_buybox": amazon_buybox_trace,
+            "amazon_price_gate": amazon_price_gate_meta,
             "dedupe_reserved": bool(dedupe_reserved),
         }
         return embed, meta
@@ -6293,6 +6332,13 @@ class InstorebotForwarder:
                 lines.append(f"- final_url: `{(amz.get('final_url') or '')[:200]}`")
             else:
                 lines.append("- detected: `no`")
+            apg = meta.get("amazon_price_gate") if isinstance(meta.get("amazon_price_gate"), dict) else {}
+            if apg:
+                lines.append("**Amazon price gate**")
+                lines.append(f"- ok: `{apg.get('ok')}` | reason: `{apg.get('reason') or ''}`")
+                gnotes = apg.get("notes") if isinstance(apg.get("notes"), list) else []
+                if gnotes:
+                    lines.append(f"- notes: `{' | '.join(str(x) for x in gnotes[:6])[:200]}`")
             lines.append("**Routing**")
             lines.append(f"- enrich_failed: `{enrich_failed}`")
             lines.append(f"- dest: {f'<#{dest_id}>' if dest_id else '`(none)`'}")

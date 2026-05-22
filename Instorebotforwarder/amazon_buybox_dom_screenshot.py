@@ -361,6 +361,97 @@ def evaluate_amazon_buybox_price_gate(
     )
 
 
+_GATE_REASON_LABELS: Dict[str, str] = {
+    "buybox_blocked": "Amazon blocked the page (captcha / robot check).",
+    "buybox_no_targets": "Buybox screenshot anchors did not load in time.",
+    "buybox_browser_error": "Browser/CDP could not open the product page.",
+    "buybox_no_prices": "Screenshot ok but price JSON was missing.",
+    "amazon_out_of_stock": "Availability says out of stock.",
+    "amazon_unit_price": "Only a per-unit price was found (e.g. per ounce), not item price.",
+    "amazon_no_price": "No item price matched our buybox DOM selectors.",
+    "amazon_price_mismatch": "Source price is lower than the live page beyond tolerance.",
+    "buybox_required_missing": "Strict mode requires buybox capture but it is disabled or URL missing.",
+}
+
+
+def format_amazon_gate_review_lines(
+    *,
+    gate: Mapping[str, Any],
+    buybox_result: Mapping[str, Any],
+    source_current: str = "",
+    source_before: str = "",
+    price_src: str = "",
+    before_src: str = "",
+    source_channel_label: str = "",
+    asin: str = "",
+    final_url: str = "",
+) -> List[str]:
+    """
+    Operator-facing lines for enrich_failed embeds (source + live page diagnostics).
+    """
+    reason = str(gate.get("reason") or "unknown").strip()
+    lines: List[str] = [
+        "**Amazon Gate** — sent to review",
+        str(gate.get("failure_line") or _GATE_REASON_LABELS.get(reason, reason)).strip(),
+        f"Reason code: `{reason}`",
+    ]
+    if source_channel_label:
+        lines.append(f"Source channel: {source_channel_label}")
+    if asin:
+        lines.append(f"ASIN: `{asin}`")
+    src_cur = (source_current or "").strip()
+    src_bef = (source_before or "").strip()
+    if src_cur:
+        lines.append(f"Source current ({price_src or 'message'}): **{src_cur}**")
+    else:
+        lines.append(f"Source current ({price_src or 'message'}): *(none parsed)*")
+    if src_bef:
+        lines.append(f"Source before ({before_src or 'message'}): **{src_bef}**")
+    b_status = str(buybox_result.get("status") or "not_run").strip()
+    lines.append(f"Buybox capture: `{b_status}`")
+    detail = str(buybox_result.get("reason") or "").strip()
+    if detail:
+        lines.append(f"Buybox detail: {detail[:160]}")
+    prices = buybox_result.get("prices") if isinstance(buybox_result.get("prices"), dict) else {}
+    if prices:
+        pt = str(prices.get("current_price_text") or "").strip()
+        lt = str(prices.get("list_price_text") or "").strip()
+        if pt:
+            lines.append(f"Page current (DOM): **{pt}**")
+        else:
+            lines.append("Page current (DOM): *(empty)*")
+        if lt:
+            lines.append(f"Page list/before (DOM): **{lt}**")
+        if prices.get("out_of_stock"):
+            lines.append("Page availability: **out of stock**")
+        if prices.get("unit_price_rejected"):
+            lines.append("Page price probe: **unit price only rejected**")
+        dom_notes = prices.get("notes") if isinstance(prices.get("notes"), list) else []
+        if dom_notes:
+            lines.append("DOM: " + " | ".join(str(x) for x in dom_notes[:6])[:400])
+        probe = prices.get("price_probe") if isinstance(prices.get("price_probe"), list) else []
+        if probe:
+            lines.append("Prices seen in buybox: " + ", ".join(str(x) for x in probe[:8])[:400])
+    page_cur = gate.get("page_current_value")
+    if page_cur is not None:
+        try:
+            lines.append(f"Gate page current (numeric): **${float(page_cur):,.2f}**")
+        except Exception:
+            pass
+    src_gate = gate.get("source_current_value")
+    if src_gate is not None:
+        try:
+            lines.append(f"Gate source current (numeric): **${float(src_gate):,.2f}**")
+        except Exception:
+            pass
+    gate_notes = gate.get("notes") if isinstance(gate.get("notes"), list) else []
+    if gate_notes:
+        lines.append("Gate: " + " | ".join(str(x) for x in gate_notes[:8])[:400])
+    if final_url:
+        lines.append(f"URL: {final_url[:200]}")
+    return [ln for ln in lines if str(ln).strip()]
+
+
 async def _extract_buybox_prices(page: Any) -> Dict[str, Any]:
     """
     Read the canonical price strings off the live Amazon product page DOM.
@@ -393,6 +484,7 @@ async def _extract_buybox_prices(page: Any) -> Dict[str, Any]:
         coupon_text: '',
         out_of_stock: false,
         unit_price_rejected: false,
+        price_probe: [],
         notes: []
       };
       const text = (el) => el ? (el.textContent || '').replace(/\s+/g, ' ').trim() : '';
@@ -446,18 +538,50 @@ async def _extract_buybox_prices(page: Any) -> Dict[str, Any]:
 
       const availEl = document.querySelector('#availability');
       const availTxt = text(availEl).toLowerCase();
-      const bodyLow = ((document.body && document.body.innerText) || '').slice(0, 8000).toLowerCase();
-      const oosPhrases = ['out of stock', 'temporarily out of stock', 'currently unavailable'];
-      out.out_of_stock = oosPhrases.some((p) => availTxt.includes(p) || bodyLow.includes(p));
+      const oosPhrases = ['out of stock', 'temporarily out of stock'];
+      out.out_of_stock = oosPhrases.some((p) => availTxt.includes(p));
 
-      // CURRENT PRICE — priceToPay item price only (never per-ounce parenthetical).
-      const priceToPayRoots = [
+      const priceFromWholeFraction = (root) => {
+        if (!root) return '';
+        const whole = root.querySelector('.a-price-whole');
+        if (!whole) return '';
+        const w = (whole.textContent || '').replace(/[^\d]/g, '');
+        const fracEl = root.querySelector('.a-price-fraction');
+        const f = fracEl ? (fracEl.textContent || '').replace(/[^\d]/g, '') : '00';
+        if (!w) return '';
+        return '$' + w + '.' + (f || '00');
+      };
+
+      const collectProbe = (root, tag) => {
+        if (!root) return;
+        root.querySelectorAll('.a-offscreen').forEach((el) => {
+          const t = text(el);
+          if (t) out.price_probe.push(tag + ':' + t);
+        });
+      };
+
+      // CURRENT PRICE — buybox column first (true purchase price), then center column.
+      const priceRoots = [
+        document.querySelector('form#addToCart'),
+        document.querySelector('#buybox'),
+        document.querySelector('#rightCol'),
         document.querySelector('#apex_desktop .priceToPay'),
+        document.querySelector('#apex_desktop #apexPriceToPay'),
         document.querySelector('#corePriceDisplay_desktop_feature_div .priceToPay'),
+        document.querySelector('#corePriceDisplay_desktop_feature_div #apexPriceToPay'),
         document.querySelector('#corePrice_feature_div .priceToPay'),
+        document.querySelector('#apex_desktop'),
       ].filter(Boolean);
-      for (const root of priceToPayRoots) {
-        const t = bestItemPriceFromBlock(root, 'current');
+      for (const root of priceRoots) {
+        collectProbe(root, 'offscreen');
+        let t = bestItemPriceFromBlock(root, 'current');
+        if (!t) t = priceFromWholeFraction(root);
+        if (!t) {
+          const pt = root.querySelector('.priceToPay, #apexPriceToPay');
+          if (pt) {
+            t = bestItemPriceFromBlock(pt, 'current') || priceFromWholeFraction(pt);
+          }
+        }
         if (t) {
           out.current_price_text = t;
           break;
@@ -465,8 +589,15 @@ async def _extract_buybox_prices(page: Any) -> Dict[str, Any]:
       }
       if (!out.current_price_text) {
         const currentSel = [
+          'form#addToCart .priceToPay .a-offscreen',
+          'form#addToCart #apexPriceToPay .a-offscreen',
+          'form#addToCart span.a-price[data-a-strike="false"] .a-offscreen',
+          '#buybox .priceToPay .a-offscreen',
+          '#buybox span.a-price[data-a-strike="false"] .a-offscreen',
           '#apex_desktop .priceToPay .a-offscreen',
+          '#apex_desktop #apexPriceToPay .a-offscreen',
           '#corePriceDisplay_desktop_feature_div .priceToPay .a-offscreen',
+          '#corePriceDisplay_desktop_feature_div #apexPriceToPay .a-offscreen',
           '#apex_desktop span.a-price[data-a-strike="false"] .a-offscreen',
           '#corePriceDisplay_desktop_feature_div .a-price[data-a-strike="false"] .a-offscreen',
           '#priceblock_dealprice',
@@ -475,6 +606,7 @@ async def _extract_buybox_prices(page: Any) -> Dict[str, Any]:
         ];
         out.current_price_text = firstMatch(currentSel, 'current');
       }
+      if (out.price_probe.length > 12) out.price_probe = out.price_probe.slice(0, 12);
       out.current_price_value = num(out.current_price_text);
       if (!out.current_price_text && out.out_of_stock) {
         out.notes.push('oos_no_item_price');
@@ -532,6 +664,7 @@ async def _extract_buybox_prices(page: Any) -> Dict[str, Any]:
             "coupon_text": "",
             "out_of_stock": False,
             "unit_price_rejected": False,
+            "price_probe": [],
             "notes": [f"extract_exc:{str(exc)[:120]}"],
         }
     return raw or {}
