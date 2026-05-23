@@ -8,13 +8,15 @@ a rectangular screenshot containing the price/coupon/savings block and the
 buybox column (Add to Cart / Buy Now / Ships from / Sold by / etc.).
 
 Default capture regions (see `amazon_buybox_screenshot_layout`):
-  - **Left:** `#corePriceDisplay_desktop_feature_div` — discount %, current price,
-    list price only (not the full variant/size grid).
-  - **Right:** from `#availability` ("In Stock") through Add to Cart / Buy Now /
-    seller lines — excludes "Delivering to …" and duplicate price above In Stock.
+  - **Left (`compact_pdp`):** main image + thumbnail strip.
+  - **Center (`compact_pdp`):** title, ratings, price (center column).
+  - **Right:** from `#availability` through Add to Cart / Buy Now / Ships from — no
+    protection-plan block below.
+  - **Left (`side_by_side` legacy):** price block only + buybox.
 
 Layout modes:
-  - `side_by_side` (default) — two tight clips stitched into one PNG.
+  - `side_by_side` (default) — price strip + buybox (legacy; white gap under price).
+  - `compact_pdp` / `product_card` — three columns like a net PDP card (image | info | buybox).
   - `separate` — two PNGs (price + in-stock) for the Discord image grid.
   - `merged` — legacy single bounding box (pulls in extra page chrome).
 
@@ -123,18 +125,26 @@ def _right_from_in_stock_enabled(cfg: Mapping[str, Any]) -> bool:
 
 def _screenshot_layout_mode(cfg: Mapping[str, Any]) -> str:
     """
-    side_by_side — two tight clips (price block + In Stock buybox) stitched
-                   horizontally; avoids merged rectangle pulling in variant
-                   grids or 'Delivering to …' above #availability.
-    merged       — legacy single bounding box (not recommended).
-    separate       — two PNG files, no stitch (Discord grid shows both).
+    compact_pdp   — image | title+price | compact buybox (three columns, top-aligned).
+    product_card  — alias for compact_pdp.
+    side_by_side  — legacy price strip + buybox.
+    merged        — legacy single bounding box (not recommended).
+    separate      — part PNGs only, no stitch.
     """
     raw = str(cfg.get("amazon_buybox_screenshot_layout") or "side_by_side").strip().lower()
     if raw in {"merged", "merge", "single"}:
         return "merged"
     if raw in {"separate", "dual", "split"}:
         return "separate"
+    if raw in {"side_by_side", "side-by-side", "price_buybox"}:
+        return "side_by_side"
+    if raw in {"product_card", "compact_pdp", "compact", "net_pdp"}:
+        return "compact_pdp"
     return "side_by_side"
+
+
+def _layout_uses_compact_pdp(cfg: Mapping[str, Any]) -> bool:
+    return _screenshot_layout_mode(cfg) == "compact_pdp"
 
 
 def _resolve_left_selectors(cfg: Mapping[str, Any]) -> List[str]:
@@ -182,6 +192,50 @@ def _highlight_selectors_for_capture(cfg: Mapping[str, Any]) -> List[str]:
 # Public helpers
 # ---------------------------------------------------------------------------
 
+async def _dismiss_amazon_page_chrome(page: Any) -> bool:
+    """
+    Best-effort clicks for Amazon soft gates (Continue shopping, zip modal, glow).
+    Returns True when a control was clicked.
+    """
+    try:
+        clicked = await page.evaluate(
+            """
+            () => {
+              const clickEl = (el) => {
+                if (!el) return false;
+                try { el.click(); return true; } catch (e) { return false; }
+              };
+              const byText = () => {
+                const want = ['continue shopping', 'continue'];
+                for (const el of document.querySelectorAll('button, a, input[type=submit], span.a-button-inner')) {
+                  const t = ((el.innerText || el.value || '') + '').trim().toLowerCase();
+                  if (want.includes(t)) return clickEl(el.closest('button, a, input') || el);
+                }
+                return false;
+              };
+              const picks = [
+                'form[action*="validateCaptcha"] button',
+                'button[type=submit]',
+                '#GLUXConfirmClose',
+                'button[name="glowDoneButton"]',
+                '#a-popover-close',
+                'input[data-action-type="SELECT_LOCATION"]',
+                'a[href="/ref=cs_503_logo"]',
+              ];
+              if (byText()) return true;
+              for (const sel of picks) {
+                const el = document.querySelector(sel);
+                if (clickEl(el)) return true;
+              }
+              return false;
+            }
+            """
+        )
+        return bool(clicked)
+    except Exception:
+        return False
+
+
 def amazon_html_looks_blocked(text: str) -> bool:
     """
     Best-effort Amazon interstitial / robot-check detector. Matches what
@@ -198,6 +252,7 @@ def amazon_html_looks_blocked(text: str) -> bool:
             "your browser does not have javascript enabled",
             "automated access to our data",
             "robot check",
+            "click the button below to continue shopping",
         )
     )
 
@@ -821,6 +876,67 @@ def _clamp_clip(box: Dict[str, float], dims: Mapping[str, Any], padding: int) ->
     return clip
 
 
+def _stitch_png_vertical(top: bytes, bottom: bytes, *, gap: int = 8) -> Optional[bytes]:
+    """Stack two PNGs vertically; returns None when Pillow is unavailable."""
+    try:
+        import io
+        from PIL import Image
+    except ImportError:
+        return None
+    try:
+        img_t = Image.open(io.BytesIO(top)).convert("RGB")
+        img_b = Image.open(io.BytesIO(bottom)).convert("RGB")
+        gap = max(0, int(gap))
+        width = max(img_t.width, img_b.width)
+        height = img_t.height + gap + img_b.height
+        canvas = Image.new("RGB", (width, height), (255, 255, 255))
+        canvas.paste(img_t, (0, 0))
+        canvas.paste(img_b, (0, img_t.height + gap))
+        out = io.BytesIO()
+        canvas.save(out, format="PNG")
+        return out.getvalue()
+    except Exception:
+        return None
+
+
+def _stitch_png_row_aligned(
+    panels: Sequence[Tuple[bytes, float]],
+    *,
+    gap: int = 12,
+    bg: Tuple[int, int, int] = (255, 255, 255),
+) -> Optional[bytes]:
+    """Horizontally stitch panels; each panel's `y` is page top used for vertical alignment."""
+    if not panels:
+        return None
+    try:
+        import io
+        from PIL import Image
+    except ImportError:
+        return None
+    try:
+        loaded: List[Tuple[Any, float]] = []
+        for png, top_y in panels:
+            if not png:
+                continue
+            loaded.append((Image.open(io.BytesIO(png)).convert("RGB"), float(top_y)))
+        if not loaded:
+            return None
+        align_y = min(y for _, y in loaded)
+        gap = max(0, int(gap))
+        total_w = sum(im.width for im, _ in loaded) + gap * (len(loaded) - 1)
+        total_h = max(im.height + int(y - align_y) for im, y in loaded)
+        canvas = Image.new("RGB", (total_w, total_h), bg)
+        x = 0
+        for im, top_y in loaded:
+            canvas.paste(im, (x, int(top_y - align_y)))
+            x += im.width + gap
+        out = io.BytesIO()
+        canvas.save(out, format="PNG")
+        return out.getvalue()
+    except Exception:
+        return None
+
+
 def _stitch_png_bytes(left: bytes, right: bytes, *, gap: int = 12) -> Optional[bytes]:
     """Horizontally stitch two PNG byte blobs; returns None when Pillow is unavailable."""
     try:
@@ -842,6 +958,174 @@ def _stitch_png_bytes(left: bytes, right: bytes, *, gap: int = 12) -> Optional[b
         return out.getvalue()
     except Exception:
         return None
+
+
+async def _measure_product_image_block(page: Any) -> Dict[str, Any]:
+    raw = await page.evaluate(
+        r"""
+        () => {
+          const img = document.querySelector('#imgTagWrapperId')
+            || document.querySelector('#landingImage')
+            || document.querySelector('#main-image-container');
+          if (!img) return { found: false, reason: 'no main image anchor' };
+          const r = img.getBoundingClientRect();
+          if (r.width < 60 || r.height < 60) {
+            return { found: false, reason: 'image box too small' };
+          }
+          let y2 = r.bottom;
+          const alt = document.querySelector('#altImages');
+          if (alt) {
+            const ar = alt.getBoundingClientRect();
+            if (ar.height > 20 && ar.top >= r.top) y2 = Math.max(y2, ar.bottom);
+          }
+          const h = Math.max(80, y2 - r.y);
+          return {
+            found: true,
+            selector: 'compact_pdp:image',
+            x: r.x, y: r.y, width: r.width, height: Math.max(80, h),
+            tag: 'img',
+          };
+        }
+        """
+    )
+    return raw if isinstance(raw, dict) else {"found": False, "reason": "evaluate failed"}
+
+
+async def _measure_center_title_price(page: Any, cfg: Mapping[str, Any]) -> Dict[str, Any]:
+    price_selectors = list(_resolve_left_selectors(cfg))
+    max_h = _cfg_int(cfg, "amazon_buybox_compact_center_max_height", 520, lo=120, hi=900)
+    raw = await page.evaluate(
+        """
+        (args) => {
+          const priceSels = args.priceSelectors || [
+            '#corePriceDisplay_desktop_feature_div', '#corePrice_feature_div'];
+          const maxH = args.maxH || 520;
+          const title = document.querySelector('#productTitle') || document.querySelector('#title');
+          if (!title) return { found: false, reason: 'no #productTitle' };
+          const titleSection = document.querySelector('#titleSection') || title;
+          const tr = titleSection.getBoundingClientRect();
+          let y1 = tr.y;
+          let y2 = tr.bottom;
+          let x1 = tr.x;
+          let x2 = tr.right;
+          for (const sel of priceSels) {
+            const el = document.querySelector(sel);
+            if (!el) continue;
+            const r = el.getBoundingClientRect();
+            if (r.width < 80 || r.height > 520) continue;
+            y2 = Math.max(y2, r.bottom);
+            x1 = Math.min(x1, r.x);
+            x2 = Math.max(x2, r.right);
+            break;
+          }
+          const twister = document.querySelector('#twister_feature_div, #variation_size_name');
+          if (twister) {
+            const wr = twister.getBoundingClientRect();
+            if (wr.height > 10 && wr.top < y1 + maxH + 80) {
+              y2 = Math.min(Math.max(y2, wr.bottom), y1 + maxH);
+            }
+          }
+          const center = document.querySelector('#centerCol');
+          if (center) {
+            const cr = center.getBoundingClientRect();
+            x1 = cr.x;
+            x2 = cr.right;
+          }
+          const rightCol = document.querySelector('#rightCol');
+          if (rightCol) {
+            const rr = rightCol.getBoundingClientRect();
+            if (rr.x > x1 + 60) x2 = Math.min(x2, rr.x - 10);
+          }
+          if (y2 - y1 > maxH) y2 = y1 + maxH;
+          const width = Math.max(120, x2 - x1);
+          const height = Math.max(60, y2 - y1);
+          if (width < 80 || height < 40) {
+            return { found: false, reason: 'title/price region too small' };
+          }
+          return {
+            found: true,
+            selector: 'compact_pdp:center',
+            x: x1, y: y1, width, height,
+            tag: 'region',
+          };
+        }
+        """,
+        {"priceSelectors": price_selectors, "maxH": max_h},
+    )
+    return raw if isinstance(raw, dict) else {"found": False, "reason": "evaluate failed"}
+
+
+async def _measure_left_product_card(page: Any, cfg: Mapping[str, Any]) -> Dict[str, Any]:
+    """
+    Desktop PDP left panel: main image + product title + price block (one clip).
+    Stays left of #rightCol so the buybox column can sit beside it without a
+    huge blank band under a tiny price strip.
+    """
+    price_selectors = list(_resolve_left_selectors(cfg))
+    raw = await page.evaluate(
+        """
+        (priceSelectors) => {
+          const priceSels = (priceSelectors && priceSelectors.length)
+            ? priceSelectors
+            : [
+                '#corePriceDisplay_desktop_feature_div',
+                '#corePrice_feature_div',
+              ];
+          let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
+          let matched = 0;
+          const addRect = (r) => {
+            if (!r || r.width < 24 || r.height < 12) return;
+            matched += 1;
+            x1 = Math.min(x1, r.x);
+            y1 = Math.min(y1, r.y);
+            x2 = Math.max(x2, r.right);
+            y2 = Math.max(y2, r.bottom);
+          };
+          const img = document.querySelector('#imgTagWrapperId')
+            || document.querySelector('#landingImage')
+            || document.querySelector('#main-image-container');
+          const title = document.querySelector('#productTitle') || document.querySelector('#title');
+          if (img) addRect(img.getBoundingClientRect());
+          if (title) addRect(title.getBoundingClientRect());
+          for (const sel of priceSels) {
+            const el = document.querySelector(sel);
+            if (!el) continue;
+            const r = el.getBoundingClientRect();
+            if (r.width < 80 || r.height > 520) continue;
+            addRect(r);
+            break;
+          }
+          if (!matched || !isFinite(x1)) {
+            return { found: false, reason: 'no product card anchors matched' };
+          }
+          const alt = document.querySelector('#altImages');
+          if (alt) {
+            const at = alt.getBoundingClientRect().top;
+            if (at > y1 + 40) y2 = Math.min(y2, at - 6);
+          }
+          const rightCol = document.querySelector('#rightCol');
+          if (rightCol) {
+            const rr = rightCol.getBoundingClientRect();
+            if (rr.x > x1 + 80) x2 = Math.min(x2, rr.x - 10);
+          }
+          const maxH = 720;
+          if (y2 - y1 > maxH) y2 = y1 + maxH;
+          const width = Math.max(120, x2 - x1);
+          const height = Math.max(80, y2 - y1);
+          if (width < 80 || height < 60) {
+            return { found: false, reason: 'product card box too small after clamp' };
+          }
+          return {
+            found: true,
+            selector: 'product_card:left_panel',
+            x: x1, y: y1, width, height,
+            tag: 'region',
+          };
+        }
+        """,
+        price_selectors,
+    )
+    return raw if isinstance(raw, dict) else {"found": False, "reason": "evaluate failed"}
 
 
 async def _measure_left_price_block(page: Any, cfg: Mapping[str, Any]) -> Dict[str, Any]:
@@ -928,17 +1212,31 @@ async def _measure_right_column_from_in_stock(page: Any) -> Dict[str, Any]:
               }
             });
           }
+          const stopSel = [
+            '#protectionPlanIngressFeature',
+            '#attachAccessoryModal_feature_div',
+            '#offer-display-features',
+            '#product-support-desktop',
+          ];
+          for (const sel of stopSel) {
+            const el = document.querySelector(sel);
+            if (!el || !rightRoot || !rightRoot.contains(el)) continue;
+            const sr = el.getBoundingClientRect();
+            if (sr.top > ar.top + 20) bottom = Math.min(bottom, sr.top - 6);
+          }
           let n = avail.nextElementSibling;
           let steps = 0;
-          while (n && rightRoot && rightRoot.contains(n) && steps < 40) {
+          while (n && rightRoot && rightRoot.contains(n) && steps < 24) {
+            const txt = ((n.innerText || '') + '').toLowerCase();
+            if (txt.includes('protection plan') || txt.includes('complete protect')) break;
             const r = n.getBoundingClientRect();
             if (r.height > 5) bottom = Math.max(bottom, r.bottom);
             n = n.nextElementSibling;
             steps += 1;
           }
           const x = rr.x;
-          const width = Math.max(rr.width, ar.width, 240);
-          const height = Math.max(40, bottom - ar.y);
+          const width = Math.max(rr.width, ar.width, 220);
+          const height = Math.max(80, Math.min(bottom - ar.y, 520));
           return {
             found: true,
             selector: 'buybox:from_in_stock',
@@ -953,18 +1251,35 @@ async def _measure_right_column_from_in_stock(page: Any) -> Dict[str, Any]:
 
 async def _measure_capture_targets(page: Any, cfg: Mapping[str, Any]) -> List[Dict[str, Any]]:
     """
-    Diagnostic target list: left price block + right buybox (from In Stock).
+    Diagnostic target list: left panel + right buybox (from In Stock).
     """
     targets: List[Dict[str, Any]] = []
-    left = await _measure_left_price_block(page, cfg)
-    if left.get("found"):
-        targets.append(left)
+    if _layout_uses_compact_pdp(cfg):
+        img_t = await _measure_product_image_block(page)
+        info_t = await _measure_center_title_price(page, cfg)
+        for t in (img_t, info_t):
+            if t.get("found"):
+                targets.append(t)
+            else:
+                targets.append({
+                    "selector": str(t.get("selector") or "product_card:part"),
+                    "found": False,
+                    "reason": str(t.get("reason") or "unavailable"),
+                })
+        if not img_t.get("found") and not info_t.get("found"):
+            left = await _measure_left_product_card(page, cfg)
+            if left.get("found"):
+                targets.append(left)
     else:
-        targets.append({
-            "selector": "price:block",
-            "found": False,
-            "reason": str(left.get("reason") or "unavailable"),
-        })
+        left = await _measure_left_price_block(page, cfg)
+        if left.get("found"):
+            targets.append(left)
+        else:
+            targets.append({
+                "selector": "price:block",
+                "found": False,
+                "reason": str(left.get("reason") or "unavailable"),
+            })
     if _right_from_in_stock_enabled(cfg):
         right = await _measure_right_column_from_in_stock(page)
         if right.get("found"):
@@ -983,8 +1298,17 @@ async def _measure_capture_targets(page: Any, cfg: Mapping[str, Any]) -> List[Di
     return targets
 
 
-def _region_boxes_from_targets(targets: Sequence[Dict[str, Any]]) -> Tuple[Optional[Dict[str, float]], Optional[Dict[str, float]]]:
-    """Split measured targets into (left_price_box, right_buybox_box)."""
+def _region_boxes_from_targets(
+    targets: Sequence[Dict[str, Any]],
+) -> Tuple[
+    Optional[Dict[str, float]],
+    Optional[Dict[str, float]],
+    Optional[Dict[str, float]],
+    Optional[Dict[str, float]],
+]:
+    """Split measured targets into (image, title_price, legacy_left, right_buybox)."""
+    image_box: Optional[Dict[str, float]] = None
+    info_box: Optional[Dict[str, float]] = None
     left_box: Optional[Dict[str, float]] = None
     right_box: Optional[Dict[str, float]] = None
     for t in targets:
@@ -1001,9 +1325,13 @@ def _region_boxes_from_targets(targets: Sequence[Dict[str, Any]]) -> Tuple[Optio
         sel = str(t.get("selector") or "")
         if sel == "buybox:from_in_stock" or sel == LEGACY_RIGHT_SELECTOR or sel.startswith("form#"):
             right_box = box
-        elif left_box is None:
+        elif sel in {"compact_pdp:image", "product_card:image"}:
+            image_box = box
+        elif sel in {"compact_pdp:center", "product_card:title_price"}:
+            info_box = box
+        elif sel == "product_card:left_panel" or left_box is None:
             left_box = box
-    return left_box, right_box
+    return image_box, info_box, left_box, right_box
 
 
 async def _measure_target_boxes(
@@ -1162,16 +1490,40 @@ async def capture_amazon_buybox_screenshot(
                 await page.wait_for_timeout(int(extra_wait_s * 1000))
             await page.evaluate("window.scrollTo(0, 0)")
             await page.wait_for_timeout(250)
+            try:
+                await page.wait_for_selector(
+                    "#productTitle, #title, #availability",
+                    timeout=min(selector_timeout_ms, 20000),
+                    state="visible",
+                )
+            except Exception:
+                pass
+            await page.wait_for_timeout(300)
+            for _ in range(2):
+                if await _dismiss_amazon_page_chrome(page):
+                    await page.wait_for_timeout(600)
+                    try:
+                        await page.wait_for_load_state("domcontentloaded", timeout=8000)
+                    except Exception:
+                        pass
 
             body_txt = await page.evaluate(
                 "() => (document.body && document.body.innerText) ? document.body.innerText.slice(0, 16000) : ''"
             )
             if amazon_html_looks_blocked(body_txt):
+                if await _dismiss_amazon_page_chrome(page):
+                    await page.wait_for_timeout(800)
+                    body_txt = await page.evaluate(
+                        "() => (document.body && document.body.innerText) ? document.body.innerText.slice(0, 16000) : ''"
+                    )
+            if amazon_html_looks_blocked(body_txt):
                 result.update({"status": "blocked", "reason": "amazon returned bot/captcha page"})
                 return result
 
-            # Wait until the left price block or right buybox anchor exists.
+            # Wait until left panel / price block or right buybox anchor exists.
             wait_selectors = list(left_selectors)
+            if _layout_uses_compact_pdp(cfg):
+                wait_selectors = ["#productTitle", "#imgTagWrapperId", "#imageBlock"] + wait_selectors
             wait_selectors.append(
                 "#availability" if right_from_in_stock else LEGACY_RIGHT_SELECTOR
             )
@@ -1228,10 +1580,12 @@ async def capture_amazon_buybox_screenshot(
                 })
                 return result
 
-            if _highlight_price_only_enabled(cfg):
-                await _highlight_single_price_block(page, cfg, highlight_color, highlight_thickness)
-            else:
-                await _highlight_targets(page, highlight_selectors, highlight_color, highlight_thickness)
+            layout_pre = _screenshot_layout_mode(cfg)
+            if layout_pre != "compact_pdp":
+                if _highlight_price_only_enabled(cfg):
+                    await _highlight_single_price_block(page, cfg, highlight_color, highlight_thickness)
+                else:
+                    await _highlight_targets(page, highlight_selectors, highlight_color, highlight_thickness)
 
             dims = await page.evaluate(
                 """
@@ -1241,9 +1595,10 @@ async def capture_amazon_buybox_screenshot(
                 })
                 """
             )
-            left_box, right_box = _region_boxes_from_targets(targets)
+            image_box, info_box, left_box, right_box = _region_boxes_from_targets(targets)
             layout = _screenshot_layout_mode(cfg)
             gap_px = _cfg_int(cfg, "amazon_buybox_side_by_side_gap_px", 12, lo=0, hi=80)
+            v_gap_px = _cfg_int(cfg, "amazon_buybox_product_card_v_gap_px", 8, lo=0, hi=40)
 
             out_dir = Path(output_dir_raw)
             if not out_dir.is_absolute():
@@ -1259,7 +1614,67 @@ async def capture_amazon_buybox_screenshot(
                 png = await page.screenshot(full_page=False, clip=clip, type="png")
                 return png, clip
 
-            if layout in {"side_by_side", "separate"} and left_box and right_box:
+            left_png: Optional[bytes] = None
+            left_clip: Dict[str, Any] = {}
+            product_left_box = left_box
+            if layout == "compact_pdp" and image_box and info_box and right_box:
+                img_png, img_clip = await _capture_clip(image_box)
+                info_png, info_clip = await _capture_clip(info_box)
+                right_png, right_clip = await _capture_clip(right_box)
+                stitched = _stitch_png_row_aligned(
+                    [
+                        (img_png, float(image_box["y"])),
+                        (info_png, float(info_box["y"])),
+                        (right_png, float(right_box["y"])),
+                    ],
+                    gap=gap_px,
+                )
+                result["clip"] = {
+                    "layout": layout,
+                    "image": img_clip,
+                    "center": info_clip,
+                    "right": right_clip,
+                }
+                left_part = str(base) + "_image.png"
+                mid_part = str(base) + "_center.png"
+                right_part = str(base) + "_buybox.png"
+                Path(left_part).write_bytes(img_png)
+                Path(mid_part).write_bytes(info_png)
+                Path(right_part).write_bytes(right_png)
+                if stitched:
+                    Path(shot).write_bytes(stitched)
+                    result["screenshot_path"] = shot
+                    result["screenshot_paths"] = [shot]
+                else:
+                    result["screenshot_path"] = mid_part
+                    result["screenshot_paths"] = [left_part, mid_part, right_part]
+                    result["stitch_note"] = "Pillow unavailable; using 3 separate PNGs"
+            elif layout in {"compact_pdp", "side_by_side", "separate"} and right_box and (
+                product_left_box is not None or left_png is not None
+            ):
+                if product_left_box is not None:
+                    left_png, left_clip = await _capture_clip(product_left_box)
+                right_png, right_clip = await _capture_clip(right_box)
+                result["clip"] = {"layout": layout, "left": left_clip, "right": right_clip}
+                left_part = str(base) + "_product.png"
+                right_part = str(base) + "_instock.png"
+                Path(left_part).write_bytes(left_png)
+                Path(right_part).write_bytes(right_png)
+                screenshot_paths = [left_part, right_part]
+                if layout == "side_by_side":
+                    stitched = _stitch_png_bytes(left_png, right_png, gap=gap_px)
+                    if stitched:
+                        Path(shot).write_bytes(stitched)
+                        result["screenshot_path"] = shot
+                        result["screenshot_paths"] = [shot]
+                    else:
+                        result["screenshot_path"] = left_part
+                        result["screenshot_paths"] = screenshot_paths
+                        result["stitch_note"] = "Pillow unavailable; using separate product + in-stock PNGs"
+                else:
+                    result["screenshot_path"] = left_part
+                    result["screenshot_paths"] = screenshot_paths
+            elif layout in {"side_by_side", "separate"} and left_box and right_box:
                 left_png, left_clip = await _capture_clip(left_box)
                 right_png, right_clip = await _capture_clip(right_box)
                 result["clip"] = {"layout": layout, "left": left_clip, "right": right_clip}
