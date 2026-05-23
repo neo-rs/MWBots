@@ -5969,8 +5969,18 @@ class InstorebotForwarder:
 
             if will_post_ebay and ebay_first8_screenshot_path:
                 _append_image_embed(ebay_first8_screenshot_path, "EBAY_FIRST8")
-            if amazon_buybox_screenshot_path:
-                _append_image_embed(amazon_buybox_screenshot_path, "AMAZON_BUYBOX")
+            buybox_shots: List[str] = []
+            try:
+                raw_paths = (amazon_buybox_trace or {}).get("screenshot_paths")
+                if isinstance(raw_paths, list):
+                    buybox_shots = [str(p).strip() for p in raw_paths if str(p).strip()]
+            except Exception:
+                buybox_shots = []
+            if not buybox_shots and amazon_buybox_screenshot_path:
+                buybox_shots = [amazon_buybox_screenshot_path]
+            # Separate price + In Stock PNGs (or one stitched image) share the embed grid.
+            for bp in buybox_shots[:2]:
+                _append_image_embed(bp, "AMAZON_BUYBOX")
 
             _log_flow(
                 "RENDER",

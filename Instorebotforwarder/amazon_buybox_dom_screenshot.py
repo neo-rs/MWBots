@@ -7,18 +7,16 @@ sold-listings grid, this module opens an Amazon product detail page and saves
 a rectangular screenshot containing the price/coupon/savings block and the
 buybox column (Add to Cart / Buy Now / Ships from / Sold by / etc.).
 
-Default capture regions:
-  - `#apex_desktop` — center column price + discount/coupon block.
-  - Right buybox column — from `#availability` (In Stock) downward through
-    qty / Add to cart / Buy Now / seller lines. Omits duplicate price,
-    shipping, and "Delivering to …" above In Stock.
+Default capture regions (see `amazon_buybox_screenshot_layout`):
+  - **Left:** `#corePriceDisplay_desktop_feature_div` — discount %, current price,
+    list price only (not the full variant/size grid).
+  - **Right:** from `#availability` ("In Stock") through Add to Cart / Buy Now /
+    seller lines — excludes "Delivering to …" and duplicate price above In Stock.
 
-Set `amazon_buybox_right_from_in_stock: false` to restore the legacy full
-`form#addToCart` right column (includes delivery location).
-
-If at least one region resolves to a visible element, targets are highlighted
-with a configurable red outline (so the operator can see exactly what was
-captured) and Playwright screenshots the merged bounding box.
+Layout modes:
+  - `side_by_side` (default) — two tight clips stitched into one PNG.
+  - `separate` — two PNGs (price + in-stock) for the Discord image grid.
+  - `merged` — legacy single bounding box (pulls in extra page chrome).
 
 This module ALWAYS prefers the same trusted CDP Chrome the eBay scraper uses
 (127.0.0.1:9222 by default). That keeps a single warmed profile across
@@ -65,7 +63,12 @@ from ebay_first8_dom_comps import (  # type: ignore
 
 
 DEFAULT_CDP_URL = "http://127.0.0.1:9222"
-DEFAULT_LEFT_SELECTORS: Tuple[str, ...] = ("#apex_desktop",)
+# Tight price block first; full #apex_desktop is last-resort (includes variant grids).
+DEFAULT_LEFT_SELECTORS: Tuple[str, ...] = (
+    "#corePriceDisplay_desktop_feature_div",
+    "#corePrice_feature_div",
+    "#apex_desktop",
+)
 LEGACY_RIGHT_SELECTOR = "form#addToCart"
 # Outlines drawn on the right column when using from-in-stock mode.
 HIGHLIGHT_RIGHT_FROM_IN_STOCK: Tuple[str, ...] = (
@@ -110,6 +113,22 @@ def _right_from_in_stock_enabled(cfg: Mapping[str, Any]) -> bool:
     if s in {"0", "false", "no", "n", "off"}:
         return False
     return True
+
+
+def _screenshot_layout_mode(cfg: Mapping[str, Any]) -> str:
+    """
+    side_by_side — two tight clips (price block + In Stock buybox) stitched
+                   horizontally; avoids merged rectangle pulling in variant
+                   grids or 'Delivering to …' above #availability.
+    merged       — legacy single bounding box (not recommended).
+    separate       — two PNG files, no stitch (Discord grid shows both).
+    """
+    raw = str(cfg.get("amazon_buybox_screenshot_layout") or "side_by_side").strip().lower()
+    if raw in {"merged", "merge", "single"}:
+        return "merged"
+    if raw in {"separate", "dual", "split"}:
+        return "separate"
+    return "side_by_side"
 
 
 def _resolve_left_selectors(cfg: Mapping[str, Any]) -> List[str]:
@@ -691,6 +710,81 @@ def _valid_boxes_from_targets(targets: Sequence[Dict[str, Any]]) -> List[Dict[st
     return valid
 
 
+def _clamp_clip(box: Dict[str, float], dims: Mapping[str, Any], padding: int) -> Dict[str, float]:
+    clip = merge_boxes([box], padding)
+    clip["width"] = min(clip["width"], max(1, float(dims.get("width", clip["width"])) - clip["x"]))
+    clip["height"] = min(clip["height"], max(1, float(dims.get("height", clip["height"])) - clip["y"]))
+    return clip
+
+
+def _stitch_png_bytes(left: bytes, right: bytes, *, gap: int = 12) -> Optional[bytes]:
+    """Horizontally stitch two PNG byte blobs; returns None when Pillow is unavailable."""
+    try:
+        import io
+        from PIL import Image
+    except ImportError:
+        return None
+    try:
+        img_l = Image.open(io.BytesIO(left)).convert("RGB")
+        img_r = Image.open(io.BytesIO(right)).convert("RGB")
+        gap = max(0, int(gap))
+        height = max(img_l.height, img_r.height)
+        width = img_l.width + gap + img_r.width
+        canvas = Image.new("RGB", (width, height), (255, 255, 255))
+        canvas.paste(img_l, (0, 0))
+        canvas.paste(img_r, (img_l.width + gap, 0))
+        out = io.BytesIO()
+        canvas.save(out, format="PNG")
+        return out.getvalue()
+    except Exception:
+        return None
+
+
+async def _measure_left_price_block(page: Any, cfg: Mapping[str, Any]) -> Dict[str, Any]:
+    """
+    Tight bounding box for the current-price block only (discount %, $ price,
+    list price). Prefers #corePriceDisplay_desktop_feature_div over full
+    #apex_desktop so size/variation grids are not captured.
+    """
+    configured = _resolve_left_selectors(cfg)
+    raw = await page.evaluate(
+        """
+        (configured) => {
+          const pick = [];
+          const seen = new Set();
+          const addSel = (sel) => {
+            if (!sel || seen.has(sel)) return;
+            seen.add(sel);
+            pick.push(sel);
+          };
+          for (const sel of (configured || [])) addSel(sel);
+          [
+            '#corePriceDisplay_desktop_feature_div',
+            '#corePrice_feature_div',
+            '#apex_desktop .priceToPay',
+            '#apex_desktop',
+          ].forEach(addSel);
+          for (const sel of pick) {
+            const el = document.querySelector(sel);
+            if (!el) continue;
+            const r = el.getBoundingClientRect();
+            if (r.width < 80 || r.height < 20) continue;
+            if (sel === '#apex_desktop' && r.height > 520) continue;
+            return {
+              found: true,
+              selector: sel,
+              x: r.x, y: r.y, width: r.width, height: r.height,
+              tag: el.tagName.toLowerCase(),
+            };
+          }
+          return { found: false, reason: 'no left price block matched' };
+        }
+        """,
+        list(configured),
+    )
+    return raw if isinstance(raw, dict) else {"found": False, "reason": "evaluate failed"}
+
+
 async def _measure_right_column_from_in_stock(page: Any) -> Dict[str, Any]:
     """
     Bounding box for the right buybox column starting at In Stock (#availability)
@@ -755,11 +849,18 @@ async def _measure_right_column_from_in_stock(page: Any) -> Dict[str, Any]:
 
 async def _measure_capture_targets(page: Any, cfg: Mapping[str, Any]) -> List[Dict[str, Any]]:
     """
-    All regions merged into the screenshot: left price block + right buybox.
-    Right column uses from-in-stock mode unless disabled in config.
+    Diagnostic target list: left price block + right buybox (from In Stock).
     """
-    left = _resolve_left_selectors(cfg)
-    targets = list(await _measure_target_boxes(page, left))
+    targets: List[Dict[str, Any]] = []
+    left = await _measure_left_price_block(page, cfg)
+    if left.get("found"):
+        targets.append(left)
+    else:
+        targets.append({
+            "selector": "price:block",
+            "found": False,
+            "reason": str(left.get("reason") or "unavailable"),
+        })
     if _right_from_in_stock_enabled(cfg):
         right = await _measure_right_column_from_in_stock(page)
         if right.get("found"):
@@ -767,8 +868,6 @@ async def _measure_capture_targets(page: Any, cfg: Mapping[str, Any]) -> List[Di
         else:
             legacy = await _measure_target_boxes(page, [LEGACY_RIGHT_SELECTOR])
             targets.extend(legacy)
-            if legacy and legacy[0].get("found"):
-                right["fallback"] = LEGACY_RIGHT_SELECTOR
             targets.append({
                 "selector": "buybox:from_in_stock",
                 "found": False,
@@ -778,6 +877,29 @@ async def _measure_capture_targets(page: Any, cfg: Mapping[str, Any]) -> List[Di
     else:
         targets.extend(await _measure_target_boxes(page, [LEGACY_RIGHT_SELECTOR]))
     return targets
+
+
+def _region_boxes_from_targets(targets: Sequence[Dict[str, Any]]) -> Tuple[Optional[Dict[str, float]], Optional[Dict[str, float]]]:
+    """Split measured targets into (left_price_box, right_buybox_box)."""
+    left_box: Optional[Dict[str, float]] = None
+    right_box: Optional[Dict[str, float]] = None
+    for t in targets:
+        if not t.get("found"):
+            continue
+        try:
+            w = float(t.get("width") or 0)
+            h = float(t.get("height") or 0)
+        except Exception:
+            continue
+        if w <= 20 or h <= 20:
+            continue
+        box = {"x": float(t["x"]), "y": float(t["y"]), "width": w, "height": h}
+        sel = str(t.get("selector") or "")
+        if sel == "buybox:from_in_stock" or sel == LEGACY_RIGHT_SELECTOR or sel.startswith("form#"):
+            right_box = box
+        elif left_box is None:
+            left_box = box
+    return left_box, right_box
 
 
 async def _measure_target_boxes(
@@ -1004,7 +1126,6 @@ async def capture_amazon_buybox_screenshot(
 
             await _highlight_targets(page, highlight_selectors, highlight_color, highlight_thickness)
 
-            clip = merge_boxes(valid_boxes, padding)
             dims = await page.evaluate(
                 """
                 () => ({
@@ -1013,8 +1134,9 @@ async def capture_amazon_buybox_screenshot(
                 })
                 """
             )
-            clip["width"] = min(clip["width"], max(1, float(dims.get("width", clip["width"])) - clip["x"]))
-            clip["height"] = min(clip["height"], max(1, float(dims.get("height", clip["height"])) - clip["y"]))
+            left_box, right_box = _region_boxes_from_targets(targets)
+            layout = _screenshot_layout_mode(cfg)
+            gap_px = _cfg_int(cfg, "amazon_buybox_side_by_side_gap_px", 12, lo=0, hi=80)
 
             out_dir = Path(output_dir_raw)
             if not out_dir.is_absolute():
@@ -1023,9 +1145,44 @@ async def capture_amazon_buybox_screenshot(
             base = out_dir / f"{safe_name(u)}_{int(time.time())}_buybox"
             shot = str(base) + ".png"
             result["status"] = "ok"
-            result["clip"] = clip
-            await page.screenshot(path=shot, full_page=False, clip=clip)
-            result["screenshot_path"] = shot
+            result["screenshot_layout"] = layout
+
+            async def _capture_clip(box: Dict[str, float]) -> Tuple[bytes, Dict[str, float]]:
+                clip = _clamp_clip(box, dims, padding)
+                png = await page.screenshot(full_page=False, clip=clip, type="png")
+                return png, clip
+
+            if layout in {"side_by_side", "separate"} and left_box and right_box:
+                left_png, left_clip = await _capture_clip(left_box)
+                right_png, right_clip = await _capture_clip(right_box)
+                result["clip"] = {"layout": layout, "left": left_clip, "right": right_clip}
+                left_part = str(base) + "_price.png"
+                right_part = str(base) + "_instock.png"
+                Path(left_part).write_bytes(left_png)
+                Path(right_part).write_bytes(right_png)
+                screenshot_paths = [left_part, right_part]
+                if layout == "side_by_side":
+                    stitched = _stitch_png_bytes(left_png, right_png, gap=gap_px)
+                    if stitched:
+                        Path(shot).write_bytes(stitched)
+                        result["screenshot_path"] = shot
+                        result["screenshot_paths"] = [shot]
+                    else:
+                        result["screenshot_path"] = left_part
+                        result["screenshot_paths"] = screenshot_paths
+                        result["stitch_note"] = "Pillow unavailable; using separate price + in-stock PNGs"
+                else:
+                    result["screenshot_path"] = left_part
+                    result["screenshot_paths"] = screenshot_paths
+            else:
+                clip = merge_boxes(valid_boxes, padding)
+                clip["width"] = min(clip["width"], max(1, float(dims.get("width", clip["width"])) - clip["x"]))
+                clip["height"] = min(clip["height"], max(1, float(dims.get("height", clip["height"])) - clip["y"]))
+                result["clip"] = clip
+                await page.screenshot(path=shot, full_page=False, clip=clip)
+                result["screenshot_path"] = shot
+                result["screenshot_paths"] = [shot]
+
             # Extract canonical price/list/discount strings from the SAME page
             # load that produced the screenshot. The caller uses these to
             # override the source-message price so embed text and screenshot
