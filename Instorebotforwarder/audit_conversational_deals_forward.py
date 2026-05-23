@@ -2,10 +2,9 @@
 """
 Standalone Gemini-rewrite forwarder preview/sender for the conversational-deals pipeline.
 
-Supports every source mapped in `conversational_deals_forwarder.CHANNEL_MAP`, which is
-currently:
-  - 1438970053352751215 -> 1484473267031904287  (conversational_deals)
-  - 1435308472639160522 -> 1484599902863622195  (affiliated_leads / Mavely Leads)
+Supports conversational and affiliated sources:
+  - 1438970053352751215 -> 1484473267031904287  (conversational_deals, fixed dest)
+  - 1435308472639160522 -> dest_personal OR dest_food (affiliated_leads, Gemini classifier)
 
 This tool is intentionally **standalone** and does NOT import `instore_auto_mirror_bot.py`.
 
@@ -27,9 +26,13 @@ from urllib.request import Request, urlopen
 
 from conversational_deals_forwarder import (  # type: ignore
     CHANNEL_MAP,
+    classify_affiliated_food,
     first_url_in_text,
+    load_affiliated_leads_routes,
     media_url_from_rest,
+    resolve_destination_channel_id,
     rewrite_description,
+    routing_message_block_from_rest,
     simple_message_block_from_rest,
 )
 from automatedParaphrase.gemini_paraphraser import (  # type: ignore
@@ -166,13 +169,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     link = str(args.link or "").strip() or input("Discord message link: ").strip()
     guild_id, channel_id, message_id = _parse_discord_message_link(link)
-    mapped_dest = CHANNEL_MAP.get(int(channel_id))
-    if not mapped_dest:
-        supported = ", ".join(str(k) for k in sorted(CHANNEL_MAP.keys()))
-        raise SystemExit(
-            f"Source channel {channel_id} is not in CHANNEL_MAP. Supported sources: {supported}"
-        )
-    dest_channel_id = int(mapped_dest)
 
     cfg = load_instore_config()
     token = str((cfg or {}).get("bot_token") or "").strip()
@@ -182,6 +178,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     url = f"https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}"
     headers = {"Authorization": f"Bot {token}", "User-Agent": "mirror-world-instoreaudit/1.0"}
     data = _discord_rest_get_json(url, headers=headers)
+
+    async def _resolve_dest() -> Tuple[int, str]:
+        src_block = simple_message_block_from_rest(data)
+        route_text = routing_message_block_from_rest(data)
+        dest_id, route_reason = await resolve_destination_channel_id(
+            int(channel_id),
+            cfg,
+            message_text=route_text,
+        )
+        if not dest_id:
+            mapped = CHANNEL_MAP.get(int(channel_id))
+            if mapped:
+                return int(mapped), "conversational:fixed"
+            raise SystemExit(
+                f"Source channel {channel_id} is not conversational or affiliated_leads."
+            )
+        return int(dest_id), route_reason
+
+    dest_channel_id, route_reason = asyncio.run(_resolve_dest())
 
     _print_safe("=" * 78)
     _print_safe("CONVERSATIONAL DEALS STANDALONE (preview/sender)")
@@ -218,13 +233,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     _print_safe(f"   guild_id={guild_id or ''}")
     _print_safe(f"   source_channel_id={channel_id}")
     _print_safe(f"   dest_channel_id={dest_channel_id}")
+    _print_safe(f"   route_reason={route_reason}")
     _print_safe(f"   message_id={message_id}")
+    affiliated = load_affiliated_leads_routes(cfg)
+    if affiliated and int(channel_id) == int(affiliated["source_channel_id"]):
+        _print_safe(
+            f"   affiliated_dest_personal={affiliated['dest_personal']} "
+            f"affiliated_dest_food={affiliated['dest_food']}"
+        )
     _print_safe("")
 
     src_block = simple_message_block_from_rest(data)
-    _print_safe("2) SOURCE SNAPSHOT (simple_message_block)")
+    route_block = routing_message_block_from_rest(data)
+    _print_safe("2) SOURCE SNAPSHOT (simple_message_block — post/rewrite body)")
     _print_safe(src_block)
     _print_safe("")
+    if route_block.strip() != src_block.strip():
+        _print_safe("2b) ROUTING SNAPSHOT (body + embed + link host)")
+        _print_safe(route_block)
+        _print_safe("")
+    if affiliated and int(channel_id) == int(affiliated["source_channel_id"]):
+        is_food, why = asyncio.run(classify_affiliated_food(route_block, cfg))
+        _print_safe("2c) AFFILIATED FOOD CLASSIFIER")
+        _print_safe(f"   is_food={'yes' if is_food else 'no'} detail={why}")
+        _print_safe("")
 
     desc = src_block
     used_fallback = False

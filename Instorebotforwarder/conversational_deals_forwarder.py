@@ -13,18 +13,27 @@ _log = logging.getLogger("instorebotforwarder")
 # - Executed/used from the bot folder on Oracle where `Instorebotforwarder/` is on sys.path
 try:
     from Instorebotforwarder.automatedParaphrase.gemini_paraphraser import (  # type: ignore
+        classify_affiliated_food_route,
         rewrite_deal_post_keep_urls,
         gemini_status,
     )
 except Exception:
     from automatedParaphrase.gemini_paraphraser import (  # type: ignore
+        classify_affiliated_food_route,
         rewrite_deal_post_keep_urls,
         gemini_status,
     )
 
 # Re-export so existing callers `from conversational_deals_forwarder import gemini_status`
 # keep working. Canonical owner is gemini_paraphraser.py.
-__all__ = ["gemini_status", "rewrite_deal_post_keep_urls"]
+__all__ = [
+    "gemini_status",
+    "rewrite_deal_post_keep_urls",
+    "classify_affiliated_food",
+    "resolve_destination_channel_id",
+    "load_affiliated_leads_routes",
+    "AFFILIATED_LEADS_SOURCE_CHANNEL_ID",
+]
 
 SOURCE_CHANNEL_ID = 1438970053352751215
 DEST_CHANNEL_ID = 1484473267031904287
@@ -124,24 +133,20 @@ def load_affiliated_leads_routes(cfg: Mapping[str, Any]) -> Optional[Dict[str, i
     return {"source_channel_id": src, "dest_personal": personal, "dest_food": food}
 
 
+def _affiliated_food_classifier_mode(cfg: Mapping[str, Any]) -> str:
+    mode = str((cfg or {}).get("affiliated_food_classifier") or "gemini").strip().lower()
+    return mode if mode in {"gemini", "keywords"} else "gemini"
+
+
 def _affiliated_food_keywords(cfg: Mapping[str, Any]) -> List[str]:
+    """Legacy escape hatch only when `affiliated_food_classifier` is `keywords`."""
     raw = (cfg or {}).get("affiliated_food_keywords")
     if isinstance(raw, list) and raw:
         return [str(k).strip() for k in raw if str(k).strip()]
-    # Fallback: reuse Amazon grocery keyword list when affiliated list is absent.
-    raw2 = (cfg or {}).get("amazon_grocery_keywords")
-    if isinstance(raw2, list):
-        return [str(k).strip() for k in raw2 if str(k).strip()]
     return []
 
 
-def classify_affiliated_food(text: str, cfg: Mapping[str, Any]) -> Tuple[bool, str]:
-    """
-    True when the lead is primarily human-consumable food (edible / grocery).
-
-    Default is personal (batteries, games, electronics, etc.) unless a configured
-    keyword matches. This is intentionally separate from Amazon department scraping.
-    """
+def _classify_affiliated_food_keywords(text: str, cfg: Mapping[str, Any]) -> Tuple[bool, str]:
     low = (text or "").lower()
     if not low.strip():
         return False, "empty_text:personal"
@@ -158,7 +163,38 @@ def classify_affiliated_food(text: str, cfg: Mapping[str, Any]) -> Tuple[bool, s
     return False, "default:personal"
 
 
-def resolve_destination_channel_id(
+async def classify_affiliated_food(text: str, cfg: Mapping[str, Any]) -> Tuple[bool, str]:
+    """
+    True when the lead is primarily human- or pet-consumable food (edible / grocery).
+
+    Canonical path: Gemini structured route (`affiliated_food_classifier=gemini`).
+    Separate from Amazon department scraping in instore_auto_mirror_bot.py.
+    """
+    if _affiliated_food_classifier_mode(cfg) == "keywords":
+        return _classify_affiliated_food_keywords(text, cfg)
+
+    key = str((cfg or {}).get("gemini_api_key") or "").strip()
+    model = str((cfg or {}).get("gemini_model") or "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
+    try:
+        temp = float((cfg or {}).get("affiliated_food_classifier_temperature") or 0.15)
+    except Exception:
+        temp = 0.15
+    try:
+        timeout_s = float((cfg or {}).get("gemini_timeout_s") or 12.0)
+    except Exception:
+        timeout_s = 12.0
+
+    return await classify_affiliated_food_route(
+        text=text,
+        gemini_api_key=key,
+        model=model,
+        temperature=max(0.0, min(temp, 0.4)),
+        timeout_s=max(5.0, timeout_s),
+        usage_accumulator=None,
+    )
+
+
+async def resolve_destination_channel_id(
     src_id: int,
     cfg: Mapping[str, Any],
     *,
@@ -173,7 +209,7 @@ def resolve_destination_channel_id(
 
     routes = load_affiliated_leads_routes(cfg)
     if routes and int(src_id) == int(routes["source_channel_id"]):
-        is_food, why = classify_affiliated_food(message_text, cfg)
+        is_food, why = await classify_affiliated_food(message_text, cfg)
         if is_food:
             return int(routes["dest_food"]), f"affiliated:food:{why}"
         return int(routes["dest_personal"]), f"affiliated:personal:{why}"
@@ -188,32 +224,98 @@ def first_url_in_text(text: str) -> str:
     return str(m.group(0) or "").strip().rstrip(").,>")
 
 
-def simple_message_block_from_discord_message(message: discord.Message) -> str:
+def _link_context_line(text: str) -> str:
+    u = first_url_in_text(text or "")
+    if not u:
+        return ""
+    try:
+        from urllib.parse import urlparse
+
+        p = urlparse(u)
+        host = (p.netloc or "").strip().lower()
+        path = (p.path or "").strip().lower()[:160]
+        if not host:
+            return ""
+        return f"link_host={host}" + (f" link_path={path}" if path else "")
+    except Exception:
+        return ""
+
+
+def _embed_text_parts_from_discord_embeds(embeds: Any) -> List[str]:
+    parts: list[str] = []
+    try:
+        for e in embeds or []:
+            eparts: list[str] = []
+            t = (getattr(e, "title", None) or "").strip()
+            if t:
+                eparts.append(t)
+            d = (getattr(e, "description", None) or "").strip()
+            if d:
+                eparts.append(d)
+            for f in (getattr(e, "fields", None) or []):
+                fn = (getattr(f, "name", None) or "").strip()
+                fv = (getattr(f, "value", None) or "").strip()
+                row = "\n".join([x for x in (fn, fv) if x]).strip()
+                if row:
+                    eparts.append(row)
+            if eparts:
+                parts.append("\n\n".join(eparts))
+    except Exception:
+        pass
+    return parts
+
+
+def _embed_text_parts_from_rest_embeds(embeds: Any) -> List[str]:
+    parts: list[str] = []
+    for e in embeds or []:
+        if not isinstance(e, dict):
+            continue
+        eparts: list[str] = []
+        t = str(e.get("title") or "").strip()
+        d = str(e.get("description") or "").strip()
+        if t:
+            eparts.append(t)
+        if d:
+            eparts.append(d)
+        fields = e.get("fields") or []
+        if isinstance(fields, list):
+            for f in fields:
+                if not isinstance(f, dict):
+                    continue
+                fn = str(f.get("name") or "").strip()
+                fv = str(f.get("value") or "").strip()
+                row = "\n".join([x for x in (fn, fv) if x]).strip()
+                if row:
+                    eparts.append(row)
+        if eparts:
+            parts.append("\n\n".join(eparts))
+    return parts
+
+
+def _finalize_message_block(parts: List[str], *, include_link_context: bool) -> str:
+    block = "\n".join([x for x in parts if str(x).strip()]).strip()
+    block = _RE_DISCORD_CDN_ATTACHMENT.sub("", block)
+    block = re.sub(r"\n{3,}", "\n\n", block).strip()
+    block = _strip_source_artifacts(block)
+    if include_link_context:
+        hint = _link_context_line(block)
+        if hint and hint.lower() not in block.lower():
+            block = f"{block}\n\n{hint}".strip() if block else hint
+    return block
+
+
+def simple_message_block_from_discord_message(
+    message: discord.Message,
+    *,
+    include_embed_text: bool = True,
+    include_link_context: bool = False,
+) -> str:
     parts: list[str] = []
     content = (message.content or "").strip()
     if content:
         parts.append(content)
-    # Only use embed text when the message has no plain content.
-    if not content:
-        try:
-            for e in (message.embeds or []):
-                eparts: list[str] = []
-                t = (getattr(e, "title", None) or "").strip()
-                if t:
-                    eparts.append(t)
-                d = (getattr(e, "description", None) or "").strip()
-                if d:
-                    eparts.append(d)
-                for f in (getattr(e, "fields", None) or []):
-                    fn = (getattr(f, "name", None) or "").strip()
-                    fv = (getattr(f, "value", None) or "").strip()
-                    row = "\n".join([x for x in (fn, fv) if x]).strip()
-                    if row:
-                        eparts.append(row)
-                if eparts:
-                    parts.append("\n\n".join(eparts))
-        except Exception:
-            pass
+    if include_embed_text:
+        parts.extend(_embed_text_parts_from_discord_embeds(message.embeds))
     try:
         for att in (message.attachments or []):
             u = str(getattr(att, "url", "") or "").strip()
@@ -221,12 +323,16 @@ def simple_message_block_from_discord_message(message: discord.Message) -> str:
                 parts.append(u)
     except Exception:
         pass
-    block = "\n".join([x for x in parts if str(x).strip()]).strip()
-    # Do not include raw attachment CDN URLs in the text body (image is carried via embed image).
-    block = _RE_DISCORD_CDN_ATTACHMENT.sub("", block)
-    block = re.sub(r"\n{3,}", "\n\n", block).strip()
-    block = _strip_source_artifacts(block)
-    return block
+    return _finalize_message_block(parts, include_link_context=include_link_context)
+
+
+def routing_message_block_from_discord_message(message: discord.Message) -> str:
+    """Full context for affiliated food vs personal (body + embed + link host)."""
+    return simple_message_block_from_discord_message(
+        message,
+        include_embed_text=True,
+        include_link_context=True,
+    )
 
 
 def media_url_from_discord_message(message: discord.Message) -> str:
@@ -256,43 +362,33 @@ def media_url_from_discord_message(message: discord.Message) -> str:
     return ""
 
 
-def simple_message_block_from_rest(rest_msg: Dict[str, Any]) -> str:
+def simple_message_block_from_rest(
+    rest_msg: Dict[str, Any],
+    *,
+    include_embed_text: bool = True,
+    include_link_context: bool = False,
+) -> str:
     parts: list[str] = []
     content = str(rest_msg.get("content") or "").strip()
     if content:
         parts.append(content)
-    # Only use embed text when the message has no plain content.
-    if not content:
-        for e in (rest_msg.get("embeds") or []):
-            if not isinstance(e, dict):
-                continue
-            t = str(e.get("title") or "").strip()
-            d = str(e.get("description") or "").strip()
-            if t:
-                parts.append(t)
-            if d:
-                parts.append(d)
-            fields = e.get("fields") or []
-            if isinstance(fields, list):
-                for f in fields:
-                    if not isinstance(f, dict):
-                        continue
-                    fn = str(f.get("name") or "").strip()
-                    fv = str(f.get("value") or "").strip()
-                    row = "\n".join([x for x in (fn, fv) if x]).strip()
-                    if row:
-                        parts.append(row)
+    if include_embed_text:
+        parts.extend(_embed_text_parts_from_rest_embeds(rest_msg.get("embeds")))
     for a in (rest_msg.get("attachments") or []):
         if not isinstance(a, dict):
             continue
         u = str(a.get("url") or "").strip()
         if u:
             parts.append(u)
-    block = "\n".join([x for x in parts if str(x).strip()]).strip()
-    block = _RE_DISCORD_CDN_ATTACHMENT.sub("", block)
-    block = re.sub(r"\n{3,}", "\n\n", block).strip()
-    block = _strip_source_artifacts(block)
-    return block
+    return _finalize_message_block(parts, include_link_context=include_link_context)
+
+
+def routing_message_block_from_rest(rest_msg: Dict[str, Any]) -> str:
+    return simple_message_block_from_rest(
+        rest_msg,
+        include_embed_text=True,
+        include_link_context=True,
+    )
 
 
 def media_url_from_rest(rest_msg: Dict[str, Any]) -> str:
@@ -393,8 +489,15 @@ async def forward_runtime_message(inst: Any, message: discord.Message) -> bool:
         # Nothing usable to forward (no content, no embed text, no attachments).
         return True
 
-    dest_id, route_reason = resolve_destination_channel_id(
-        int(src_id), cfg, message_text=src_block
+    routes = load_affiliated_leads_routes(cfg)
+    route_text = (
+        routing_message_block_from_discord_message(message)
+        if routes and int(src_id) == int(routes["source_channel_id"])
+        else src_block
+    )
+
+    dest_id, route_reason = await resolve_destination_channel_id(
+        int(src_id), cfg, message_text=route_text
     )
     if not dest_id:
         return False

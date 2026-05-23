@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 from urllib.request import Request, urlopen
 
 _gem_log = logging.getLogger("instorebotforwarder")
@@ -412,6 +412,124 @@ async def rewrite_deal_post_keep_urls(
                     return out
     except Exception:
         return raw
+
+
+_AFFILIATED_FOOD_ROUTE_SYS = (
+    "You classify Discord deal posts for channel routing.\n"
+    "\n"
+    "Return ONLY one JSON object (no markdown fences):\n"
+    '  {"route":"food"|"personal","reason":"short explanation"}\n'
+    "\n"
+    "FOOD route — the product is something a human or pet would EAT or DRINK:\n"
+    "- Grocery, snacks, ingredients, frozen/refrigerated food, meal kits (consumable)\n"
+    "- All beverages (soda, energy drinks, juice, coffee/tea as drinkable product, pods/grounds/beans sold as consumables)\n"
+    "- Supplements (powder, gummies, vitamins), protein/nutrition bars, pet food\n"
+    "\n"
+    "PERSONAL route — NOT ingestible, or equipment/accessories:\n"
+    "- Electronics, furniture, storage, tools, apparel\n"
+    "- Appliances and food-prep EQUIPMENT even if the title uses food words:\n"
+    "  coffee maker, Keurig, air fryer, hot dog maker/roller, pancake maker/shaper/griddle appliance,\n"
+    "  waffle maker, popcorn machine, ice cream maker machine, etc.\n"
+    "- BBQ fuel (wood pellets, charcoal), cookware as durable goods (pans, racks) when not consumable\n"
+    "- Topical/personal care (lotions, gels) unless clearly an ingestible supplement product\n"
+    "- Room/use words alone (kitchen, pantry) on non-food items like shelving\n"
+    "\n"
+    "Decide from the FULL post (headline, body, embed product title, link host). "
+    "When unsure, prefer personal.\n"
+)
+
+
+async def classify_affiliated_food_route(
+    *,
+    text: str,
+    gemini_api_key: str,
+    model: str,
+    temperature: float,
+    timeout_s: float,
+    usage_accumulator: Optional[Dict[str, int]] = None,
+) -> Tuple[bool, str]:
+    """
+    Gemini edible-vs-equipment classifier for affiliated food/personal routing.
+
+    Returns (is_food, reason_tag). On any failure defaults to (False, 'gemini_unavailable:personal').
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return False, "empty_text:personal"
+
+    key = (gemini_api_key or "").strip()
+    if not key:
+        return False, "gemini_key_missing:personal"
+
+    clipped = raw if len(raw) <= 8000 else raw[:7997] + "..."
+
+    payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": f"{_AFFILIATED_FOOD_ROUTE_SYS}\n---\n{clipped}"}],
+            }
+        ],
+        "generationConfig": {
+            "temperature": max(0.0, min(float(temperature), 0.4)),
+            "topP": 0.8,
+            "maxOutputTokens": 128,
+            "responseMimeType": "application/json",
+        },
+    }
+
+    try:
+        import aiohttp
+
+        timeout_s = max(5.0, float(timeout_s))
+        model_id = (model or "").strip() or DEFAULT_GEMINI_MODEL
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}"
+            f":generateContent?key={key}"
+        )
+
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_s)) as session:
+            async with session.post(url, json=payload) as resp:
+                txt = await resp.text(errors="replace")
+                if int(resp.status) >= 400:
+                    _gem_log.warning(
+                        "classify_affiliated_food_route http_%s: %s",
+                        int(resp.status),
+                        (txt or "")[:200],
+                    )
+                    return False, f"gemini_http_{int(resp.status)}:personal"
+
+                data = json.loads(txt) if txt else {}
+                if usage_accumulator is not None:
+                    accumulate_gemini_response_usage(data, usage_accumulator)
+
+                out = (
+                    (((data or {}).get("candidates") or [])[0] or {})
+                    .get("content", {})
+                    .get("parts", [{}])[0]
+                    .get("text", "")
+                    or ""
+                )
+                obj = _extract_json_object(str(out).strip())
+                if not obj:
+                    return False, "gemini_parse_fail:personal"
+
+                route = str(obj.get("route") or "").strip().lower()
+                reason = str(obj.get("reason") or "").strip()[:160]
+                if route == "food":
+                    tag = f"gemini:food"
+                    if reason:
+                        tag = f"{tag}:{reason}"
+                    return True, tag
+                if route == "personal":
+                    tag = "gemini:personal"
+                    if reason:
+                        tag = f"{tag}:{reason}"
+                    return False, tag
+                return False, "gemini_invalid_route:personal"
+    except Exception as e:
+        _gem_log.warning("classify_affiliated_food_route error: %s", type(e).__name__)
+        return False, "gemini_error:personal"
 
 
 def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
