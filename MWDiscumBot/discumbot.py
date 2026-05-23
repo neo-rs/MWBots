@@ -3816,6 +3816,26 @@ def _urls_in_text_for_link_preview_match(msg_text: str) -> set:
     return {x for x in out if x}
 
 
+def _normalize_preview_suppressed_url(url: str) -> str:
+    """Strip repeated angle brackets so <url> and <<url>> normalize to bare https URL."""
+    u = str(url or "").strip()
+    while u.startswith("<") and u.endswith(">"):
+        inner = u[1:-1].strip()
+        if inner.lower().startswith("http"):
+            u = inner
+        else:
+            break
+    return u
+
+
+def _angle_wrap_url_for_preview(url: str) -> str:
+    """Single Discord no-preview wrap: <https://...> (never <<...>>)."""
+    u = _normalize_preview_suppressed_url(url)
+    if not u.lower().startswith("http"):
+        return str(url or "")
+    return f"<{u}>"
+
+
 def _suppress_discord_link_previews_in_text(msg_text: str) -> Tuple[str, bool]:
     """Wrap markdown and bare http(s) links in <> so Discord does not unfurl large previews. Returns (text, changed)."""
 
@@ -3824,22 +3844,33 @@ def _suppress_discord_link_previews_in_text(msg_text: str) -> Tuple[str, bool]:
     orig = msg_text
 
     def md_sub(m: Any) -> str:
-        label, url = m.group(1), m.group(2).strip()
-        if url.startswith("<") and url.endswith(">"):
+        label, url = m.group(1), _normalize_preview_suppressed_url(m.group(2))
+        if not url.lower().startswith("http"):
             return m.group(0)
-        inner = url[1:-1] if (url.startswith("<") and url.endswith(">")) else url
-        return f"[{label}](<{inner}>)"
+        return f"[{label}]({_angle_wrap_url_for_preview(url)})"
 
-    s = re.sub(r"\[([^\]]*)\]\((https?://[^)\s<>]+)\)", md_sub, msg_text, flags=re.IGNORECASE)
+    # Optional < > around URL inside (...) so source monitors that already suppress previews are not skipped.
+    s = re.sub(
+        r"\[([^\]]*)\]\(\s*(?:<)?(https?://[^>\s)]+)(?:>)?\s*\)",
+        md_sub,
+        msg_text,
+        flags=re.IGNORECASE,
+    )
 
     def bare_sub(m: Any) -> str:
-        u = m.group(1)
+        u = _normalize_preview_suppressed_url(m.group(1))
+        if not u.lower().startswith("http"):
+            return m.group(0)
         i = m.start(1)
+        j = i + len(m.group(1))
+        if i > 0 and s[i - 1 : i] == "<" and j < len(s) and s[j : j + 1] == ">":
+            return m.group(0)
         if i > 0 and s[i - 1 : i] == "<":
-            return u
-        return f"<{u}>"
+            return m.group(0)
+        return _angle_wrap_url_for_preview(u)
 
-    s = re.sub(r"(?<!<)(https?://[^\s<]+)", bare_sub, s)
+    s = re.sub(r"(?<!<)(https?://[^\s<>]+)(?!>)", bare_sub, s)
+    s = re.sub(r"<{2,}(https?://[^>\s]+)>{2,}", r"<\1>", s)
     return s, s != orig
 
 
@@ -3897,11 +3928,28 @@ def _maybe_replace_single_content_url_with_embed_url(msg_text: str, embed_urls: 
     if len(urls) != 1:
         return (msg_text, False)
 
-    source_url = urls[0].strip()
-    if not source_url or source_url == target or target in msg_text:
+    source_url = _normalize_preview_suppressed_url(urls[0].strip())
+    target = _normalize_preview_suppressed_url(target)
+    if not source_url or not target or source_url == target:
         return (msg_text, False)
 
-    replaced = msg_text.replace(source_url, f"<{target}>")
+    wrapped_src = _angle_wrap_url_for_preview(source_url)
+    wrapped_tgt = _angle_wrap_url_for_preview(target)
+    if wrapped_src in msg_text:
+        replaced = msg_text.replace(wrapped_src, wrapped_tgt, 1)
+        return (replaced, replaced != msg_text)
+
+    # Bare URL only — do not replace the https:// substring inside an existing <...> wrap.
+    pat = re.compile(r"(?<!<)" + re.escape(source_url) + r"(?!>)", re.IGNORECASE)
+    if not pat.search(msg_text):
+        return (msg_text, False)
+    replaced = pat.sub(wrapped_tgt, msg_text, count=1)
+    replaced = re.sub(
+        r"<{2,}(" + re.escape(target) + r")>{2,}",
+        r"<\1>",
+        replaced,
+        flags=re.IGNORECASE,
+    )
     return (replaced, replaced != msg_text)
 
 # ================= Short Embed Retry Queue =================

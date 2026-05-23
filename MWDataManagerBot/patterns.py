@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 # NOTE: These are vendored from `neonxt/core/global_filters.py` so MWDataManagerBot
@@ -507,9 +507,27 @@ def passes_price_error_routing_gate(
 
 
 # AFFILIATED_LINKS suppressions (channel is noisy if it accepts flip templates / fandom drops / stub edits).
-_AFFILIATE_FLIP_FIELDS_PATTERN = re.compile(
-    r"(?im)^\s*(when|where|retail|resell)\b",
-    re.IGNORECASE,
+_AFFILIATE_STRUCTURED_FLIP_LABEL = re.compile(
+    r"(?i)\b(where|when|price|retail|resale|resell|market|risk|info)\s*:",
+)
+_AFFILIATE_RESALE_MULTIPLIER_LINE = re.compile(
+    r"(?i)\b(?:resale|resell|market)\s*:\s*(?:x\d|x\s*\d|\d+\s*[-–—]\s*\d+\s*months?)",
+)
+_AFFILIATE_EQL_DROP_COMMENTARY_PATTERN = re.compile(
+    r"(?i)\beql\b",
+)
+_AFFILIATE_FLIP_COMMENTARY_PROSE_PATTERN = re.compile(
+    r"(?i)(?:"
+    r"not pinging because|not really sure|maybe some of you want to take the risk|"
+    r"will probably restock|expect comps to come down|cd back up|"
+    r"worst case.*x\d|x\d+\s*[-–—]\s*x\d+\s*ish|"
+    r"hold for at least|months to peak|fo\s*&\s*o|fomo|viral hype|"
+    r"final (?:wave|call)|locks for|open order window|"
+    r"drop(?:ping)?\s+(?:tonight|today|soon)|going live\s+(?:soon|tonight)"
+    r")",
+)
+_AFFILIATE_RAFFLE_OR_PASS_NOISE_PATTERN = re.compile(
+    r"(?i)(?:\bsnkrs\s+pass\b|golden ticket|free to enter|raffling off the option to win)",
 )
 _AFFILIATE_QUICK_LINKS_PATTERN = re.compile(r"(?im)^\s*quick\s+links?\b", re.IGNORECASE)
 # Pokemon: substring match for pokemoncenter.com etc.; include accented spellings (e.g. "Pokémon" — ASCII-only "pokemon" misses).
@@ -826,6 +844,11 @@ def affiliate_should_suppress_affiliated_links(blob: str, *, min_core_chars: int
         return "flipfluence_draw_live_product_link"
     if is_affiliate_role_mention_noise_blob(raw):
         return "affiliate_role_mention_noise"
+    if re.search(r"https?://", raw, re.IGNORECASE) and _AFFILIATE_COMPS_POINTER_PATTERN.search(raw):
+        return "affiliate_comps_pointer"
+    flip_resell_reason = affiliate_flip_resell_drop_suppression_reason(raw)
+    if flip_resell_reason:
+        return flip_resell_reason
     if blob_has_dc_comics_publisher_url(raw):
         return "dc_comics_publisher_url"
     core_len = deal_substance_core_len(raw)
@@ -911,16 +934,6 @@ def affiliate_should_suppress_affiliated_links(blob: str, *, min_core_chars: int
     # One Piece franchise / TCG (Crunchyroll Divine/Zephyr monitors, StockX search URLs, etc.).
     if _AFFILIATE_ONE_PIECE_SUBSTRING_PATTERN.search(raw):
         return "one_piece_content"
-
-    # Flip template fields: When/Where/Retail/Resell (+ quick links or ebay) => not AFFILIATED_LINKS.
-    has_when = bool(re.search(r"(?im)^\s*when\b", raw))
-    has_where = bool(re.search(r"(?im)^\s*where\b", raw))
-    has_retail = bool(re.search(r"(?im)^\s*retail\b", raw))
-    has_resell = bool(re.search(r"(?im)^\s*resell\b", raw))
-    if has_when and has_where and has_retail and has_resell:
-        return "flip_template_fields"
-    if has_retail and has_resell and (bool(_AFFILIATE_QUICK_LINKS_PATTERN.search(raw)) or "ebay" in raw.lower()):
-        return "flip_template_retail_resell"
 
     # Comics / hero-villain fandom posts: only suppress when comic-like context exists, to avoid blocking "Washington DC".
     if _AFFILIATE_COMICS_PATTERN.search(raw) and _AFFILIATE_COMICS_CONTEXT_PATTERN.search(raw):
@@ -1843,15 +1856,91 @@ _DISCORD_STRUCTURAL_TOKEN_RE = re.compile(
     r"|<t:[0-9]{6,22}:[RrDdFfTt]>",
     re.IGNORECASE,
 )
+_AFFILIATE_COMPS_POINTER_PATTERN = re.compile(
+    r"(?i)(?:click here for comps|\bfor comps\b|\bcheck comps\b)",
+)
 _AFFILIATE_DISCORD_ROLE_MENTION_PATTERN = re.compile(r"<@&[0-9]{15,22}>")
-_AFFILIATE_LITERAL_POTENTIAL_PING_PATTERN = re.compile(r"(?i)@potential\s+sports\b|@potential\b")
+_AFFILIATE_DEALER_ROLE_LITERAL_PING_PATTERN = re.compile(
+    r"(?i)@(?:cards(?:\s+flips)?|(?:restock|vinyl)\s+flips|flips|potential(?:\s+sports)?)\b",
+)
+
+
+def _affiliate_collect_structured_flip_labels(blob: str) -> Set[str]:
+    guard = _affiliate_text_strip_markdown_noise(str(blob or ""))
+    labels: Set[str] = set()
+    for m in _AFFILIATE_STRUCTURED_FLIP_LABEL.finditer(guard):
+        try:
+            labels.add(str(m.group(1) or "").lower())
+        except Exception:
+            continue
+    return labels
+
+
+def affiliate_flip_resell_drop_suppression_reason(blob: str) -> str:
+    """
+    Flip / drop / resell templates and dealer commentary — not clean AFFILIATED_LINKS product leads.
+
+    Covers structured cards (WHERE/WHEN/PRICE/RESALE/RISK/INFO), legacy When/Where/Retail/Resell lines,
+    EQL drop write-ups, informational commentary, SNKRS PASS / raffle-entry posts.
+    """
+    raw = str(blob or "").strip()
+    if not raw:
+        return ""
+    guard = _affiliate_text_strip_markdown_noise(raw)
+    sl = raw.lower()
+    labels = _affiliate_collect_structured_flip_labels(raw)
+    has_where = "where" in labels or bool(re.search(r"(?im)^\s*where\b", guard))
+    has_when = "when" in labels or bool(re.search(r"(?im)^\s*when\b", guard))
+    has_priceish = bool(labels & {"price", "retail"})
+    has_resaleish = bool(labels & {"resale", "resell", "market"})
+    has_retail_line = bool(re.search(r"(?im)^\s*retail\b", guard))
+    has_resell_line = bool(re.search(r"(?im)^\s*resell\b", guard))
+
+    # Structured resell card (Divine-style **WHERE:** / **WHEN:** / **RESALE:** / **RISK:** / **INFO:**).
+    if has_where and has_when and has_priceish and has_resaleish:
+        return "flip_resell_structured_card"
+    if has_where and has_when and "risk" in labels and has_resaleish:
+        return "flip_resell_structured_card"
+    if _AFFILIATE_RESALE_MULTIPLIER_LINE.search(guard):
+        return "flip_resell_structured_card"
+
+    # Legacy flip-template lines (When/Where/Retail/Resell).
+    if has_when and has_where and has_retail_line and has_resell_line:
+        return "flip_template_fields"
+    if has_retail_line and has_resell_line and (
+        bool(_AFFILIATE_QUICK_LINKS_PATTERN.search(guard)) or "ebay" in sl
+    ):
+        return "flip_template_retail_resell"
+
+    # SNKRS PASS / golden-ticket raffle entries (not merchant affiliate drops).
+    if _AFFILIATE_RAFFLE_OR_PASS_NOISE_PATTERN.search(raw):
+        return "flip_resell_raffle_or_pass"
+
+    # EQL / drop commentary with resale hold language (comic & collectibles drops).
+    if _AFFILIATE_EQL_DROP_COMMENTARY_PATTERN.search(raw) and _AFFILIATE_FLIP_COMMENTARY_PROSE_PATTERN.search(raw):
+        return "flip_resell_eql_commentary"
+    if _AFFILIATE_FLIP_COMMENTARY_PROSE_PATTERN.search(raw) and re.search(
+        r"(?i)(?:resale|resell|x\d+\s*[-–—]\s*x\d+|\d+\s*months|ptg|print count|slab)",
+        raw,
+    ):
+        return "flip_resell_drop_commentary"
+
+    # Informational dealer notes with a link but no clean product lead shape.
+    if re.search(r"https?://", raw, re.IGNORECASE) and re.search(
+        r"(?i)(?:not pinging because|not really sure|maybe some of you want to take the risk|"
+        r"will probably restock|expect comps to come down|cd back up)",
+        raw,
+    ):
+        return "flip_resell_info_commentary"
+
+    return ""
 
 
 def is_affiliate_role_mention_noise_blob(blob: str) -> bool:
     """
     Dealer / collectibles routing posts that ping roles after a product link — not clean affiliated leads.
 
-    Examples: literal ``@Potential Sports @Potential`` after a slamgoods link, or Discord ``<@&role_id>`` pings.
+    Examples: ``@Cards``, ``@Flips``, ``@Restock Flips``, ``@Vinyl Flips``, ``@Potential``, or Discord ``<@&role_id>`` after a link.
     """
     raw = str(blob or "").strip()
     if not raw:
@@ -1860,7 +1949,7 @@ def is_affiliate_role_mention_noise_blob(blob: str) -> bool:
         return False
     if _AFFILIATE_DISCORD_ROLE_MENTION_PATTERN.search(raw):
         return True
-    if _AFFILIATE_LITERAL_POTENTIAL_PING_PATTERN.search(raw):
+    if _AFFILIATE_DEALER_ROLE_LITERAL_PING_PATTERN.search(raw):
         return True
     return False
 
