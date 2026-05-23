@@ -40,6 +40,7 @@ from utils import (
     chunk_text,
     collect_embed_strings,
     collect_external_affiliate_urls,
+    content_is_only_urls,
     extract_all_raw_links_from_text,
     extract_urls_from_text,
     format_embeds_for_forwarding,
@@ -65,24 +66,6 @@ def _first_non_discord_url(urls: List[str]) -> str:
             pass
         return u
     return ""
-
-def _content_is_only_urls(content: str) -> bool:
-    body = (content or "").strip()
-    if not body:
-        return True
-    urls = extract_urls_from_text(body)
-    if not urls:
-        return False
-    # Remove urls from the body; if nothing meaningful remains, it's "url-only"
-    cleaned = body
-    try:
-        for u in sorted(set(urls), key=len, reverse=True):
-            if u:
-                cleaned = cleaned.replace(u, " ")
-    except Exception:
-        pass
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return cleaned == ""
 
 def _dispatch_tag_priority(tag: str) -> int:
     """
@@ -1453,7 +1436,7 @@ class MessageForwarder:
         # "embed must contain the same URL" fallback — one rule, config-gated.
         if bool(getattr(cfg, "STRIP_URL_ONLY_CONTENT_WHEN_EMBEDS", True)):
             try:
-                if _content_is_only_urls(formatted_content) and bool(embeds_out):
+                if content_is_only_urls(formatted_content) and bool(embeds_out):
                     formatted_content = ""
                     if trace is not None:
                         try:

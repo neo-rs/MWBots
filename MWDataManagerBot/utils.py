@@ -250,6 +250,124 @@ def is_image_attachment(att: Dict[str, Any]) -> bool:
     return False
 
 
+_MONITOR_EMBED_FOOTER_RE = re.compile(r"(?i)\b(from|by)\s*:")
+_MONITOR_EMBED_DEAL_LABEL_RE = re.compile(
+    r"(?i)\b("
+    r"regular\s+price|apply\s+code|promo\s+code|coupon\s+code|"
+    r"now\s*:|retail\s*:|resell\s*:|resale\s*:|"
+    r"new\s+deal\s+found|grab\s+it\s+here|mavely\.app\.link"
+    r")\b"
+)
+
+
+_URL_IN_TEXT_RE = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]+', re.IGNORECASE)
+
+
+def content_is_only_urls(content: str) -> bool:
+    """True when visible message body is only http(s) URL(s) with no other text."""
+    body = (content or "").strip()
+    if not body:
+        return True
+    urls = _URL_IN_TEXT_RE.findall(body)
+    if not urls:
+        return False
+    cleaned = body
+    try:
+        for u in sorted(set(urls), key=len, reverse=True):
+            if u:
+                cleaned = re.sub(re.escape(u), " ", cleaned, count=1, flags=re.IGNORECASE)
+    except Exception:
+        pass
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned == ""
+
+
+def _embed_url_relates_to_body(embed_url: str, body_urls: List[str]) -> bool:
+    eu = str(embed_url or "").strip()
+    if not eu:
+        return True
+    nu = normalize_url(eu)
+    if nu in body_urls:
+        return True
+    try:
+        pe = urlparse(eu)
+        eh = (pe.netloc or "").lower()
+        if eh.startswith("www."):
+            eh = eh[4:]
+        ep = (pe.path or "").rstrip("/").lower()
+        for bu in body_urls:
+            pb = urlparse(bu if "://" in bu else f"https://{bu}")
+            bh = (pb.netloc or "").lower()
+            if bh.startswith("www."):
+                bh = bh[4:]
+            bp = (pb.path or "").rstrip("/").lower()
+            if eh and eh == bh and ep == bp:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def embed_is_auto_link_unfurl_preview(
+    embed: Dict[str, Any], *, body_urls: Optional[List[str]] = None
+) -> bool:
+    """
+    True for Discord auto-generated link previews (URL in chat unfurled to title/description/thumbnail).
+    False for monitor-bot embed cards (fields, From/By footers, deal labels).
+    """
+    if not isinstance(embed, dict) or not embed:
+        return True
+    fields = embed.get("fields")
+    if isinstance(fields, list) and fields:
+        return False
+    footer = embed.get("footer")
+    if isinstance(footer, dict):
+        ft = str(footer.get("text") or "").strip()
+        if ft and _MONITOR_EMBED_FOOTER_RE.search(ft):
+            return False
+    combined = " ".join(
+        str(embed.get(key) or "")
+        for key in ("title", "description", "url")
+    ).strip()
+    author = embed.get("author")
+    if isinstance(author, dict):
+        combined = (combined + " " + str(author.get("name") or "")).strip()
+    if combined and _MONITOR_EMBED_DEAL_LABEL_RE.search(combined):
+        return False
+    embed_url = str(embed.get("url") or "").strip()
+    if embed_url and body_urls and not _embed_url_relates_to_body(embed_url, body_urls):
+        return False
+    return True
+
+
+def message_is_bare_external_link_drop(
+    *,
+    message_content: str,
+    embeds: Optional[List[Dict[str, Any]]],
+    attachments: Optional[List[Dict[str, Any]]],
+) -> bool:
+    """
+    True when the post is only a bare merchant URL (optional Discord link preview and/or image attachment).
+    These are not useful AFFILIATED_LINKS forwards (collection/product pages without deal context).
+    """
+    if not content_is_only_urls(message_content or ""):
+        return False
+    for att in attachments or []:
+        if not isinstance(att, dict) or not att:
+            continue
+        if not is_image_attachment(att):
+            return False
+    body_urls = extract_urls_from_text(message_content or "")
+    body_urls = [u for u in body_urls if u and not is_discord_chat_or_media_url(u)]
+    embed_list = [e for e in (embeds or []) if isinstance(e, dict) and e]
+    if not embed_list:
+        return True
+    return all(
+        embed_is_auto_link_unfurl_preview(e, body_urls=body_urls)
+        for e in embed_list
+    )
+
+
 def append_image_attachments_as_embeds(
     embeds_out: List[Dict[str, Any]], attachments: List[Dict[str, Any]], *, max_embeds: int = 10
 ) -> List[Dict[str, Any]]:

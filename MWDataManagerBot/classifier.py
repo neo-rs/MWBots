@@ -58,6 +58,7 @@ from utils import (
     extract_urls_from_text,
     is_discord_media_url,
     merge_text_and_embed_strings_for_classifier,
+    message_is_bare_external_link_drop,
 )
 
 
@@ -879,9 +880,6 @@ def _affiliate_has_non_discord_url(blob: str) -> bool:
     return False
 
 
-_AFFILIATE_LINK_ONLY_LINE_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
-
-
 def _affiliate_is_link_only_noise(
     *,
     message_content: str,
@@ -889,24 +887,14 @@ def _affiliate_is_link_only_noise(
     attachments: Optional[List[Dict[str, Any]]],
 ) -> bool:
     """
-    True when the user-visible message body is only bare URL line(s) and there is no embed/attachment payload.
+    True when the post is only bare URL line(s) plus optional Discord link preview and/or image attachment.
     These are not useful "affiliated leads" forwards (often link-drops / collection pages).
     """
-    if embeds:
-        for e in embeds:
-            if isinstance(e, dict) and e:
-                return False
-    if attachments:
-        for a in attachments:
-            if isinstance(a, dict) and a:
-                return False
-    body = (message_content or "").strip()
-    if not body:
-        return True
-    lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
-    if not lines:
-        return True
-    return all(bool(_AFFILIATE_LINK_ONLY_LINE_RE.match(ln)) for ln in lines)
+    return message_is_bare_external_link_drop(
+        message_content=message_content or "",
+        embeds=embeds,
+        attachments=attachments,
+    )
 
 
 def _affiliate_skip_link_only_route(
@@ -927,7 +915,7 @@ def _affiliate_skip_link_only_route(
         return False
     if trace is not None:
         try:
-            trace.setdefault("classifier", {}).setdefault("matches", {})["affiliate_skip"] = "link_only_body"
+            trace.setdefault("classifier", {}).setdefault("matches", {})["affiliate_skip"] = "link_only_body_or_unfurl"
         except Exception:
             pass
     return True

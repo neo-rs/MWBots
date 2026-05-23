@@ -77,6 +77,7 @@ import settings_store as cfg
 from utils import (
     append_image_attachments_as_embeds,
     collect_embed_strings,
+    content_is_only_urls,
     extract_urls_from_text,
     format_embeds_for_forwarding,
     generate_content_signature,
@@ -112,25 +113,6 @@ def _banner(title: str) -> None:
     print("=" * 78)
     print(title)
     print("=" * 78)
-
-
-def _content_is_only_urls(content: str) -> bool:
-    """Match `live_forwarder._content_is_only_urls` for outbound preview parity."""
-    body = (content or "").strip()
-    if not body:
-        return True
-    urls = extract_urls_from_text(body)
-    if not urls:
-        return False
-    cleaned = body
-    try:
-        for u in sorted(set(urls), key=len, reverse=True):
-            if u:
-                cleaned = cleaned.replace(u, " ")
-    except Exception:
-        pass
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return cleaned == ""
 
 
 def _build_outbound_forward_preview(
@@ -174,7 +156,7 @@ def _build_outbound_forward_preview(
 
     if bool(getattr(cfg, "STRIP_URL_ONLY_CONTENT_WHEN_EMBEDS", True)):
         try:
-            if _content_is_only_urls(formatted_content) and bool(embeds_out):
+            if content_is_only_urls(formatted_content) and bool(embeds_out):
                 formatted_content = ""
                 strip_applied = True
         except Exception:
