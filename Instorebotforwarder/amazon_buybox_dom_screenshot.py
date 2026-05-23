@@ -79,21 +79,11 @@ HIGHLIGHT_RIGHT_FROM_IN_STOCK: Tuple[str, ...] = (
     "#add-to-cart-button",
     "#buy-now-button",
 )
-# Default outlines: price, % off, list/before, and coupon lines only.
-DEFAULT_HIGHLIGHT_PRICE_SELECTORS: Tuple[str, ...] = (
+# Single parent used for the one red outline (not per-field outlines).
+DEFAULT_HIGHLIGHT_PRICE_BLOCK_SELECTORS: Tuple[str, ...] = (
     "#corePriceDisplay_desktop_feature_div",
     "#corePrice_feature_div",
-    "#apex_desktop .priceToPay",
-    "#apex_desktop #apexPriceToPay",
-    "#apex_desktop .savingsPercentage",
-    "#corePriceDisplay_desktop_feature_div .savingsPercentage",
-    "#apex_desktop .basisPrice",
-    "#corePriceDisplay_desktop_feature_div .basisPrice",
-    "#promoPriceBlockMessage",
-    ".couponLabelText",
-    "#applyClippableCoupon_couponSubText",
-    "#regularprice_savings",
-    ".priceBlockSavingsString",
+    "#apex_desktop",
 )
 DEFAULT_HIGHLIGHT_COLOR = "#e3382f"
 DEFAULT_HIGHLIGHT_THICKNESS_PX = 3
@@ -172,12 +162,16 @@ def _highlight_price_only_enabled(cfg: Mapping[str, Any]) -> bool:
     return True
 
 
+def _highlight_block_selectors(cfg: Mapping[str, Any]) -> List[str]:
+    raw = cfg.get("amazon_buybox_highlight_selectors")
+    if isinstance(raw, (list, tuple)) and raw:
+        return [str(s).strip() for s in raw if str(s).strip()]
+    return list(DEFAULT_HIGHLIGHT_PRICE_BLOCK_SELECTORS)
+
+
 def _highlight_selectors_for_capture(cfg: Mapping[str, Any]) -> List[str]:
     if _highlight_price_only_enabled(cfg):
-        raw = cfg.get("amazon_buybox_highlight_selectors")
-        if isinstance(raw, (list, tuple)) and raw:
-            return [str(s).strip() for s in raw if str(s).strip()]
-        return list(DEFAULT_HIGHLIGHT_PRICE_SELECTORS)
+        return _highlight_block_selectors(cfg)
     left = _resolve_left_selectors(cfg)
     if _right_from_in_stock_enabled(cfg):
         return left + list(HIGHLIGHT_RIGHT_FROM_IN_STOCK)
@@ -231,6 +225,84 @@ async def _highlight_targets(page: Any, selectors: Sequence[str], color: str, th
     except Exception:
         # Outline is cosmetic; never fail the screenshot because the CSS inject
         # threw (e.g. CSP-restricted page would still allow inline styles).
+        pass
+
+
+async def _highlight_single_price_block(
+    page: Any,
+    cfg: Mapping[str, Any],
+    color: str,
+    thickness: int,
+) -> None:
+    """
+    One red rectangle around the whole price block (discount + current + list)
+    and an adjacent clip-coupon line when present — never per-field outlines.
+    """
+    safe_color = (color or DEFAULT_HIGHLIGHT_COLOR).strip() or DEFAULT_HIGHLIGHT_COLOR
+    safe_thickness = max(1, int(thickness or DEFAULT_HIGHLIGHT_THICKNESS_PX))
+    try:
+        await page.evaluate(
+            """
+            (args) => {
+              const { pickOrder, color, thickness } = args;
+              const old = document.getElementById('aw-price-highlight-overlay');
+              if (old) old.remove();
+              let root = null;
+              for (const sel of (pickOrder || [])) {
+                const el = document.querySelector(sel);
+                if (!el) continue;
+                const r = el.getBoundingClientRect();
+                if (r.width < 80 || r.height < 20) continue;
+                if (sel === '#apex_desktop' && r.height > 520) continue;
+                root = el;
+                break;
+              }
+              if (!root) return;
+              let x1 = root.getBoundingClientRect().left;
+              let y1 = root.getBoundingClientRect().top;
+              let x2 = x1 + root.getBoundingClientRect().width;
+              let y2 = y1 + root.getBoundingClientRect().height;
+              const mergeRect = (el) => {
+                if (!el) return;
+                const cr = el.getBoundingClientRect();
+                if (cr.width < 20 || cr.height < 8) return;
+                if (cr.top > y2 + 96) return;
+                if (Math.abs(cr.left - x1) > Math.max(x2 - x1, 160)) return;
+                x1 = Math.min(x1, cr.left);
+                y1 = Math.min(y1, cr.top);
+                x2 = Math.max(x2, cr.right);
+                y2 = Math.max(y2, cr.bottom);
+              };
+              [
+                '#promoPriceBlockMessage',
+                '#couponBlockVertical',
+                '.couponLabelText',
+                '#applyClippableCoupon_couponSubText',
+              ].forEach((sel) => mergeRect(document.querySelector(sel)));
+              const pad = 2;
+              const box = document.createElement('div');
+              box.id = 'aw-price-highlight-overlay';
+              box.style.position = 'fixed';
+              box.style.left = (x1 - pad) + 'px';
+              box.style.top = (y1 - pad) + 'px';
+              box.style.width = Math.max(20, x2 - x1 + pad * 2) + 'px';
+              box.style.height = Math.max(20, y2 - y1 + pad * 2) + 'px';
+              box.style.outline = `${thickness}px solid ${color}`;
+              box.style.outlineOffset = '0px';
+              box.style.pointerEvents = 'none';
+              box.style.zIndex = '2147483646';
+              box.style.background = 'transparent';
+              box.style.boxSizing = 'border-box';
+              document.body.appendChild(box);
+            }
+            """,
+            {
+                "pickOrder": _highlight_block_selectors(cfg),
+                "color": safe_color,
+                "thickness": safe_thickness,
+            },
+        )
+    except Exception:
         pass
 
 
@@ -1156,7 +1228,10 @@ async def capture_amazon_buybox_screenshot(
                 })
                 return result
 
-            await _highlight_targets(page, highlight_selectors, highlight_color, highlight_thickness)
+            if _highlight_price_only_enabled(cfg):
+                await _highlight_single_price_block(page, cfg, highlight_color, highlight_thickness)
+            else:
+                await _highlight_targets(page, highlight_selectors, highlight_color, highlight_thickness)
 
             dims = await page.evaluate(
                 """
