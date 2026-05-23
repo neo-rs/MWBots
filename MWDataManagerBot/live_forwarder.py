@@ -2159,7 +2159,7 @@ def run_bot(*, settings: Dict[str, Any], token: str) -> Optional[int]:
             int(cfg.FALLBACK_CHANNEL_ID or 0),
             int(cfg.SMARTFILTER_AMAZON_CHANNEL_ID or 0),
             int(cfg.SMARTFILTER_AMAZON_FALLBACK_CHANNEL_ID or 0),
-            int(cfg.SMARTFILTER_AMZ_DEALS_CHANNEL_ID or 0),
+            int(cfg.SMARTFILTER_CONVERSATIONAL_DEALS_CHANNEL_ID or 0),
             int(cfg.SMARTFILTER_AFFILIATED_LINKS_CHANNEL_ID or 0),
             int(cfg.SMARTFILTER_UPCOMING_CHANNEL_ID or 0),
             int(cfg.SMARTFILTER_INSTORE_LEADS_CHANNEL_ID or 0),

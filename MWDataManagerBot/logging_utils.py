@@ -393,7 +393,7 @@ def _route_tag_to_stream_family(tag: str) -> str:
         return "price_error"
     if t.startswith("INSTORE") or t in ("MAJOR_STORES", "DISCOUNTED_STORES"):
         return "instore"
-    if t in ("AMAZON", "AMAZON_PROFITABLE_LEAD", "AMAZON_FALLBACK", "AMZ_DEALS"):
+    if t in ("AMAZON", "AMAZON_PROFITABLE_LEAD", "AMAZON_FALLBACK", "CONVERSATIONAL_DEALS", "AMZ_DEALS"):
         return "amazon"
     if t == "AFFILIATED_LINKS":
         return "affiliate"
