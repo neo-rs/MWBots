@@ -1050,6 +1050,193 @@ async def augment_text_with_universal_resolver_fallback(
     return (str(text_to_check or "").strip() + " " + " ".join(out_lines)).strip()
 
 
+def _extract_raw_urls_preserve_case(text: str) -> List[str]:
+    """Unique http(s) URLs from visible text, preserving original casing."""
+    seen: Set[str] = set()
+    out: List[str] = []
+    for m in RAW_URL_REGEX.finditer(text or ""):
+        u = str(m.group(0) or "").strip().rstrip(".,;)")
+        if not u or u in seen:
+            continue
+        seen.add(u)
+        out.append(u)
+    return out
+
+
+def _apply_url_replacements_to_text(text: str, replacements: Dict[str, str]) -> str:
+    if not text or not replacements:
+        return text or ""
+    out = str(text)
+    for old, new in sorted(replacements.items(), key=lambda kv: len(kv[0]), reverse=True):
+        if old and new and old != new:
+            out = out.replace(old, new)
+    return out
+
+
+def _apply_url_replacements_to_embeds(
+    embeds: List[Dict[str, Any]], replacements: Dict[str, str]
+) -> List[Dict[str, Any]]:
+    if not embeds or not replacements:
+        return list(embeds or [])
+    out: List[Dict[str, Any]] = []
+    for embed in embeds:
+        if not isinstance(embed, dict):
+            out.append(embed)
+            continue
+        ed = dict(embed)
+        for key in ("url", "title", "description"):
+            if key in ed and ed.get(key):
+                ed[key] = _apply_url_replacements_to_text(str(ed[key]), replacements)
+        author = ed.get("author")
+        if isinstance(author, dict):
+            ad = dict(author)
+            for key in ("url", "name"):
+                if key in ad and ad.get(key):
+                    ad[key] = _apply_url_replacements_to_text(str(ad[key]), replacements)
+            ed["author"] = ad
+        fields = ed.get("fields")
+        if isinstance(fields, list):
+            new_fields: List[Dict[str, Any]] = []
+            for field in fields:
+                if not isinstance(field, dict):
+                    new_fields.append(field)
+                    continue
+                fd = dict(field)
+                for key in ("name", "value"):
+                    if key in fd and fd.get(key):
+                        fd[key] = _apply_url_replacements_to_text(str(fd[key]), replacements)
+                new_fields.append(fd)
+            ed["fields"] = new_fields
+        out.append(ed)
+    return out
+
+
+async def rewrite_major_clearance_outbound_links(
+    content: str,
+    embeds: Optional[List[Dict[str, Any]]],
+    *,
+    trace: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """
+    MAJOR_CLEARANCE outbound only: replace mavely/redirector links with clean merchant URLs.
+    Classification/routing blobs are unchanged — call only on formatted outbound content.
+    """
+    try:
+        import settings_store as cfg
+    except Exception:
+        return str(content or ""), list(embeds or [])
+
+    if not bool(getattr(cfg, "MAJOR_CLEARANCE_RESOLVE_AFFILIATE_LINKS_ENABLED", True)):
+        return str(content or ""), list(embeds or [])
+
+    try:
+        from universal_resolver_client import (
+            resolve_to_clean_merchant_url_cached,
+            url_should_resolve_for_major_clearance,
+        )
+    except Exception as e:
+        if trace is not None:
+            try:
+                trace.setdefault("forwarder", {})["major_clearance_link_rewrite"] = {
+                    "ran": False,
+                    "reason": "resolver_unavailable",
+                    "error": str(e),
+                }
+            except Exception:
+                pass
+        return str(content or ""), list(embeds or [])
+
+    try:
+        timeout = int(getattr(cfg, "MAJOR_CLEARANCE_RESOLVE_AFFILIATE_LINKS_TIMEOUT_SECONDS", 20) or 20)
+    except Exception:
+        timeout = 20
+    try:
+        max_depth = int(getattr(cfg, "MAJOR_CLEARANCE_RESOLVE_AFFILIATE_LINKS_MAX_DEPTH", 10) or 10)
+    except Exception:
+        max_depth = 10
+    try:
+        max_urls = int(getattr(cfg, "MAJOR_CLEARANCE_RESOLVE_AFFILIATE_LINKS_MAX_URLS", 3) or 3)
+    except Exception:
+        max_urls = 3
+    try:
+        ttl = int(getattr(cfg, "MAJOR_CLEARANCE_RESOLVE_AFFILIATE_LINKS_CACHE_TTL_SECONDS", 900) or 900)
+    except Exception:
+        ttl = 900
+
+    embed_list = list(embeds or [])
+    blob_parts = [str(content or "")]
+    blob_parts.extend(collect_embed_strings(embed_list))
+    raw_urls: List[str] = []
+    seen_norm: Set[str] = set()
+    for part in blob_parts:
+        for u in _extract_raw_urls_preserve_case(part):
+            if not url_should_resolve_for_major_clearance(u):
+                continue
+            nu = normalize_url(u)
+            if nu in seen_norm:
+                continue
+            seen_norm.add(nu)
+            raw_urls.append(u)
+            if len(raw_urls) >= max_urls:
+                break
+        if len(raw_urls) >= max_urls:
+            break
+
+    if not raw_urls:
+        if trace is not None:
+            try:
+                trace.setdefault("forwarder", {})["major_clearance_link_rewrite"] = {
+                    "ran": False,
+                    "reason": "no_redirector_urls",
+                }
+            except Exception:
+                pass
+        return str(content or ""), embed_list
+
+    replacements: Dict[str, str] = {}
+    details: List[Dict[str, Any]] = []
+    for u in raw_urls:
+        try:
+            clean, method, err = await asyncio.to_thread(
+                resolve_to_clean_merchant_url_cached,
+                u,
+                timeout=timeout,
+                max_depth=max_depth,
+                ttl_seconds=ttl,
+            )
+        except Exception as e:
+            clean, method, err = None, "error", str(e)
+        if clean and normalize_url(clean) != normalize_url(u):
+            replacements[u] = clean
+        details.append({"input": u, "output": clean, "method": method, "error": err})
+
+    if not replacements:
+        if trace is not None:
+            try:
+                trace.setdefault("forwarder", {})["major_clearance_link_rewrite"] = {
+                    "ran": True,
+                    "resolved_count": 0,
+                    "results": details,
+                }
+            except Exception:
+                pass
+        return str(content or ""), embed_list
+
+    new_content = _apply_url_replacements_to_text(str(content or ""), replacements)
+    new_embeds = _apply_url_replacements_to_embeds(embed_list, replacements)
+    if trace is not None:
+        try:
+            trace.setdefault("forwarder", {})["major_clearance_link_rewrite"] = {
+                "ran": True,
+                "resolved_count": len(replacements),
+                "replacements": replacements,
+                "results": details,
+            }
+        except Exception:
+            pass
+    return new_content, new_embeds
+
+
 def _is_affiliate_domain(url: str) -> bool:
     try:
         host = (urlparse(url).netloc or "").lower()

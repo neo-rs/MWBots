@@ -51,6 +51,7 @@ from utils import (
     is_discord_chat_or_media_url,
     normalize_url,
     record_link_host_samples_from_text,
+    rewrite_major_clearance_outbound_links,
     strip_discord_channel_mentions,
     augment_text_with_universal_resolver_fallback,
 )
@@ -393,6 +394,30 @@ class MessageForwarder:
             return int(m.group(1))
         except Exception:
             return 0
+
+    async def _prepare_major_clearance_outbound(
+        self,
+        *,
+        formatted_content: str,
+        embeds_out: Optional[List[Dict[str, Any]]],
+        trace: Optional[Dict[str, Any]],
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """MAJOR_CLEARANCE only: rewrite mavely/redirector links in outbound text/embeds."""
+        try:
+            return await rewrite_major_clearance_outbound_links(
+                formatted_content or "",
+                list(embeds_out or []),
+                trace=trace,
+            )
+        except Exception as e:
+            if trace is not None:
+                try:
+                    trace.setdefault("forwarder", {})["major_clearance_link_rewrite_error"] = (
+                        f"{type(e).__name__}: {e}"
+                    )
+                except Exception:
+                    pass
+            return str(formatted_content or ""), list(embeds_out or [])
 
     def _embed_dict_has_image(self, ed: Dict[str, Any]) -> bool:
         try:
@@ -1610,10 +1635,21 @@ class MessageForwarder:
                         allowed_mentions = discord.AllowedMentions.none()
                         dest_after = self._apply_route_map(source_group=source_group, dest_channel_id=major_clearance_dest)
 
+                        mc_first_content, mc_first_embeds = await self._prepare_major_clearance_outbound(
+                            formatted_content=str(formatted_content or ""),
+                            embeds_out=list(embeds_out or []),
+                            trace=trace,
+                        )
+                        mc_fu_content, mc_fu_embeds = await self._prepare_major_clearance_outbound(
+                            formatted_content=str(followup_cached.get("formatted_content") or ""),
+                            embeds_out=list(followup_cached.get("embeds_out") or []),
+                            trace=trace,
+                        )
+
                         first_msg = await self._send_to_destination(
                             dest_channel_id=dest_after,
-                            content=str(formatted_content or ""),
-                            embeds=list(embeds_out or []),
+                            content=mc_first_content,
+                            embeds=mc_first_embeds,
                             attachments=list(mc_filtered or []) if use_files else None,
                             webhook_username=wh_username,
                             webhook_avatar_url=wh_avatar_url,
@@ -1628,8 +1664,8 @@ class MessageForwarder:
                         )
                         await self._send_to_destination(
                             dest_channel_id=dest_after,
-                            content=str(followup_cached.get("formatted_content") or "") or "\u200b",
-                            embeds=list(followup_cached.get("embeds_out") or []),
+                            content=mc_fu_content or "\u200b",
+                            embeds=mc_fu_embeds,
                             attachments=_fu_att,
                             webhook_username=str(followup_cached.get("webhook_username") or ""),
                             webhook_avatar_url=str(followup_cached.get("webhook_avatar_url") or ""),
@@ -1709,10 +1745,20 @@ class MessageForwarder:
                     if pending:
                         allowed_mentions = discord.AllowedMentions.none()
                         dest_after = self._apply_route_map(source_group=source_group, dest_channel_id=major_clearance_dest)
+                        mc_first_content, mc_first_embeds = await self._prepare_major_clearance_outbound(
+                            formatted_content=str(pending.get("formatted_content") or ""),
+                            embeds_out=list(pending.get("embeds_out") or []),
+                            trace=trace,
+                        )
+                        mc_fu_content, mc_fu_embeds = await self._prepare_major_clearance_outbound(
+                            formatted_content=str(formatted_content or ""),
+                            embeds_out=list(embeds_out or []),
+                            trace=trace,
+                        )
                         first_msg = await self._send_to_destination(
                             dest_channel_id=dest_after,
-                            content=str(pending.get("formatted_content") or ""),
-                            embeds=list(pending.get("embeds_out") or []),
+                            content=mc_first_content,
+                            embeds=mc_first_embeds,
                             attachments=list(pending.get("attachments") or []) if isinstance(pending.get("attachments"), list) else None,
                             webhook_username=str(pending.get("webhook_username") or ""),
                             webhook_avatar_url=str(pending.get("webhook_avatar_url") or ""),
@@ -1721,8 +1767,8 @@ class MessageForwarder:
                         )
                         await self._send_to_destination(
                             dest_channel_id=dest_after,
-                            content=formatted_content or "\u200b",
-                            embeds=list(embeds_out or []),
+                            content=mc_fu_content or "\u200b",
+                            embeds=mc_fu_embeds,
                             attachments=mc_filtered if use_files else None,
                             webhook_username=wh_username,
                             webhook_avatar_url=wh_avatar_url,
@@ -1960,10 +2006,18 @@ class MessageForwarder:
                 dest_traces.append(dest_trace)
                 continue
             try:
+                send_content = formatted_content
+                send_embeds = embeds_out
+                if str(tag or "") == "MAJOR_CLEARANCE":
+                    send_content, send_embeds = await self._prepare_major_clearance_outbound(
+                        formatted_content=str(formatted_content or ""),
+                        embeds_out=list(embeds_out or []),
+                        trace=trace,
+                    )
                 await self._send_to_destination(
                     dest_channel_id=dest_channel_id,
-                    content=formatted_content,
-                    embeds=embeds_out,
+                    content=send_content,
+                    embeds=send_embeds,
                     attachments=attachments if use_files else None,
                     webhook_username=wh_username,
                     webhook_avatar_url=wh_avatar_url,

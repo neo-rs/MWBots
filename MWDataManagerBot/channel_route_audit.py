@@ -172,6 +172,7 @@ def _build_outbound_forward_preview(
 
     return {
         "content": formatted_content,
+        "embeds_out": embeds_out,
         "embed_count": len(embeds_out or []),
         "strip_url_only_content": strip_applied,
         "forward_attachments_as_files": use_files,
