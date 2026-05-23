@@ -114,8 +114,8 @@ Order inside the function:
 3. `INSTORE_SNEAKERS` — `SNEAKERS_PATTERN` + footwear gating helpers
 4. `INSTORE_THEATRE` — theatre merch / venue context
 5. **Suppress** instore store buckets when `is_major_clearance_monitor_embed_blob` matches (major clearance owns that shape)
-6. `MAJOR_STORES` / `DISCOUNTED_STORES` — store list patterns + `store_category` tie-break
-7. `INSTORE_LEADS` — general instore catch-all
+6. `MAJOR_STORES` / `DISCOUNTED_STORES` — store list patterns + `store_category` tie-break (discounted checked first on Where)
+7. `MAJOR_STORES` (default) — valid Retail/Resell/Where lead with no store-list / specialty match (unknown Where store). `INSTORE_LEADS` channel id remains in settings but is no longer the classifier fallback.
 
 Each returns **`(channel_id, tag)`** using the matching **`SMARTFILTER_INSTORE_*`** / **`MAJOR_STORES`** / **`DISCOUNTED_STORES`** id.
 

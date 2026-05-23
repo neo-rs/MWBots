@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 from pathlib import Path
 
-from patterns import THEATRE_CONTEXT_PATTERN, THEATRE_MERCH_PATTERN, THEATRE_STORE_PATTERN
+from patterns import matches_instore_theatre  # noqa: F401 — canonical implementation in patterns.py
 
 
 _DISCORD_CHANNEL_MENTION_RE = re.compile(r"<#[0-9]{5,25}>")
@@ -476,22 +476,6 @@ def generate_semantic_duplicate_signature(
     if not blob:
         return ""
     return hashlib.md5(blob.encode("utf-8")).hexdigest()
-
-
-def matches_instore_theatre(text: str, where_location: str = "") -> bool:
-    if not text:
-        return False
-    if THEATRE_STORE_PATTERN.search(text):
-        return True
-    if where_location and THEATRE_STORE_PATTERN.search(where_location):
-        return True
-    if THEATRE_MERCH_PATTERN.search(text):
-        if THEATRE_CONTEXT_PATTERN.search(text):
-            return True
-        # Titles like "Super Mario Galaxy Movie … Popcorn Bucket" omit AMC/Cinemark wording.
-        if re.search(r"\bmovie\b", text or "", re.IGNORECASE):
-            return True
-    return False
 
 
 def has_product_and_marketplace_links(

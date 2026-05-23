@@ -26,8 +26,10 @@ from patterns import (
     is_amz_deals_affiliate_bridge_blob,
     allow_amz_deals_despite_complicated_monitor,
     instore_sneakers_bucket_active,
+    instore_cards_bucket_active,
     instore_apparel_suppresses_sneakers_bucket,
     instore_explicit_footwear_intent,
+    matches_instore_theatre,
     should_skip_amazon_profitable_leads_monitor_blob,
     is_simple_amazon_profitable_lead_blob,
     blob_has_deal_substance_signals,
@@ -55,7 +57,6 @@ from utils import (
     collect_embed_strings,
     extract_urls_from_text,
     is_discord_media_url,
-    matches_instore_theatre,
     merge_text_and_embed_strings_for_classifier,
 )
 
@@ -67,20 +68,6 @@ _TOY_FIGURE_SUPPRESS_CARDS_PATTERN = re.compile(
     r"2\.5\s*[\"\u201c\u201d]\s*figures?\b|2\.5\s*inch\s*figures?\b|"
     r"action\s*figures?\b|vinyl\s*figures?\b"
     r")\b",
-    re.IGNORECASE,
-)
-
-# Stronger TCG context than bare substrings (avoids "selection" → select, ".m570." already fixed in patterns).
-_INSTORE_CARDS_CONTEXT_PATTERN = re.compile(
-    r"("
-    r"pokemon|magic\s*the\s*gathering|mtg|yugioh|one\s*piece\s*card|dragon\s*ball\s*(super\s*)?(tcg|card)?|"
-    r"flesh\s*and\s*blood|fab\s*tcg|lorcana|digimon\s*card|tcg\b|ccg\b|"
-    r"booster\s*(pack|box|case)\b|etb\b|elite\s*trainer\s*box|starter\s*deck|"
-    r"\bslab\b|psa\s*\d+|bgs\s*\d+|cgc\s*\d+|graded\s*card|"
-    r"rookie\s*card|autograph|auto\s*card|"
-    r"topps\b|panini\b|upper\s*deck|bowman\b|donruss\b|\bprizm\b|\bselect\b|\boptic\b|\bmosaic\b|"
-    r"case\s*break|sealed\s*(box|pack|case)"
-    r")",
     re.IGNORECASE,
 )
 
@@ -166,10 +153,11 @@ def store_category_from_location(where_location: str) -> Optional[str]:
     if not where_location:
         return None
     normalized = where_location.lower()
-    if MAJOR_STORE_PATTERN.search(normalized):
-        return "major"
+    # Off-price chains are checked first so Marshalls/TJ Maxx never classify as major.
     if DISCOUNTED_STORE_PATTERN.search(normalized):
         return "discounted"
+    if MAJOR_STORE_PATTERN.search(normalized):
+        return "major"
     return None
 
 
@@ -445,7 +433,7 @@ def classify_instore_destination(
     """
     Canonical instore classification logic (single source of truth).
     Returns (channel_id, tag) for the first matching instore classification, or None.
-    Order: Seasonal -> Cards -> Sneakers -> Theatre -> Major Stores -> Discounted Stores -> INSTORE_LEADS
+    Order: Seasonal -> Cards -> Sneakers -> Theatre -> Major Stores -> Discounted Stores -> MAJOR_STORES (unknown Where store)
     """
     if not (is_instore_source and instore_required and instore_context):
         return None
@@ -455,8 +443,8 @@ def classify_instore_destination(
     sneakers_pattern_hit = bool(SNEAKERS_PATTERN.search(text_to_check or ""))
     sneakers_hit = bool(instore_sneakers_bucket_active(text_to_check or ""))
     cards_match = CARDS_PATTERN.search(text_to_check or "")
-    card_context_hit = bool(_INSTORE_CARDS_CONTEXT_PATTERN.search(text_to_check or ""))
-    cards_hit = bool(cards_match) and card_context_hit
+    cards_hit = bool(instore_cards_bucket_active(text_to_check or ""))
+    card_context_hit = bool(cards_hit)
     toy_figure_suppress = bool(_TOY_FIGURE_SUPPRESS_CARDS_PATTERN.search(text_to_check or ""))
     if toy_figure_suppress:
         cards_hit = False
@@ -467,10 +455,14 @@ def classify_instore_destination(
     # Target + Five Below). Dispatch order still evaluates MAJOR before DISCOUNTED, so without a tie-break
     # we'd incorrectly zero major whenever any discount banner token appeared anywhere in the message.
     if major_hit and discounted_hit:
-        if store_category == "discounted":
+        wl = (where_location or "").strip()
+        if store_category == "discounted" or (wl and DISCOUNTED_STORE_PATTERN.search(wl)):
+            major_hit = False
+        elif store_category == "major" or (wl and MAJOR_STORE_PATTERN.search(wl)):
+            discounted_hit = False
+        elif wl and DISCOUNTED_STORE_PATTERN.search(wl):
             major_hit = False
         else:
-            # store_category "major", unknown, or unset → prefer MAJOR_STORES (typical national retail lists).
             discounted_hit = False
     elif discounted_hit:
         major_hit = False
@@ -553,8 +545,16 @@ def classify_instore_destination(
             except Exception:
                 pass
         return None
-    if cfg.SMARTFILTER_INSTORE_LEADS_CHANNEL_ID:
-        return cfg.SMARTFILTER_INSTORE_LEADS_CHANNEL_ID, "INSTORE_LEADS"
+    # Valid flip lead but no seasonal/sneakers/cards/theatre/store-list match → default to major retail bucket.
+    if cfg.SMARTFILTER_MAJOR_STORES_CHANNEL_ID:
+        if trace is not None:
+            try:
+                trace.setdefault("classifier", {}).setdefault("matches", {})[
+                    "instore_unknown_store_major_default"
+                ] = True
+            except Exception:
+                pass
+        return cfg.SMARTFILTER_MAJOR_STORES_CHANNEL_ID, "MAJOR_STORES"
 
     return None
 
