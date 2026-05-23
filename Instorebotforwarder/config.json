@@ -132,6 +132,9 @@
     "dest_personal": 1484599902863622195,
     "dest_food": 1507052351188373615
   },
+  "affiliated_force_food_link_hosts": [
+    "go.magik.ly"
+  ],
   "affiliated_food_classifier": "gemini",
   "affiliated_food_classifier_temperature": 0.15,
   "startup_test_asin": "B0FLMLDTPB",

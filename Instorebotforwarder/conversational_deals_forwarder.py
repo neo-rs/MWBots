@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import discord
 
@@ -30,6 +30,7 @@ __all__ = [
     "gemini_status",
     "rewrite_deal_post_keep_urls",
     "classify_affiliated_food",
+    "affiliated_force_food_link_match",
     "resolve_destination_channel_id",
     "load_affiliated_leads_routes",
     "AFFILIATED_LEADS_SOURCE_CHANNEL_ID",
@@ -120,6 +121,7 @@ def _safe_channel_id(raw: Any) -> Optional[int]:
 def load_affiliated_leads_routes(cfg: Mapping[str, Any]) -> Optional[Dict[str, int]]:
     """
     Config block `affiliated_leads`: source_channel_id, dest_personal, dest_food.
+    Optional dest_promo for low-priority promo blasts (e.g. go.magik.ly) when set.
     Returns None when misconfigured so affiliated messages are not half-routed.
     """
     raw = (cfg or {}).get("affiliated_leads")
@@ -128,9 +130,66 @@ def load_affiliated_leads_routes(cfg: Mapping[str, Any]) -> Optional[Dict[str, i
     src = _safe_channel_id(raw.get("source_channel_id") or AFFILIATED_LEADS_SOURCE_CHANNEL_ID)
     personal = _safe_channel_id(raw.get("dest_personal"))
     food = _safe_channel_id(raw.get("dest_food"))
+    promo = _safe_channel_id(raw.get("dest_promo"))
     if not src or not personal or not food:
         return None
-    return {"source_channel_id": src, "dest_personal": personal, "dest_food": food}
+    out: Dict[str, int] = {
+        "source_channel_id": src,
+        "dest_personal": personal,
+        "dest_food": food,
+    }
+    if promo:
+        out["dest_promo"] = promo
+    return out
+
+
+def _affiliated_force_food_link_hosts(cfg: Mapping[str, Any]) -> List[str]:
+    raw = (cfg or {}).get("affiliated_force_food_link_hosts")
+    if not isinstance(raw, list):
+        return []
+    return [str(h).strip().lower().lstrip(".") for h in raw if str(h).strip()]
+
+
+def _url_host(url: str) -> str:
+    u = (url or "").strip()
+    if not u:
+        return ""
+    try:
+        from urllib.parse import urlparse
+
+        return (urlparse(u).hostname or "").lower().strip()
+    except Exception:
+        return ""
+
+
+def _host_matches_force_list(host: str, force_hosts: Sequence[str]) -> bool:
+    h = (host or "").lower().strip()
+    if not h:
+        return False
+    for needle in force_hosts:
+        n = (needle or "").lower().strip().lstrip(".")
+        if not n:
+            continue
+        if h == n or h.endswith("." + n):
+            return True
+    return False
+
+
+def affiliated_force_food_link_match(text: str, cfg: Mapping[str, Any]) -> Optional[str]:
+    """
+    When any URL in the message uses a configured host (e.g. go.magik.ly), skip
+    Gemini edible classification and route via the force-food / promo override path.
+    Returns the matched host for logging, or None.
+    """
+    force_hosts = _affiliated_force_food_link_hosts(cfg)
+    if not force_hosts:
+        return None
+    for raw_url in _RE_URL.findall(text or ""):
+        u = str(raw_url or "").strip().rstrip(").,>")
+        host = _url_host(u)
+        if _host_matches_force_list(host, force_hosts):
+            return host
+    return None
 
 
 def _affiliated_food_classifier_mode(cfg: Mapping[str, Any]) -> str:
@@ -209,6 +268,12 @@ async def resolve_destination_channel_id(
 
     routes = load_affiliated_leads_routes(cfg)
     if routes and int(src_id) == int(routes["source_channel_id"]):
+        forced_host = affiliated_force_food_link_match(message_text, cfg)
+        if forced_host:
+            promo_id = routes.get("dest_promo")
+            if promo_id:
+                return int(promo_id), f"affiliated:promo:override_host:{forced_host}"
+            return int(routes["dest_food"]), f"affiliated:food:override_host:{forced_host}"
         is_food, why = await classify_affiliated_food(message_text, cfg)
         if is_food:
             return int(routes["dest_food"]), f"affiliated:food:{why}"

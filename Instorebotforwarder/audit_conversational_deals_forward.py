@@ -26,6 +26,7 @@ from urllib.request import Request, urlopen
 
 from conversational_deals_forwarder import (  # type: ignore
     CHANNEL_MAP,
+    affiliated_force_food_link_match,
     classify_affiliated_food,
     first_url_in_text,
     load_affiliated_leads_routes,
@@ -253,10 +254,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _print_safe(route_block)
         _print_safe("")
     if affiliated and int(channel_id) == int(affiliated["source_channel_id"]):
-        is_food, why = asyncio.run(classify_affiliated_food(route_block, cfg))
-        _print_safe("2c) AFFILIATED FOOD CLASSIFIER")
-        _print_safe(f"   is_food={'yes' if is_food else 'no'} detail={why}")
-        _print_safe("")
+        forced = affiliated_force_food_link_match(route_block, cfg)
+        if forced:
+            _print_safe("2c) AFFILIATED LINK OVERRIDE (skips Gemini classifier)")
+            _print_safe(f"   matched_host={forced} -> food (or dest_promo when configured)")
+            _print_safe("")
+        else:
+            is_food, why = asyncio.run(classify_affiliated_food(route_block, cfg))
+            _print_safe("2c) AFFILIATED FOOD CLASSIFIER")
+            _print_safe(f"   is_food={'yes' if is_food else 'no'} detail={why}")
+            _print_safe("")
 
     desc = src_block
     used_fallback = False
