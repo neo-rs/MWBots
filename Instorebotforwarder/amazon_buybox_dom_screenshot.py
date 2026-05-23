@@ -70,7 +70,7 @@ DEFAULT_LEFT_SELECTORS: Tuple[str, ...] = (
     "#apex_desktop",
 )
 LEGACY_RIGHT_SELECTOR = "form#addToCart"
-# Outlines drawn on the right column when using from-in-stock mode.
+# Legacy: outlined every buybox control (In Stock, qty, buttons) — too noisy.
 HIGHLIGHT_RIGHT_FROM_IN_STOCK: Tuple[str, ...] = (
     "#availability",
     "#selectQuantity",
@@ -78,6 +78,22 @@ HIGHLIGHT_RIGHT_FROM_IN_STOCK: Tuple[str, ...] = (
     "#buyNow_feature_div",
     "#add-to-cart-button",
     "#buy-now-button",
+)
+# Default outlines: price, % off, list/before, and coupon lines only.
+DEFAULT_HIGHLIGHT_PRICE_SELECTORS: Tuple[str, ...] = (
+    "#corePriceDisplay_desktop_feature_div",
+    "#corePrice_feature_div",
+    "#apex_desktop .priceToPay",
+    "#apex_desktop #apexPriceToPay",
+    "#apex_desktop .savingsPercentage",
+    "#corePriceDisplay_desktop_feature_div .savingsPercentage",
+    "#apex_desktop .basisPrice",
+    "#corePriceDisplay_desktop_feature_div .basisPrice",
+    "#promoPriceBlockMessage",
+    ".couponLabelText",
+    "#applyClippableCoupon_couponSubText",
+    "#regularprice_savings",
+    ".priceBlockSavingsString",
 )
 DEFAULT_HIGHLIGHT_COLOR = "#e3382f"
 DEFAULT_HIGHLIGHT_THICKNESS_PX = 3
@@ -145,7 +161,23 @@ def _resolve_left_selectors(cfg: Mapping[str, Any]) -> List[str]:
     return list(DEFAULT_LEFT_SELECTORS)
 
 
+def _highlight_price_only_enabled(cfg: Mapping[str, Any]) -> bool:
+    """When true (default), red outlines only price / discount / coupon DOM — not buy buttons."""
+    v = cfg.get("amazon_buybox_highlight_price_only", True)
+    if isinstance(v, bool):
+        return v
+    s = str(v or "").strip().lower()
+    if s in {"0", "false", "no", "n", "off"}:
+        return False
+    return True
+
+
 def _highlight_selectors_for_capture(cfg: Mapping[str, Any]) -> List[str]:
+    if _highlight_price_only_enabled(cfg):
+        raw = cfg.get("amazon_buybox_highlight_selectors")
+        if isinstance(raw, (list, tuple)) and raw:
+            return [str(s).strip() for s in raw if str(s).strip()]
+        return list(DEFAULT_HIGHLIGHT_PRICE_SELECTORS)
     left = _resolve_left_selectors(cfg)
     if _right_from_in_stock_enabled(cfg):
         return left + list(HIGHLIGHT_RIGHT_FROM_IN_STOCK)
