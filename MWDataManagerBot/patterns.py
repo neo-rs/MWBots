@@ -527,7 +527,11 @@ _AFFILIATE_FLIP_COMMENTARY_PROSE_PATTERN = re.compile(
     r")",
 )
 _AFFILIATE_RAFFLE_OR_PASS_NOISE_PATTERN = re.compile(
-    r"(?i)(?:\bsnkrs\s+pass\b|golden ticket|free to enter|raffling off the option to win)",
+    r"(?i)(?:"
+    r"\bsnkrs\s+pass\b|golden ticket|free to enter|raffling off(?:\s+the\s+option\s+to\s+win)?|"
+    r"\braffle\s+for\b|\benter\s+(?:the\s+)?(?:draw|raffle)\b|"
+    r"\braffle\b.*\bopens?\s+soon\b|\bopens?\s+soon\b.*\braffle\b"
+    r")",
 )
 _AFFILIATE_QUICK_LINKS_PATTERN = re.compile(r"(?im)^\s*quick\s+links?\b", re.IGNORECASE)
 # Pokemon: substring match for pokemoncenter.com etc.; include accented spellings (e.g. "Pokémon" — ASCII-only "pokemon" misses).
@@ -818,6 +822,128 @@ def _affiliate_text_strip_markdown_noise(blob: str) -> str:
     return s.strip()
 
 
+# Hosts / surfaces that are not purchasable affiliate-lead material (forms, marketplaces, social, raffle platforms).
+_AFFILIATE_NON_PURCHASE_URL_ROOTS: Tuple[Tuple[str, str], ...] = (
+    ("tiktok.com", "tiktok"),
+    ("ebay.com", "ebay"),
+    ("ebay.us", "ebay"),
+    ("reddit.com", "reddit"),
+    ("redd.it", "reddit"),
+    ("docs.google.com", "google_forms"),
+    ("forms.gle", "google_forms"),
+    ("forms.google.com", "google_forms"),
+    ("runfair.com", "raffle_platform"),
+)
+_AFFILIATE_MAGAZINE_PREORDER_PATTERN = re.compile(
+    r"(?i)(?:"
+    r"\b(?:pre[- ]?order|preorder)\b.*\bmagazines?\b|"
+    r"\bmagazines?\b.*\b(?:pre[- ]?order|preorder|ship(?:ping)?\s+by)\b"
+    r")",
+)
+_AFFILIATE_PREORDER_PATTERN = re.compile(r"(?i)\b(?:pre[- ]?order|preorder)\b")
+_AFFILIATE_RAFFLE_ANNOUNCEMENT_PATTERN = re.compile(
+    r"(?i)(?:"
+    r"\braffle\b(?:\s+for|\s+opens?|\s+entry|\s+loaded)?|"
+    r"\benter\s+(?:the\s+)?(?:draw|raffle)\b|"
+    r"\b(?:draw|raffle)\s+opens?\s+soon\b|\bopens?\s+soon\b.*\braffle\b"
+    r")",
+)
+_AFFILIATE_RESTOCK_SCHEDULE_PATTERN = re.compile(
+    r"(?i)(?:"
+    r"\brestock(?:ing|s)?\b.*\b(?:tomorrow|tonight|today|soon|next\s+(?:week|month))\b|"
+    r"\b(?:tomorrow|tonight|today)\b.*\brestock(?:ing|s)?\b|"
+    r"\b(?:tomorrow|tonight|today)\b.*\bat\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s*(?:est|pst|cst|mst|et|pt)\b|"
+    r"\bwill begin to ship by\b"
+    r")",
+)
+
+
+def _affiliate_classify_non_purchase_url(url: str) -> str:
+    """Return a short category slug when the URL is not affiliate-lead material, else \"\"."""
+    ul = str(url or "").strip()
+    if not ul:
+        return ""
+    try:
+        p = urlparse(ul)
+        host = _affiliate_normalize_url_host(p.netloc or "")
+        path = str(p.path or "").lower()
+    except Exception:
+        return ""
+    if not host:
+        return ""
+    if host == "google.com" and "/forms/" in path:
+        return "google_forms"
+    for root, slug in _AFFILIATE_NON_PURCHASE_URL_ROOTS:
+        r = str(root or "").lower().strip()
+        if not r:
+            continue
+        if host == r or host.endswith("." + r):
+            return str(slug or r)
+    return ""
+
+
+def affiliate_non_purchase_url_suppression_reason(blob: str) -> str:
+    """
+    Block AFFILIATED_LINKS when the message includes non-retail / non-checkout URLs
+    (eBay, TikTok, Reddit, Google Forms, raffle platforms, etc.).
+    """
+    raw = str(blob or "").strip()
+    if not raw:
+        return ""
+    try:
+        urls = re.findall(r"https?://[^\s<>\"]+", raw, flags=re.IGNORECASE)
+    except Exception:
+        urls = []
+    for ul in urls or []:
+        cat = _affiliate_classify_non_purchase_url(ul)
+        if cat:
+            return f"affiliate_non_purchase_url_{cat}"
+    return ""
+
+
+def _affiliate_blob_has_active_purchasable_promo_shape(blob: str) -> bool:
+    """
+    True for live promo cards (Regular Price + Now, Apply Code + price, etc.) — not schedule/reminder posts.
+    """
+    guard = _affiliate_text_strip_markdown_noise(str(blob or ""))
+    if not guard:
+        return False
+    if re.search(r"(?i)regular\s+price\s*:", guard) and re.search(r"(?i)\bnow\s*:", guard):
+        return True
+    if re.search(r"(?i)apply\s+code\s*:", guard) and re.search(r"[$£€]\s*\d", guard):
+        return True
+    if re.search(r"(?i)(?:now|sale)\s*:\s*\$[\d,]", guard):
+        return True
+    if re.search(r"(?i)\$\d[\d,]*(?:\.\d{2})?\s*(?:[-–—]\s*\$?\d|(?:\s+\d+\s*%\s*off))", guard):
+        return True
+    return False
+
+
+def affiliate_reminder_or_announcement_suppression_reason(blob: str) -> str:
+    """
+    Future-dated reminders / announcements — not affiliate-ready purchase leads.
+
+    Covers pre-orders, magazine pre-orders, raffle opens-soon alerts, scheduled restocks, ship-by dates.
+    Skips when the blob is an active promo card (Regular Price + Now / Apply Code + $).
+    """
+    raw = str(blob or "").strip()
+    if not raw:
+        return ""
+    if _affiliate_blob_has_active_purchasable_promo_shape(raw):
+        return ""
+    if _AFFILIATE_MAGAZINE_PREORDER_PATTERN.search(raw):
+        return "affiliate_magazine_preorder"
+    if _AFFILIATE_PREORDER_PATTERN.search(raw):
+        return "affiliate_preorder_reminder"
+    if _AFFILIATE_RAFFLE_ANNOUNCEMENT_PATTERN.search(raw):
+        return "affiliate_raffle_announcement"
+    if _AFFILIATE_RESTOCK_SCHEDULE_PATTERN.search(raw):
+        return "affiliate_restock_schedule"
+    if re.search(r"(?i)\bopens?\s+soon\b", raw):
+        return "affiliate_opens_soon_reminder"
+    return ""
+
+
 def affiliate_should_suppress_affiliated_links(blob: str, *, min_core_chars: int = 80) -> str:
     """
     Return a non-empty suppression reason when the message should NOT route to AFFILIATED_LINKS.
@@ -849,6 +975,12 @@ def affiliate_should_suppress_affiliated_links(blob: str, *, min_core_chars: int
     flip_resell_reason = affiliate_flip_resell_drop_suppression_reason(raw)
     if flip_resell_reason:
         return flip_resell_reason
+    non_purchase_reason = affiliate_non_purchase_url_suppression_reason(raw)
+    if non_purchase_reason:
+        return non_purchase_reason
+    reminder_reason = affiliate_reminder_or_announcement_suppression_reason(raw)
+    if reminder_reason:
+        return reminder_reason
     if blob_has_dc_comics_publisher_url(raw):
         return "dc_comics_publisher_url"
     core_len = deal_substance_core_len(raw)
