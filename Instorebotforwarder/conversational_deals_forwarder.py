@@ -48,8 +48,22 @@ _RE_DISCORD_CDN_ATTACHMENT = re.compile(r"(?i)\bhttps?://cdn\.discordapp\.com/at
 # of whether Gemini ran. Centralized here so `simple_message_block_from_*` produce
 # already-cleaned text that is safe to (a) feed to Gemini and (b) post verbatim on
 # the Gemini-failure fallback path.
-_RE_AD_HASHTAG_LINE = re.compile(r"(?im)^\s*#\s*ad\s*$")
-_RE_AD_HASHTAG_INLINE = re.compile(r"(?i)(?<![A-Za-z0-9])#\s*ad\b")
+#
+# Generalized @ / # cleanup (not a fixed word list): strips Discord mention tokens,
+# plain-text role pings, partner hashtags, and @#-channel labels from source bots.
+_RE_DISCORD_USER_MENTION = re.compile(r"<@!?\d+>")
+_RE_DISCORD_ROLE_MENTION = re.compile(r"<@&\d+>")
+_RE_DISCORD_CHANNEL_MENTION = re.compile(r"<#\d+>")
+_RE_PLAIN_AT_MENTION = re.compile(
+    r"(?<![A-Za-z0-9.@])@"
+    r"(?:"
+    r"#[\w\-]+(?:\s+[\w\-]+)*|"  # @#-All Posts style channel labels
+    r"[\w\-]+(?:\s+[A-Z][\w\-]+)?"  # @Cards, @Vinyl Flips — not @Instore deal
+    r")"
+)
+_RE_HASH_TAG = re.compile(r"(?<![A-Za-z0-9:/=])#\w+")
+_RE_PAREN_CHANNEL_REF = re.compile(r"\(\s*#d/\w+\s*\)", re.IGNORECASE)
+_RE_ARTIFACT_ONLY_LINE = re.compile(r"(?im)^\s*[@#|.\-\s]+\s*$")
 # "From: Divine | By: Divine Helper v2" style attribution. Some source bots put
 # this in the embed body rather than the embed footer (which we already skip).
 _RE_ATTRIBUTION_FROM_BY = re.compile(r"(?im)^\s*from:\s+.+?\s*\|\s*by:\s+.+?\s*$")
@@ -64,18 +78,22 @@ def _strip_source_artifacts(text: str) -> str:
     Remove source-bot footer/disclosure artifacts from a message block.
 
     Canonical responsibility: any string this function returns is what the
-    destination embed (and Gemini rewriter) should see. Cleanup is conservative
-    on purpose - we only strip well-known patterns, never anything that could
-    plausibly be deal content.
+    destination embed (and Gemini rewriter) should see. Uses generalized
+    patterns (@ / # / Discord mention tokens), not a fixed word allow/deny list.
     """
     s = str(text or "")
     if not s.strip():
         return ""
+    s = _RE_DISCORD_USER_MENTION.sub("", s)
+    s = _RE_DISCORD_ROLE_MENTION.sub("", s)
+    s = _RE_DISCORD_CHANNEL_MENTION.sub("", s)
+    s = _RE_PLAIN_AT_MENTION.sub("", s)
+    s = _RE_HASH_TAG.sub("", s)
+    s = _RE_PAREN_CHANNEL_REF.sub("", s)
     s = _RE_ATTRIBUTION_FROM_BY.sub("", s)
     s = _RE_ATTRIBUTION_POWERED_BY.sub("", s)
     s = _RE_ATTRIBUTION_SENT_BY.sub("", s)
-    s = _RE_AD_HASHTAG_LINE.sub("", s)
-    s = _RE_AD_HASHTAG_INLINE.sub("", s)
+    s = _RE_ARTIFACT_ONLY_LINE.sub("", s)
     s = re.sub(r"[ \t]{2,}", " ", s)
     s = re.sub(r"[ \t]+\n", "\n", s)
     s = re.sub(r"\n{3,}", "\n\n", s).strip()
@@ -327,14 +345,15 @@ async def rewrite_description(cfg: Dict[str, Any], text: str, *, no_gemini: bool
         model=model,
         temperature=max(0.0, min(temp, 1.0)),
         timeout_s=max(5.0, timeout_s),
-        neutralize_mentions_fn=lambda s: (s or "").replace("@", "@\u200b"),
+        neutralize_mentions_fn=_strip_source_artifacts,
         usage_accumulator=None,
     )
     out = str(out or "").strip()
     if not out:
         return ""
+    out = _strip_source_artifacts(out)
     # Strict: treat "unchanged" as failure.
-    if out.strip() == raw.strip():
+    if out.strip() == _strip_source_artifacts(raw).strip():
         return ""
     return out
 
@@ -418,6 +437,7 @@ async def forward_runtime_message(inst: Any, message: discord.Message) -> bool:
         except Exception:
             pass
 
+    desc = _strip_source_artifacts(desc)
     media = media_url_from_discord_message(message)
     embed = build_embed(desc, media_url=media)
     try:
