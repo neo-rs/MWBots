@@ -39,6 +39,7 @@ from patterns import (
     affiliate_should_suppress_affiliated_links,
     blob_has_dc_comics_publisher_url,
     is_food_promotion_affiliate_noise_blob,
+    is_deal_monitor_embed_affiliate_noise_blob,
     CARDS_PATTERN,
     DISCOUNTED_STORE_PATTERN,
     INSTORE_KEYWORDS,
@@ -749,6 +750,8 @@ def _looks_like_conversational_amazon_deal(
         return _skip("empty_blob")
     if is_food_promotion_affiliate_noise_blob(text_blob):
         return _skip("food_promotion_noise")
+    if is_deal_monitor_embed_affiliate_noise_blob(text_blob):
+        return _skip("deal_monitor_embed_template")
     if blob_has_dc_comics_publisher_url(text_blob):
         return _skip("dc_comics_publisher_url")
     if source_group != "online":

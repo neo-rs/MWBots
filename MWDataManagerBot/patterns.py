@@ -1010,6 +1010,8 @@ def affiliate_should_suppress_affiliated_links(blob: str, *, min_core_chars: int
         return "empty"
     if is_food_promotion_affiliate_noise_blob(raw):
         return "food_promotion_noise"
+    if is_deal_monitor_embed_affiliate_noise_blob(raw):
+        return "deal_monitor_embed_template"
     # FlipFluence + Rerouter embeds: skip conversational deals, but they still carry author.url / CDN
     # previews that matched AFFILIATED_LINKS "non-Discord URL" heuristics without a real deal link.
     try:
@@ -1307,6 +1309,71 @@ def should_skip_amazon_profitable_leads_monitor_blob(text: str) -> bool:
         or is_divine_helper_price_monitor_blob(text)
         or is_flipflip_restock_monitor_blob(text)
     )
+
+
+_AFFILIATE_MONITOR_BYLINE_FOOTER = re.compile(
+    r"(?i)\bfrom\s*:\s*.+?\|\s*by\s*:"
+)
+# Labeled embed fields flattened as "Name: value" — shared across monitor bots (any merchant).
+_AFFILIATE_MONITOR_EMBED_FIELD_PATTERNS: Tuple[str, ...] = (
+    r"(?i)\bsku\s*:",
+    r"(?i)\b(?:original\s+price|list\s+price|was\s+price|msrp|map)\s*:",
+    r"(?i)\b(?:percentage\s+off|percent\s+off|pct\s+off|dollar\s+off)\s*:",
+    r"(?i)\b(?:new\s+price|old\s+price|discount)\s*:",
+    r"(?i)\b(?:sale\s+price|current\s+price|price)\s*:",
+    r"(?i)\bcondition\s*:",
+    r"(?i)\bmodel\s*:",
+    r"(?i)\bretailer\s*:",
+    r"(?i)\boffer\s+id\s*:",
+    r"(?i)\border\s+limit\s*:",
+    r"(?i)\b(?:total\s+inventory|inventory|stock)\s*:",
+    r"(?i)\b(?:internet\s+number|upc|asin)\s*:",
+    r"(?i)\bseller\s*:",
+    r"(?i)\bfba\s*:",
+)
+_AFFILIATE_MONITOR_RULE_PREFIX = re.compile(r"(?m)^\s*\(\s*rule\s+\d+\s*\)")
+_AFFILIATE_MONITOR_EMBED_HEADLINE = re.compile(
+    r"(?i)\b(?:deals?|clearance|restock|alert|monitor)\s*[\u2013\u2014-]\s*(?:new\s+item|price\s+drop|alert|deal)\b"
+)
+
+
+def _affiliate_monitor_embed_field_label_hits(raw: str) -> int:
+    """How many distinct monitor-style embed field labels appear in a flattened message blob."""
+    hits = 0
+    for pat in _AFFILIATE_MONITOR_EMBED_FIELD_PATTERNS:
+        if re.search(pat, raw or ""):
+            hits += 1
+    return hits
+
+
+def is_deal_monitor_embed_affiliate_noise_blob(blob: str) -> bool:
+    """
+    Structured bot deal-monitor embed cards — format-based, not merchant/topic keywords.
+
+    Signature: monitor footer ``From: … | By: …`` plus an embed field grid (SKU, Price,
+    Original Price, % Off, etc.) or a ``(rule N)`` body prefix. Applies to Divine, Tempo,
+    FlipFlip, Deal Soldier, and any other bot using the same Discord embed layout.
+    """
+    raw = str(blob or "").strip()
+    if not raw:
+        return False
+    if should_skip_amazon_profitable_leads_monitor_blob(raw):
+        return True
+    if _affiliate_blob_is_raffle_release_monitor(raw):
+        return True
+    if not _AFFILIATE_MONITOR_BYLINE_FOOTER.search(raw):
+        return False
+    # Divine-family body prefix: "(rule 8)" with monitor footer — no merchant word required.
+    if _AFFILIATE_MONITOR_RULE_PREFIX.search(raw):
+        return True
+    field_hits = _affiliate_monitor_embed_field_label_hits(raw)
+    # Footer + two or more labeled data fields = automated monitor card, not a hand lead.
+    if field_hits >= 2:
+        return True
+    # Footer + monitor headline + at least one data field (e.g. "Deals – New Item" + Price:).
+    if field_hits >= 1 and _AFFILIATE_MONITOR_EMBED_HEADLINE.search(raw):
+        return True
+    return False
 
 
 def allow_amz_deals_despite_complicated_monitor(text: str) -> bool:

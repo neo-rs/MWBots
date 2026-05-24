@@ -47,7 +47,7 @@ Settings keys related to major-clearance behavior (see `settings_store` / `confi
 
 Trace / settings knobs that may appear in JSON or `classifier.matches` (examples):
   - `price_error_http_gate` when `price_error_requires_http_url` blocks PRICE_ERROR without http(s).
-  - `affiliate_skip` / `affiliate_reason` for AFFILIATED_LINKS gates (e.g. food-promo / dc.comics URL skips).
+  - `affiliate_skip` / `affiliate_reason` for AFFILIATED_LINKS gates (e.g. food-promo / dc.comics URL skips / deal_monitor_embed_template).
   - `amz_deals_conversational_skip` for CONVERSATIONAL_DEALS (same strings as `_looks_like_conversational_amazon_deal`).
   - `major_clearance_monitor_suppress_instore_buckets`, `definitive_major_clearance`, `tempo_major_clearance_candidate`.
 """
