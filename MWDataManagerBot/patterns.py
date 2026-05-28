@@ -979,7 +979,8 @@ def affiliate_reminder_or_announcement_suppression_reason(blob: str) -> str:
     """
     Future-dated reminders / announcements — not affiliate-ready purchase leads.
 
-    Covers pre-orders, magazine pre-orders, raffle opens-soon alerts, scheduled restocks, ship-by dates.
+    Covers pre-orders, magazine pre-orders, raffle opens-soon alerts, scheduled restocks, ship-by dates,
+    and the shared TIMESTAMP_PATTERN future indicators (tomorrow, coming soon, goes live, etc.).
     Skips when the blob is an active promo card (Regular Price + Now / Apply Code + $).
     """
     raw = str(blob or "").strip()
@@ -997,6 +998,8 @@ def affiliate_reminder_or_announcement_suppression_reason(blob: str) -> str:
         return "affiliate_restock_schedule"
     if re.search(r"(?i)\bopens?\s+soon\b", raw):
         return "affiliate_opens_soon_reminder"
+    if TIMESTAMP_PATTERN.search(raw):
+        return "affiliate_future_indicator"
     return ""
 
 
