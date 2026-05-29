@@ -1298,6 +1298,36 @@ class InstorebotForwarder:
             return False
         return True
 
+    def _amazon_leads_min_discount_pct(self, source_channel_id: Optional[int]) -> Optional[int]:
+        """Minimum % OFF required for configured Amazon-leads source channels (None = gate off)."""
+        cfg = self.config or {}
+        try:
+            min_pct = int(cfg.get("amazon_leads_min_discount_pct") or 0)
+        except Exception:
+            min_pct = 0
+        if min_pct <= 0:
+            return None
+        raw_ids = cfg.get("amazon_leads_min_discount_source_channel_ids") or []
+        if not isinstance(raw_ids, list) or not raw_ids:
+            return None
+        allowed = {_safe_int(x) for x in raw_ids if _safe_int(x)}
+        if not source_channel_id or int(source_channel_id) not in allowed:
+            return None
+        return min_pct
+
+    def _discount_pct_from_prices(self, price: str, before_price: str) -> Optional[int]:
+        """Integer percent OFF from current vs before (None when not a real drop)."""
+        try:
+            cur_val, cur_sym = self._price_to_float(price)
+            bef_val, bef_sym = self._price_to_float(before_price)
+        except Exception:
+            return None
+        if (cur_val is not None) and (bef_val is not None) and bef_val > 0 and cur_val < bef_val:
+            if (not cur_sym) or (not bef_sym) or (cur_sym == bef_sym):
+                pct = int(round(((bef_val - cur_val) / bef_val) * 100.0))
+                return pct if pct > 0 else None
+        return None
+
     def _promo_discount_pct_for_gate(self, raw_discount: str, scraped: Optional[Dict[str, Any]]) -> Optional[int]:
         blobs: List[str] = [str(raw_discount or "")]
         if scraped:
@@ -1475,21 +1505,16 @@ class InstorebotForwarder:
 
         discount_pct_str = ""
         price_glitch = False
+        pct = self._discount_pct_from_prices(price, before_price)
+        if pct:
+            discount_pct_str = f"{pct}% OFF"
+            _log_flow("PCT_OFF", pct=str(pct), current=str(price), before=str(before_price))
+            if pct >= 90:
+                price_glitch = True
         try:
-            cur_val, cur_sym = self._price_to_float(price)
-            bef_val, bef_sym = self._price_to_float(before_price)
+            cur_val, _ = self._price_to_float(price)
         except Exception:
-            cur_val, cur_sym = None, ""
-            bef_val, bef_sym = None, ""
-
-        if (cur_val is not None) and (bef_val is not None) and bef_val > 0 and cur_val < bef_val:
-            if (not cur_sym) or (not bef_sym) or (cur_sym == bef_sym):
-                pct = int(round(((bef_val - cur_val) / bef_val) * 100.0))
-                if pct > 0:
-                    discount_pct_str = f"{pct}% OFF"
-                    _log_flow("PCT_OFF", pct=str(pct), current=str(price), before=str(before_price))
-                    if pct >= 90:
-                        price_glitch = True
+            cur_val = None
         if cur_val is not None and cur_val < 1.0:
             price_glitch = True
 
@@ -2098,6 +2123,82 @@ class InstorebotForwarder:
                 "source_channel_id": str(src_id),
                 "asin": (asin or "").upper(),
                 "discount_pct_seen": "" if pct is None else str(pct),
+            }
+        )
+        ex.emit()
+
+    def _explain_amazon_leads_discount_gate(
+        self,
+        *,
+        source_channel_id: int,
+        dest_channel_id: Optional[int],
+        message: discord.Message,
+        asin: str,
+        min_discount_pct: int,
+        discount_pct: Optional[int],
+        current_price: str,
+        before_price: str,
+        reroute_dest_channel_id: Optional[int],
+    ) -> None:
+        if not self._explainable_enabled():
+            return
+        ex = self._explainable()
+        saw_pct = f"{discount_pct}% OFF" if discount_pct is not None else "no measurable discount"
+        bottom = (
+            f"FALLBACK USED — Amazon lead discount is below the {min_discount_pct}% minimum; "
+            "sent to enrich_failed for review."
+        )
+        ex.start(
+            "AMAZON LEADS DISCOUNT GATE",
+            message_id=str(message.id),
+            destination=(f"<#{dest_channel_id}>" if dest_channel_id else "unknown"),
+            decision_tag="FALLBACK USED",
+            filter_reason=f"amazon_leads_discount_below_min_{discount_pct if discount_pct is not None else 'none'}",
+            journal_stream=self._journal_stream_slug(source_channel_id),
+        )
+        ex.section(
+            3,
+            "ELI5 SUMMARY",
+            [
+                f"Bottom line: {bottom}",
+                "",
+                "What the bot saw:",
+                f"- Source channel <#{source_channel_id}> ({self._source_channel_log_label(source_channel_id)})",
+                f"- Current price: {current_price or 'missing'}",
+                f"- Before / list price: {before_price or 'missing'}",
+                f"- Computed discount: {saw_pct}",
+                f"- Required minimum: {min_discount_pct}% OFF",
+                *( [f"- ASIN: {asin.upper()}"] if asin else [] ),
+                "",
+                "Final decision:",
+                f"- Reroute to <#{reroute_dest_channel_id}> (enrich_failed)" if reroute_dest_channel_id else "- No review destination configured",
+            ],
+        )
+        ex.section(
+            4,
+            "HUMAN DECISION SUMMARY",
+            [
+                "Winning conditions (what would pass):",
+                f"- Both current and before prices resolve, and discount >= {min_discount_pct}% OFF.",
+                "",
+                "Losing / rejected:",
+                f"- Discount is {saw_pct}; need at least {min_discount_pct}% OFF from before/list price.",
+                "",
+                "Notes:",
+                "- Applies only to source channels listed in amazon_leads_min_discount_source_channel_ids.",
+                "- Uses finalized card prices (including live buybox override when enabled).",
+            ],
+        )
+        ex.trace(
+            {
+                "min_discount_pct": str(min_discount_pct),
+                "discount_pct": "" if discount_pct is None else str(discount_pct),
+                "source_channel_id": str(source_channel_id),
+                "dest_channel_id": "" if dest_channel_id is None else str(dest_channel_id),
+                "reroute_dest_channel_id": "" if reroute_dest_channel_id is None else str(reroute_dest_channel_id),
+                "asin": (asin or "").upper(),
+                "current_price": current_price,
+                "before_price": before_price,
             }
         )
         ex.emit()
@@ -5634,6 +5735,30 @@ class InstorebotForwarder:
 
         price, before_price, discount_pct_str, price_glitch = self._finalize_card_prices(price, before_price)
 
+        amazon_leads_discount_gate_ok = True
+        amazon_leads_discount_failure_line = ""
+        amazon_leads_discount_pct: Optional[int] = None
+        amazon_leads_min_discount_pct = self._amazon_leads_min_discount_pct(src_id or None)
+        if amazon_leads_min_discount_pct is not None:
+            amazon_leads_discount_pct = self._discount_pct_from_prices(price, before_price)
+            if amazon_leads_discount_pct is None or amazon_leads_discount_pct < amazon_leads_min_discount_pct:
+                amazon_leads_discount_gate_ok = False
+                saw = (
+                    f"{amazon_leads_discount_pct}% OFF"
+                    if amazon_leads_discount_pct is not None
+                    else "no measurable discount (current ≥ before or missing before price)"
+                )
+                amazon_leads_discount_failure_line = (
+                    f"Discount Gate: {saw}; need >= {amazon_leads_min_discount_pct}% OFF; sent to review."
+                )
+                _log_flow(
+                    "AMAZON_LEADS_DISCOUNT_GATE_FAIL",
+                    pct=str(amazon_leads_discount_pct),
+                    min=str(amazon_leads_min_discount_pct),
+                    current=str(price)[:40],
+                    before=str(before_price)[:40],
+                )
+
         # eBay first-8 sold comps are a hard posting gate for Amazon cards.
         ebay_comps_url = ""
         ebay_sold_new = "N/A"
@@ -5719,6 +5844,22 @@ class InstorebotForwarder:
             will_post_ebay = False
             if not failed_ebay_dest_id:
                 failed_ebay_dest_id = self._route_to_dest_id("enrich_failed")
+        if not amazon_leads_discount_gate_ok:
+            will_post_ebay = False
+            if not failed_ebay_dest_id:
+                failed_ebay_dest_id = self._route_to_dest_id("enrich_failed")
+            review_dest = int(failed_ebay_dest_id) if failed_ebay_dest_id else None
+            self._explain_amazon_leads_discount_gate(
+                source_channel_id=int(src_id),
+                dest_channel_id=int(dest_id) if dest_id else None,
+                message=message,
+                asin=asin or "",
+                min_discount_pct=int(amazon_leads_min_discount_pct or 0),
+                discount_pct=amazon_leads_discount_pct,
+                current_price=price,
+                before_price=before_price,
+                reroute_dest_channel_id=review_dest,
+            )
         self._explain_ebay_first8_gate(
             trace_acc=ebay_trace,
             message_id=str(message.id),
@@ -5740,6 +5881,13 @@ class InstorebotForwarder:
                     reason=f"amazon_price_gate_{gate_reason}",
                     detail=(amazon_gate_failure_line or reason)[:180],
                 )
+            elif not amazon_leads_discount_gate_ok:
+                _log_flow(
+                    "FILTER_SKIP",
+                    channel=dest_id,
+                    reason=f"amazon_leads_discount_below_min_{amazon_leads_discount_pct or 'none'}",
+                    detail=amazon_leads_discount_failure_line[:180],
+                )
             else:
                 _log_flow("FILTER_SKIP", channel=dest_id, reason=f"ebay_first8_required_{status}", detail=reason)
             if not failed_ebay_dest_id and dedupe_reserved and asin:
@@ -5755,6 +5903,8 @@ class InstorebotForwarder:
             dest_id = failed_ebay_dest_id
             if not amazon_price_gate_ok:
                 route_reason = f"amazon_price_gate:{str(amazon_buybox_trace.get('status') or 'failed')}"
+            elif not amazon_leads_discount_gate_ok:
+                route_reason = f"amazon_leads_discount_gate:{amazon_leads_discount_pct or 'none'}"
             else:
                 route_reason = f"ebay_gate_failed:{status}"
             use_enrich_failed_template = True
@@ -5762,6 +5912,8 @@ class InstorebotForwarder:
                 ebay_gate_failure_line = ""
             elif not amazon_price_gate_ok and amazon_gate_failure_line:
                 ebay_gate_failure_line = amazon_gate_failure_line
+            elif not amazon_leads_discount_gate_ok and amazon_leads_discount_failure_line:
+                ebay_gate_failure_line = amazon_leads_discount_failure_line
             elif not ebay_gate_failure_line:
                 detail = f": {reason}" if reason else ""
                 ebay_gate_failure_line = f"eBay Gate: Required comps/value check failed ({status}{detail}); sent to review."

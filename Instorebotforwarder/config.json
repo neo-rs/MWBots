@@ -127,6 +127,10 @@
     "fresh",
     "pantry"
   ],
+  "amazon_leads_min_discount_pct": 50,
+  "amazon_leads_min_discount_source_channel_ids": [
+    1435066421133443174
+  ],
   "affiliated_leads": {
     "source_channel_id": 1435308472639160522,
     "dest_personal": 1484599902863622195,
