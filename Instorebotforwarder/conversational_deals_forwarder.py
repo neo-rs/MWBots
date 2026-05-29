@@ -29,6 +29,7 @@ except Exception:
 __all__ = [
     "gemini_status",
     "rewrite_deal_post_keep_urls",
+    "strip_source_artifacts",
     "classify_affiliated_food",
     "affiliated_force_food_link_match",
     "resolve_destination_channel_id",
@@ -108,6 +109,11 @@ def _strip_source_artifacts(text: str) -> str:
     s = re.sub(r"[ \t]+\n", "\n", s)
     s = re.sub(r"\n{3,}", "\n\n", s).strip()
     return s
+
+
+def strip_source_artifacts(text: str) -> str:
+    """Public alias for embed/forward text cleanup (price-error, affiliated, conversational)."""
+    return _strip_source_artifacts(text)
 
 
 def _safe_channel_id(raw: Any) -> Optional[int]:

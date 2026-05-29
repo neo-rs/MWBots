@@ -1003,14 +1003,25 @@ class InstorebotForwarder:
 
     def _neutralize_mentions(self, text: str) -> str:
         """
-        Make sure user content doesn't ping @everyone/@here or role/user mentions when rendered in an embed.
-        AllowedMentions.none() prevents pings for content; embed text is best-effort sanitized here too.
+        Embed-safe outbound text for simple-forward paths (including price-error).
+
+        Canonical artifact strip (@ / # / @#-channel labels, attribution lines) lives in
+        conversational_deals_forwarder._strip_source_artifacts — same rules as affiliated
+        and conversational Gemini forwards. Then neutralize @everyone/@here so embed text
+        cannot ping even if AllowedMentions is misconfigured.
         """
-        s = (text or "").replace("@everyone", "@ everyone").replace("@here", "@ here")
-        # Hide raw mention tokens like <@123>, <@&123>, <#123>
-        s = re.sub(r"<@!?&?\d+>", "@mention", s)
-        s = re.sub(r"<#\d+>", "#channel", s)
-        return s
+        s = str(text or "")
+        if not s.strip():
+            return ""
+        try:
+            from conversational_deals_forwarder import _strip_source_artifacts  # type: ignore
+
+            s = _strip_source_artifacts(s)
+        except Exception:
+            pass
+        if not s.strip():
+            return ""
+        return s.replace("@everyone", "@ everyone").replace("@here", "@ here")
 
     def _amazon_affiliate_enabled(self) -> bool:
         v = (self.config or {}).get("amazon_affiliate_enabled", None)
