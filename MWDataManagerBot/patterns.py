@@ -578,8 +578,28 @@ _AFFILIATE_FLIP_COMMENTARY_PROSE_PATTERN = re.compile(
     r"will probably restock|expect comps to come down|cd back up|"
     r"worst case.*x\d|x\d+\s*[-–—]\s*x\d+\s*ish|"
     r"hold for at least|months to peak|fo\s*&\s*o|fomo|viral hype|"
-    r"final (?:wave|call)|locks for|open order window|"
+    r"final (?:wave|call)|locks for|\bopen\s+order\b|"
+    r"\b(?:scroll\s+up|original\s+calls?|see\s+my\s+calls?)\b|"
+    r"\bwindow\s+closes?\b|"
     r"drop(?:ping)?\s+(?:tonight|today|soon)|going live\s+(?:soon|tonight)"
+    r")",
+)
+# Follow-up drop / flip updates: reminder posts, scroll-up references, closing windows — not fresh affiliate leads.
+_AFFILIATE_DROP_FOLLOWUP_UPDATE_PATTERN = re.compile(
+    r"(?i)(?:"
+    r"\b(?:scroll\s+up|see\s+my\s+(?:original\s+)?calls?|original\s+calls?)\b|"
+    r"\bwindow\s+closes?\b|\bcloses?\s+in\s+(?:an?\s+)?\d+\s*(?:hour|hours?|minute|minutes?|min)\b|"
+    r"\breminder\b.{0,120}\b(?:window|closes?|open\s+order|applies\s+to)\b|"
+    r"\bopen\s+order\b|"
+    r"\bfor those (?:it )?applies\b|"
+    r"\bcounterpart\s+cover\b"
+    r")",
+)
+_AFFILIATE_RESALE_MULTIPLIER_PROSE_PATTERN = re.compile(
+    r"(?i)(?:"
+    r"\bx\s*\d+\s*ish\b|"
+    r"\bx\d+\s*[-–—]\s*x\d+\b|"
+    r"x\d+\s*[-–—]\s*x\d+\s*ish"
     r")",
 )
 _AFFILIATE_RAFFLE_OR_PASS_NOISE_PATTERN = re.compile(
@@ -2004,6 +2024,16 @@ def affiliate_flip_resell_drop_suppression_reason(blob: str) -> str:
     has_retail_line = bool(re.search(r"(?im)^\s*retail\b", guard))
     has_resell_line = bool(re.search(r"(?im)^\s*resell\b", guard))
 
+    # Drop flip follow-up / reminder updates (link + commentary, not a fresh purchase lead).
+    if re.search(r"https?://", raw, re.IGNORECASE) and not _affiliate_blob_has_active_purchasable_promo_shape(raw):
+        if _AFFILIATE_DROP_FOLLOWUP_UPDATE_PATTERN.search(raw):
+            return "flip_resell_followup_update"
+        if (
+            _AFFILIATE_RESALE_MULTIPLIER_PROSE_PATTERN.search(raw)
+            and _AFFILIATE_FLIP_COMMENTARY_PROSE_PATTERN.search(raw)
+        ):
+            return "flip_resell_drop_commentary"
+
     # Structured resell card (Divine-style **WHERE:** / **WHEN:** / **RESALE:** / **RISK:** / **INFO:**).
     if has_where and has_when and has_priceish and has_resaleish:
         return "flip_resell_structured_card"
@@ -2028,7 +2058,7 @@ def affiliate_flip_resell_drop_suppression_reason(blob: str) -> str:
     if _AFFILIATE_EQL_DROP_COMMENTARY_PATTERN.search(raw) and _AFFILIATE_FLIP_COMMENTARY_PROSE_PATTERN.search(raw):
         return "flip_resell_eql_commentary"
     if _AFFILIATE_FLIP_COMMENTARY_PROSE_PATTERN.search(raw) and re.search(
-        r"(?i)(?:resale|resell|x\d+\s*[-–—]\s*x\d+|\d+\s*months|ptg|print count|slab)",
+        r"(?i)(?:resale|resell|x\d+\s*[-–—]\s*x\d+|\bx\s*\d+\s*ish\b|\d+\s*months|ptg|print count|slab)",
         raw,
     ):
         return "flip_resell_drop_commentary"
