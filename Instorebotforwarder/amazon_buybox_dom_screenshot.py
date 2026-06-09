@@ -56,6 +56,8 @@ from ebay_first8_dom_comps import (  # type: ignore
     _cfg_float,
     _cfg_int,
     _ensure_headed_linux_display,
+    acquire_scrape_browser_context,
+    connect_chromium_over_cdp,
     merge_boxes,
     pick_chrome_exe,  # noqa: F401  re-exported for callers if needed
     prune_screenshot_dir,
@@ -1462,17 +1464,18 @@ async def capture_amazon_buybox_screenshot(
         try:
             if use_cdp:
                 cdp_url = _connect_cdp_url(cfg)
-                browser = await p.chromium.connect_over_cdp(cdp_url)
+                browser = await connect_chromium_over_cdp(p.chromium, cdp_url)
                 result["connected_via"] = f"cdp:{cdp_url}"
             else:
                 launch_kwargs, resolved = resolve_chrome_launch_kwargs(cfg)
                 browser = await p.chromium.launch(**launch_kwargs)
                 result["connected_via"] = f"launch:{resolved}"
 
-            context = browser.contexts[0] if browser.contexts else await browser.new_context(
-                viewport={"width": viewport_width, "height": viewport_height},
-                device_scale_factor=1,
-                is_mobile=False,
+            context = await acquire_scrape_browser_context(
+                browser,
+                use_cdp=use_cdp,
+                viewport_width=viewport_width,
+                viewport_height=viewport_height,
             )
             page = await context.new_page()
             try:

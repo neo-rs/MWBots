@@ -211,6 +211,53 @@ def resolve_chrome_launch_kwargs(cfg: Mapping[str, Any]) -> Tuple[Dict[str, Any]
     return kwargs, resolved
 
 
+async def connect_chromium_over_cdp(browser_type: Any, cdp_url: str) -> Any:
+    """
+    Attach Playwright to the long-lived trusted Chrome (CDP on :9222).
+
+    Default connect_over_cdp sends Browser.setDownloadBehavior, which fails on
+    some CDP endpoints with "Browser context management is not supported".
+    no_defaults skips those overrides; older Playwright uses the env fallback.
+    """
+    url = str(cdp_url or DEFAULT_CDP_URL).strip() or DEFAULT_CDP_URL
+    try:
+        return await browser_type.connect_over_cdp(url, no_defaults=True)
+    except TypeError:
+        prev = os.environ.get("PW_CHROMIUM_DISABLE_DOWNLOAD_BEHAVIOR")
+        os.environ["PW_CHROMIUM_DISABLE_DOWNLOAD_BEHAVIOR"] = "1"
+        try:
+            return await browser_type.connect_over_cdp(url)
+        finally:
+            if prev is None:
+                os.environ.pop("PW_CHROMIUM_DISABLE_DOWNLOAD_BEHAVIOR", None)
+            else:
+                os.environ["PW_CHROMIUM_DISABLE_DOWNLOAD_BEHAVIOR"] = prev
+
+
+async def acquire_scrape_browser_context(
+    browser: Any,
+    *,
+    use_cdp: bool,
+    viewport_width: int,
+    viewport_height: int,
+) -> Any:
+    """Reuse the default CDP context; only launch-mode may create a new context."""
+    if use_cdp:
+        if not browser.contexts:
+            raise RuntimeError(
+                "CDP Chrome has no browser contexts; restart "
+                "mirror-world-instorebotforwarder-chrome-cdp.service"
+            )
+        return browser.contexts[0]
+    if browser.contexts:
+        return browser.contexts[0]
+    return await browser.new_context(
+        viewport={"width": viewport_width, "height": viewport_height},
+        device_scale_factor=1,
+        is_mobile=False,
+    )
+
+
 def _ensure_headed_linux_display(cfg: Mapping[str, Any]) -> Tuple[Optional[subprocess.Popen[Any]], Optional[str]]:
     """
     Match Windows visible-Chrome mode on headless Linux services by providing a display.
@@ -507,17 +554,22 @@ async def fetch_first8_sold_comps(title: str, cfg: Mapping[str, Any], *, bot_dir
         browser = None
         page = None
         try:
-            if _cfg_bool(cfg, "ebay_first8_connect_cdp", False):
-                browser = await p.chromium.connect_over_cdp(str(cfg.get("ebay_first8_cdp_url") or DEFAULT_CDP_URL))
+            use_cdp = _cfg_bool(cfg, "ebay_first8_connect_cdp", False)
+            if use_cdp:
+                browser = await connect_chromium_over_cdp(
+                    p.chromium,
+                    str(cfg.get("ebay_first8_cdp_url") or DEFAULT_CDP_URL),
+                )
             else:
                 launch_kwargs, resolved = resolve_chrome_launch_kwargs(cfg)
                 result["browser"] = resolved
                 browser = await p.chromium.launch(**launch_kwargs)
 
-            context = browser.contexts[0] if browser.contexts else await browser.new_context(
-                viewport={"width": viewport_width, "height": viewport_height},
-                device_scale_factor=1,
-                is_mobile=False,
+            context = await acquire_scrape_browser_context(
+                browser,
+                use_cdp=use_cdp,
+                viewport_width=viewport_width,
+                viewport_height=viewport_height,
             )
             page = await context.new_page()
             try:
