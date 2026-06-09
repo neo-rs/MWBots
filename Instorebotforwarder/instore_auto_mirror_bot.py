@@ -14,6 +14,7 @@ Includes:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html as _html
 import hmac
 import json
