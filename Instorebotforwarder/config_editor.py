@@ -52,8 +52,6 @@ class MainEditorView(ui.View):
         footer_text = (cfg.get("footer_text") or "").strip()
         embed.add_field(name="Footer", value=footer_text[:200] or "Not set", inline=False)
         embed.add_field(name="Wrap Links", value=_fmt_bool(cfg.get("wrap_links")), inline=True)
-        embed.add_field(name="OpenAI Model", value=(cfg.get("openai_model") or "Not set"), inline=True)
-        embed.add_field(name="Temperature", value=str(cfg.get("openai_temperature") or "Not set"), inline=True)
         embed.set_footer(text="Editor is ephemeral and safe; no message edits are performed.")
         return embed
 
@@ -86,12 +84,6 @@ class MainEditorView(ui.View):
         if not _is_admin(interaction):
             return await interaction.response.send_message("Admins only.", ephemeral=True)
         await interaction.response.send_modal(FooterModal(self.guild_id))
-
-    @ui.button(label="OpenAI Settings", style=discord.ButtonStyle.secondary, row=1)
-    async def openai_settings(self, interaction: discord.Interaction, button: ui.Button):
-        if not _is_admin(interaction):
-            return await interaction.response.send_message("Admins only.", ephemeral=True)
-        await interaction.response.send_modal(OpenAIModal(self.guild_id))
 
     @ui.button(label="Close", style=discord.ButtonStyle.danger, row=2)
     async def close(self, interaction: discord.Interaction, button: ui.Button):
@@ -198,29 +190,3 @@ class FooterModal(ui.Modal, title="Set Footer Text"):
         cfg["footer_text"] = (self.footer.value or "").strip()
         await set_config(self.guild_id, cfg)
         await interaction.response.send_message("✅ Footer updated.", ephemeral=True)
-
-class OpenAIModal(ui.Modal, title="OpenAI Settings"):
-    model = ui.TextInput(label="Model", placeholder="(required for OpenAI calls)", required=False, max_length=60)
-    temperature = ui.TextInput(label="Temperature (0.0 - 1.0)", placeholder="(optional)", required=False, max_length=10)
-
-    def __init__(self, guild_id: int):
-        super().__init__()
-        self.guild_id = guild_id
-
-    async def on_submit(self, interaction: discord.Interaction):
-        cfg = await get_config(self.guild_id)
-        m = (self.model.value or "").strip()
-        t_raw = (self.temperature.value or "").strip()
-        if t_raw:
-            try:
-                t = float(t_raw)
-            except ValueError:
-                return await interaction.response.send_message("Temperature must be a number.", ephemeral=True)
-            if t < 0.0 or t > 1.0:
-                return await interaction.response.send_message("Temperature must be between 0.0 and 1.0.", ephemeral=True)
-            cfg["openai_temperature"] = t
-        else:
-            cfg["openai_temperature"] = None
-        cfg["openai_model"] = m
-        await set_config(self.guild_id, cfg)
-        await interaction.response.send_message("✅ OpenAI settings updated.", ephemeral=True)

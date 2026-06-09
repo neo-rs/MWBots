@@ -106,11 +106,6 @@
   "amazon_title_compact_enabled": true,
   "amazon_title_compact_max_chars": 80,
   "amazon_title_compact_keep_segments": 2,
-  "stockx_scrape_timeout_s": 15,
-  "openai_rephrase_enabled": "auto",
-  "openai_model": "gpt-4o-mini",
-  "openai_timeout_s": 12,
-  "openai_max_chars": 1800,
   "gemini_model": "gemini-2.5-flash-lite",
   "gemini_temperature": 0.65,
   "dedupe_asin_ttl_s": 21600,
@@ -194,8 +189,7 @@
     },
     "1435268379521847369": {
       "dest_channel_id": 1457129505050202377,
-      "merge_window_s": 3.0,
-      "enrich_stockx": true
+      "merge_window_s": 3.0
     }
   },
   "retail_product_link_listener": {

@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import html as _html
-import hashlib
 import hmac
 import json
 import logging
@@ -781,9 +780,6 @@ class InstorebotForwarder:
         self.config_path = config_path
         self.secrets_path = secrets_path
         self._cfg_lock = asyncio.Lock()
-        self._openai_cache: Dict[str, Any] = {}
-        self._openai_stats: Dict[str, int] = {}
-        self._openai_last_mode: Dict[str, str] = {}
 
         # ASIN de-dupe (avoid forwarding duplicate leads)
         self._dedupe_inflight: set[str] = set()
@@ -1828,7 +1824,7 @@ class InstorebotForwarder:
 
     def _dedupe_reserve(self, asin: str) -> bool:
         """
-        Reserve an ASIN for processing (prevents duplicates wasting scrape/OpenAI).
+        Reserve an ASIN for processing (prevents duplicate scrape work).
         """
         a = (asin or "").strip().upper()
         if not a:
@@ -1855,136 +1851,6 @@ class InstorebotForwarder:
         if not a:
             return
         self._dedupe_inflight.discard(a)
-
-    def _openai_enabled(self) -> bool:
-        v = (self.config or {}).get("openai_rephrase_enabled", None)
-        if isinstance(v, bool):
-            return v
-        s = str(v or "").strip().lower()
-        if s in {"1", "true", "yes", "y", "on"}:
-            return True
-        if s in {"0", "false", "no", "n", "off"}:
-            return False
-        # Default: only enable if a key exists.
-        return bool(self._openai_api_key())
-
-    def _openai_api_key(self) -> str:
-        # Secrets should live in config.secrets.json (merged into self.config), or env.
-        k = str((self.config or {}).get("openai_api_key") or "").strip()
-        if k:
-            return k
-        return (os.getenv("OPENAI_API_KEY", "") or "").strip()
-
-    def _openai_model(self) -> str:
-        return str((self.config or {}).get("openai_model") or "gpt-4o-mini").strip() or "gpt-4o-mini"
-
-    def _openai_timeout_s(self) -> float:
-        try:
-            v = float((self.config or {}).get("openai_timeout_s") or 12.0)
-        except Exception:
-            v = 12.0
-        return max(5.0, min(v, 45.0))
-
-    def _openai_max_chars(self) -> int:
-        try:
-            v = int((self.config or {}).get("openai_max_chars") or 1800)
-        except Exception:
-            v = 1800
-        return max(200, min(v, 6000))
-
-    async def _openai_rephrase(self, kind: str, text: str) -> str:
-        """
-        Best-effort OpenAI rewrite. Never required; always safe-fallback to original text.
-        """
-        raw = (text or "").strip()
-        if not raw:
-            self._openai_last_mode[kind] = "empty"
-            self._openai_stats["skip_empty"] = int(self._openai_stats.get("skip_empty", 0) or 0) + 1
-            return ""
-        if not self._openai_enabled():
-            self._openai_last_mode[kind] = "disabled"
-            self._openai_stats["skip_disabled"] = int(self._openai_stats.get("skip_disabled", 0) or 0) + 1
-            return raw
-        key = self._openai_api_key()
-        if not key:
-            self._openai_last_mode[kind] = "no_key"
-            self._openai_stats["skip_no_key"] = int(self._openai_stats.get("skip_no_key", 0) or 0) + 1
-            return raw
-
-        # Cache by kind+hash to avoid repeat costs within a run.
-        cache_key = f"{kind}:{hashlib.sha256(raw.encode('utf-8', errors='ignore')).hexdigest()[:16]}"
-        if cache_key in self._openai_cache:
-            self._openai_last_mode[kind] = "cache"
-            self._openai_stats["cache_hit"] = int(self._openai_stats.get("cache_hit", 0) or 0) + 1
-            return self._openai_cache[cache_key]
-
-        clipped = raw
-        max_chars = self._openai_max_chars()
-        if len(clipped) > max_chars:
-            clipped = clipped[: max_chars - 3] + "..."
-
-        if kind == "steps":
-            sys_prompt = (
-                "Rewrite deal steps for clarity and actionability.\n"
-                "- Keep all URLs unchanged.\n"
-                "- Keep promo codes unchanged.\n"
-                "- Output a short numbered list.\n"
-                "- Do not invent steps.\n"
-            )
-        else:
-            sys_prompt = (
-                "Rewrite deal info for clarity.\n"
-                "- Keep all URLs unchanged.\n"
-                "- Keep promo codes/numbers unchanged.\n"
-                "- Do not add claims.\n"
-                "- Keep it brief.\n"
-            )
-
-        model = self._openai_model()
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": clipped},
-            ],
-            "temperature": 0.2,
-        }
-
-        try:
-            import aiohttp
-
-            self._openai_last_mode[kind] = "api_call"
-            self._openai_stats["api_call"] = int(self._openai_stats.get("api_call", 0) or 0) + 1
-            headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-            timeout_s = self._openai_timeout_s()
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_s)) as session:
-                async with session.post("https://api.openai.com/v1/chat/completions", json=payload, headers=headers) as resp:
-                    txt = await resp.text(errors="replace")
-                    if int(resp.status) >= 400:
-                        self._openai_last_mode[kind] = f"api_http_{int(resp.status)}"
-                        self._openai_stats["api_fail"] = int(self._openai_stats.get("api_fail", 0) or 0) + 1
-                        return raw
-                    data = json.loads(txt) if txt else {}
-                    out = ""
-                    try:
-                        out = (((data or {}).get("choices") or [])[0] or {}).get("message", {}).get("content", "") or ""
-                    except Exception:
-                        out = ""
-                    out = str(out).strip()
-                    if not out:
-                        self._openai_last_mode[kind] = "api_empty"
-                        self._openai_stats["api_fail"] = int(self._openai_stats.get("api_fail", 0) or 0) + 1
-                        return raw
-                    # Safety: prevent pings
-                    out = self._neutralize_mentions(out)
-                    self._openai_cache[cache_key] = out
-                    self._openai_last_mode[kind] = "api_ok"
-                    self._openai_stats["api_ok"] = int(self._openai_stats.get("api_ok", 0) or 0) + 1
-                    return out
-        except Exception:
-            self._openai_last_mode[kind] = "api_exc"
-            self._openai_stats["api_fail"] = int(self._openai_stats.get("api_fail", 0) or 0) + 1
-            return raw
 
     def _journal_source_mapping_line(self, source_channel_id: int) -> str:
         """Human-readable routing line for logs: <#src> → <#dest> (Discord clients render mentions)."""
@@ -2734,10 +2600,6 @@ class InstorebotForwarder:
         delay_s = self._startup_smoketest_send_delay_s()
         out_id = self._startup_smoketest_output_channel_id()
 
-        # Reset per-run OpenAI stats (so startup logs tell you exactly what was used this boot)
-        self._openai_stats = {}
-        self._openai_last_mode = {}
-
         log.info("-------- Startup Smoke Test --------")
         log.info("[BOOT][SMOKE] target_count=%s scan_limit_per_channel=%s output_channel_id=%s", count, scan_limit, out_id or "")
 
@@ -2822,11 +2684,9 @@ class InstorebotForwarder:
                         try:
                             scrape_ok = ((meta or {}).get("ctx") or {}).get("scrape_ok", "")
                             scrape_err = ((meta or {}).get("ctx") or {}).get("scrape_err", "")
-                            openai_steps = ((meta or {}).get("ctx") or {}).get("openai_steps_mode", "")
                         except Exception:
                             scrape_ok = ""
                             scrape_err = ""
-                            openai_steps = ""
                         # Commit de-dupe on successful send
                         try:
                             asin = str(((meta.get("amazon") or {}) if isinstance(meta.get("amazon"), dict) else {}).get("asin") or "").strip().upper()
@@ -2834,7 +2694,7 @@ class InstorebotForwarder:
                             asin = ""
                         if bool(meta.get("dedupe_reserved")) and asin:
                             self._dedupe_commit(asin)
-                        log.info("[BOOT][SMOKE] SEND_OK %s/%s msg=%s scrape_ok=%s openai_steps=%s scrape_err=%s", sent, count, getattr(msg, "id", ""), scrape_ok, openai_steps, (scrape_err or "")[:120])
+                        log.info("[BOOT][SMOKE] SEND_OK %s/%s msg=%s scrape_ok=%s scrape_err=%s", sent, count, getattr(msg, "id", ""), scrape_ok, (scrape_err or "")[:120])
                     except Exception as e:
                         log.info("[BOOT][SMOKE] SEND_FAIL msg=%s err=%s", getattr(msg, "id", ""), str(e)[:200])
                         # Release de-dupe reservation if we failed to send.
@@ -2854,7 +2714,6 @@ class InstorebotForwarder:
 
         if sent < count:
             log.warning("[BOOT][SMOKE] Completed with only %s/%s messages found that contain usable Amazon links.", sent, count)
-        log.info("[BOOT][SMOKE] OPENAI stats=%s", json.dumps(self._openai_stats or {}, ensure_ascii=True))
         log.info("[BOOT][SMOKE] DEDUPE skipped=%s ttl_s=%s", int(self._dedupe_skipped or 0), int(self._dedupe_asin_ttl_s()))
 
     def _strip_urls_from_text(self, text: str) -> str:
@@ -4256,286 +4115,6 @@ class InstorebotForwarder:
         raw = m.get(str(int(src_channel_id))) or m.get(int(src_channel_id)) or None
         return raw if isinstance(raw, dict) else None
 
-    def _extract_stockx_url(self, text: str) -> str:
-        """Extract first StockX product URL from text (e.g. https://stockx.com/nike-air-max-90-...)."""
-        if not text:
-            return ""
-        # Match stockx.com/... product paths (skip /search, /about, etc.)
-        m = re.search(r"https?://(?:www\.)?stockx\.com/(?!search|about|sitemap|help|login|api)([^\s\)\]\"'<>]+)", text, re.I)
-        if m:
-            path = (m.group(1) or "").strip().rstrip(".,;")
-            return f"https://stockx.com/{path}"
-        return ""
-
-    def _find_product_in_next_data(self, obj: Any, url: str) -> Optional[Dict[str, Any]]:
-        """Recursively find a product object (has 'variants' list and 'market') in Next.js JSON."""
-        candidates: List[Dict[str, Any]] = []
-
-        def _collect(o: Any) -> None:
-            if not o:
-                return
-            if isinstance(o, dict):
-                if "variants" in o and isinstance(o.get("variants"), list) and "market" in o:
-                    candidates.append(o)
-                for v in o.values():
-                    _collect(v)
-            elif isinstance(o, list):
-                for item in o:
-                    _collect(item)
-
-        _collect(obj)
-        url_lower = url.lower()
-        for c in candidates:
-            url_key = str((c.get("urlKey") or c.get("url_key") or "")).strip()
-            if url_key and url_key.lower() in url_lower:
-                return c
-        return candidates[0] if candidates else None
-
-    def _is_stockx_challenge_page(self, html: str) -> bool:
-        """Detect Cloudflare or bot challenge page (no __NEXT_DATA__)."""
-        if not html or "__NEXT_DATA__" in html:
-            return False
-        low = html.lower()
-        return "just a moment" in low or "challenge" in low and "cf_chl" in low
-
-    def _fetch_stockx_page_playwright_sync(self, url: str) -> Optional[str]:
-        """Sync Playwright load for StockX. Tries to get past Cloudflare by waiting for __NEXT_DATA__ (Turnstile can auto-resolve after 10–20s)."""
-        try:
-            from playwright.sync_api import sync_playwright
-        except Exception:
-            return None
-        timeout_ms = 60000
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-web-security",
-                ],
-            )
-            try:
-                context = browser.new_context(
-                    viewport={"width": 1280, "height": 720},
-                    user_agent=self._scrape_user_agent(),
-                    locale="en-US",
-                    java_script_enabled=True,
-                )
-                page = context.new_page()
-                page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-                # Poll for __NEXT_DATA__: Turnstile often auto-resolves after 10–20s
-                for _ in range(14):
-                    page.wait_for_timeout(2000)
-                    html = page.content()
-                    if "__NEXT_DATA__" in html:
-                        return html
-                    try:
-                        page.wait_for_selector("script#__NEXT_DATA__", timeout=2000)
-                        return page.content()
-                    except Exception:
-                        pass
-                return page.content()
-            finally:
-                browser.close()
-
-    async def _fetch_stockx_page_playwright_async(self, url: str) -> Optional[str]:
-        """Async Playwright with optional stealth (pip install playwright-stealth). Tries to get past Cloudflare."""
-        try:
-            from playwright.async_api import async_playwright
-        except Exception:
-            return None
-        stealth_p = None
-        try:
-            from playwright_stealth import Stealth
-            stealth_p = Stealth()
-        except Exception:
-            pass
-        timeout_ms = 60000
-        try:
-            if stealth_p is not None:
-                async with stealth_p.use_async(async_playwright()) as p:
-                    return await self._fetch_stockx_page_playwright_async_impl(p, url, timeout_ms)
-            async with async_playwright() as p:
-                return await self._fetch_stockx_page_playwright_async_impl(p, url, timeout_ms)
-        except Exception:
-            return None
-
-    async def _fetch_stockx_page_playwright_async_impl(self, p: Any, url: str, timeout_ms: int) -> Optional[str]:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"],
-        )
-        try:
-            context = await browser.new_context(
-                viewport={"width": 1280, "height": 720},
-                user_agent=self._scrape_user_agent(),
-                locale="en-US",
-                java_script_enabled=True,
-            )
-            page = await context.new_page()
-            await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-            for _ in range(14):
-                await asyncio.sleep(2)
-                html = await page.content()
-                if "__NEXT_DATA__" in html:
-                    return html
-                try:
-                    await page.wait_for_selector("script#__NEXT_DATA__", timeout=2000)
-                    return await page.content()
-                except Exception:
-                    pass
-            return await page.content()
-        finally:
-            await browser.close()
-
-    async def _fetch_stockx_product(self, url: str) -> Optional[Dict[str, Any]]:
-        """Fetch StockX product page and parse __NEXT_DATA__ for product + variants (title, SKU, market, size table)."""
-        try:
-            import aiohttp
-            from bs4 import BeautifulSoup
-        except Exception:
-            return None
-        timeout_s = float((self.config or {}).get("stockx_scrape_timeout_s") or 15)
-        headers = {
-            "User-Agent": self._scrape_user_agent(),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-        html = ""
-        try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_s)) as session:
-                async with session.get(url, headers=headers, allow_redirects=True) as resp:
-                    if resp.status >= 400:
-                        return None
-                    html = await resp.text(errors="ignore")
-        except Exception:
-            pass
-        if self._is_stockx_challenge_page(html) and self._playwright_enabled():
-            try:
-                html = await self._fetch_stockx_page_playwright_async(url) or html
-            except Exception:
-                pass
-            # Sync fallback when we still don't have product data (async failed or still challenge)
-            if "__NEXT_DATA__" not in (html or ""):
-                try:
-                    html = await asyncio.to_thread(self._fetch_stockx_page_playwright_sync, url) or html
-                except Exception:
-                    pass
-        if not html:
-            return None
-        soup = BeautifulSoup(html, "html.parser")
-        script = soup.find("script", id="__NEXT_DATA__")
-        raw_json: Optional[str] = None
-        if script and script.string:
-            raw_json = script.string.strip()
-        if not raw_json:
-            alt = soup.find("script", attrs={"data-name": "query"})
-            if alt and alt.string and "__NEXT_DATA__" in (alt.string or ""):
-                raw_json = (alt.string or "").split("=", 1)[-1].strip().rstrip(";").strip()
-            if not raw_json and alt and alt.string and "REACT_QUERY" in (alt.string or ""):
-                raw_json = (alt.string or "").split("=", 1)[-1].strip().rstrip(";").strip()
-        if not raw_json:
-            return None
-        try:
-            data = json.loads(raw_json)
-        except Exception:
-            return None
-        product = self._find_product_in_next_data(data, url)
-        if not product:
-            return None
-        # Normalize to a simple structure: title, sku, image_url, lowest_ask, highest_bid, variants
-        market = product.get("market") or {}
-        bid_ask = (market.get("bidAskData") or market.get("state") or {})
-        if isinstance(bid_ask, dict) and "lowestAsk" in bid_ask:
-            la = bid_ask.get("lowestAsk")
-            lowest_ask = int(la) if isinstance(la, (int, float)) else (int(la.get("amount", 0)) if isinstance(la, dict) else None)
-        else:
-            lowest_ask = bid_ask.get("lowestAsk") if isinstance(bid_ask.get("lowestAsk"), (int, float)) else None
-        if isinstance(bid_ask, dict) and "highestBid" in bid_ask:
-            hb = bid_ask.get("highestBid")
-            highest_bid = int(hb) if isinstance(hb, (int, float)) else (int(hb.get("amount", 0)) if isinstance(hb, dict) else None)
-        else:
-            highest_bid = bid_ask.get("highestBid") if isinstance(bid_ask.get("highestBid"), (int, float)) else None
-        title = str((product.get("title") or product.get("name") or product.get("shortDescription") or "")).strip()
-        sku = str((product.get("styleId") or product.get("sku") or product.get("traits", {}).get("Style Code") or "")).strip()
-        image_url = ""
-        try:
-            img = product.get("imageUrl") or (product.get("media", {}) or {}).get("imageUrl") or (product.get("images") or [{}])[0]
-            image_url = img.get("url", img) if isinstance(img, dict) else str(img or "")
-        except Exception:
-            pass
-        variants: List[Dict[str, Any]] = []
-        for v in (product.get("variants") or []):
-            traits = v.get("traits") or {}
-            size = str((traits.get("size") or traits.get("Size") or "")).strip()
-            m = v.get("market") or {}
-            ba = m.get("bidAskData") or m.get("state") or m
-            la = ba.get("lowestAsk")
-            lask = int(la) if isinstance(la, (int, float)) else (int(la.get("amount", 0)) if isinstance(la, dict) else None)
-            hb = ba.get("highestBid")
-            hbid = int(hb) if isinstance(hb, (int, float)) else (int(hb.get("amount", 0)) if isinstance(hb, dict) else None)
-            sales_info = m.get("salesInformation") or m.get("sales_info") or {}
-            sales = sales_info.get("salesLast72Hours") or sales_info.get("lastSale")
-            if isinstance(sales, dict):
-                sales = sales.get("amount") or sales.get("count")
-            sale_count = int(sales) if isinstance(sales, (int, float)) else None
-            variants.append({"size": size or "—", "sale": sale_count, "lowest_ask": lask, "highest_bid": hbid})
-        return {
-            "title": title or "StockX",
-            "sku": sku,
-            "image_url": image_url,
-            "lowest_ask": lowest_ask,
-            "highest_bid": highest_bid,
-            "url": url,
-            "variants": variants,
-        }
-
-    def _stockx_product_to_embed(self, data: Dict[str, Any]) -> Optional[discord.Embed]:
-        """Build a Discord embed similar to the StockX monitor style: title, SKU, L Ask / H Bid, size table."""
-        if not data:
-            return None
-        title = str((data.get("title") or "StockX")).strip()[:256]
-        sku = str((data.get("sku") or "")).strip()
-        lowest_ask = data.get("lowest_ask")
-        highest_bid = data.get("highest_bid")
-        url = str((data.get("url") or "")).strip()
-        variants = data.get("variants") or []
-        embed = discord.Embed(
-            title=title,
-            url=url or None,
-            color=0x00FF00,
-            timestamp=datetime.now(timezone.utc),
-        )
-        if data.get("image_url"):
-            embed.set_thumbnail(url=data["image_url"])
-        if sku:
-            embed.add_field(name="SKU", value=sku, inline=True)
-        low_str = f"${lowest_ask}" if isinstance(lowest_ask, (int, float)) else "N/A"
-        high_str = f"${highest_bid}" if isinstance(highest_bid, (int, float)) else "N/A"
-        embed.add_field(name="Lowest Ask", value=low_str, inline=True)
-        embed.add_field(name="Highest Bid", value=high_str, inline=True)
-        if variants:
-            def _size_sort_key(v: Dict[str, Any]) -> float:
-                s = str((v.get("size") or "")).strip().replace("—", "")
-                try:
-                    return float(s) if s else 999.0
-                except ValueError:
-                    return 999.0
-            lines = ["Size | Sale | L Ask | H Bid", "—" * 4]
-            for v in sorted(variants, key=_size_sort_key):
-                size = v.get("size") or "—"
-                sale = v.get("sale") if v.get("sale") is not None else "N/A"
-                lask = f"${v['lowest_ask']}" if isinstance(v.get("lowest_ask"), (int, float)) else "N/A"
-                hbid = f"${v['highest_bid']}" if isinstance(v.get("highest_bid"), (int, float)) else "N/A"
-                lines.append(f"{size} | {sale} | {lask} | {hbid}")
-            table = "\n".join(lines[:25])
-            if len(table) > 1024:
-                table = table[:1020] + "…"
-            embed.add_field(name="Size chart", value=f"```\n{table}\n```", inline=False)
-        embed.set_footer(text="StockX data · Reselling Secrets")
-        return embed
-
     def _simple_extract_shop_link(self, text: str) -> str:
         s = (text or "").strip()
         if not s:
@@ -4934,22 +4513,8 @@ class InstorebotForwarder:
         if len(out) > 1950:
             out = out[:1940] + "…"
 
-        embeds: List[discord.Embed] = []
-        mapping = self._simple_forward_mapping_for_channel(buf.src_channel_id)
-        if mapping and mapping.get("enrich_stockx"):
-            stockx_url = self._extract_stockx_url(out)
-            if stockx_url:
-                try:
-                    product_data = await self._fetch_stockx_product(stockx_url)
-                    if product_data:
-                        ex = self._stockx_product_to_embed(product_data)
-                        if ex:
-                            embeds.append(ex)
-                except Exception as e:
-                    log.debug("StockX enrich failed: %s", str(e)[:120])
-
         try:
-            await ch.send(content=out, embeds=embeds if embeds else None, allowed_mentions=discord.AllowedMentions.none())
+            await ch.send(content=out, allowed_mentions=discord.AllowedMentions.none())
             self._log_message_forward_summary(
                 src_channel_id=int(buf.src_channel_id),
                 dest_channel_id=int(buf.dest_channel_id),
@@ -5566,18 +5131,8 @@ class InstorebotForwarder:
         elif steps_block:
             _log_flow("STEPS_URLS_SKIP", reason="disabled")
 
-        # Optional OpenAI rephrase (only if key present/enabled and source text exists)
-        if steps_block_rewritten:
-            steps_rephrased = await self._openai_rephrase("steps", steps_block_rewritten)
-            openai_steps_mode = self._openai_last_mode.get("steps", "")
-        else:
-            steps_rephrased = ""
-            openai_steps_mode = "skip_no_steps"
-
-        # IMPORTANT: we currently do not display info text in the RS card output,
-        # so do NOT spend OpenAI usage rewriting it.
+        steps_rephrased = steps_block_rewritten if steps_block_rewritten else ""
         info_rephrased = info_raw
-        openai_info_mode = "skip_unused"
 
         # Optional combined block (kept for compatibility with older templates).
         promo_steps_parts: List[str] = []
@@ -6077,8 +5632,6 @@ class InstorebotForwarder:
             "info_rephrased": info_rephrased,
             "promo_steps": promo_steps,
             "card_body": card_body,
-            "openai_steps_mode": openai_steps_mode,
-            "openai_info_mode": openai_info_mode,
             "ebay_comps_url": ebay_comps_url,
             "ebay_sold_new": ebay_sold_new,
             "ebay_sold_pre_owned": ebay_sold_pre_owned,
