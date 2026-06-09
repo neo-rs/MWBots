@@ -29,7 +29,7 @@ Instorebotforwarder scans configured source channels for Amazon links (including
 - **Description**: Render a template preview (ephemeral) using placeholder/enriched context.
 - **Parameters**:
   - `route`: `personal`, `grocery`, `deals`, `default`, `enrich_failed`
-  - `asin`: Optional ASIN (defaults to `startup_test_asin`)
+  - `asin`: Optional ASIN (defaults to `embed_preview_default_asin`)
 - **Admin Only**: Yes (administrator in a server)
 - **Returns**: Ephemeral embed preview + debug header
 
